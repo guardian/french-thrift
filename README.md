@@ -25,6 +25,13 @@ brew install openssl
 brew link openssl --force
 ```
 
+Launch the generation of the configure script
+
+```shell
+ $ ./bootsrap.sh
+```
+
+
 Configure without the target you don't need, i.e
 
 ```shell
