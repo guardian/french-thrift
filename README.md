@@ -19,6 +19,7 @@ Install depedencies and build tools
 brew install libtool
 brew install autoconf
 brew install automake
+brew install pkg-config
 brew install bison
 brew link bison --force
 brew install openssl
@@ -28,7 +29,7 @@ brew link openssl --force
 Launch the generation of the configure script
 
 ```shell
- $ ./bootsrap.sh
+ $ ./bootstrap.sh
 ```
 
 
