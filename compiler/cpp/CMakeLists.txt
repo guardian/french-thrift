@@ -76,7 +76,6 @@ THRIFT_ADD_COMPILER(as3     "Enable compiler for ActionScript 3" ON)
 THRIFT_ADD_COMPILER(c_glib  "Enable compiler for C with Glib" ON)
 THRIFT_ADD_COMPILER(cl      "Enable compiler for Common LISP" ON)
 THRIFT_ADD_COMPILER(cpp     "Enable compiler for C++" ON)
-THRIFT_ADD_COMPILER(csharp  "Enable compiler for C#" ON)
 THRIFT_ADD_COMPILER(d       "Enable compiler for D" ON)
 THRIFT_ADD_COMPILER(dart    "Enable compiler for Dart" ON)
 THRIFT_ADD_COMPILER(delphi  "Enable compiler for Delphi" ON)
@@ -115,10 +114,6 @@ set_target_properties(thrift-compiler PROPERTIES RUNTIME_OUTPUT_DIRECTORY bin/)
 set_target_properties(thrift-compiler PROPERTIES OUTPUT_NAME thrift)
 
 target_link_libraries(thrift-compiler parse)
-
-add_custom_command(TARGET thrift-compiler POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/compiler/cpp"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/bin/thrift${CMAKE_EXECUTABLE_SUFFIX}" "${CMAKE_SOURCE_DIR}/compiler/cpp/")
 
 install(TARGETS thrift-compiler DESTINATION bin)
 
