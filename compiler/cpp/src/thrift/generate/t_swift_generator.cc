@@ -2635,7 +2635,7 @@ void t_swift_generator::generate_swift_service_server_async_implementation(ostre
       if (!tfunction->get_returntype()->is_void()) {
         out << "result.success = ";
       }
-      out << "asyncResult.value()" << endl;
+      out << "asyncResult.get()" << endl;
       indent_down();
       out << indent() << "} catch let error as TApplicationError";
       block_open(out);
@@ -3056,8 +3056,8 @@ void t_swift_generator::async_function_docstring(ostream& out, t_function* tfunc
     }
 
     // completion
-    indent(out) << "///   - completion: TAsyncResult<" << type_name(tfunction->get_returntype())
-                << "> wrapping return and following Exceptions: ";
+    indent(out) << "///   - completion: Result<" << type_name(tfunction->get_returntype())
+                << ", Error> wrapping return and following Exceptions: ";
     t_struct* xs = tfunction->get_xceptions();
     const vector<t_field*>& xceptions = xs->get_members();
     vector<t_field*>::const_iterator x_iter;
@@ -3082,9 +3082,9 @@ string t_swift_generator::async_function_signature(t_function* tfunction) {
   string result = "func " + (gen_cocoa_ ? function_name(tfunction) : tfunction->get_name());
 
   if (!gen_cocoa_) {
-    string response_string = "(TAsyncResult<";
+    string response_string = "(Result<";
     response_string += (ttype->is_void()) ? "Void" : type_name(ttype);
-    response_string += ">) -> Void";
+    response_string += ", Error>) -> Void";
     result += "(" + argument_list(tfunction->get_arglist(), "", false)
             + (targlist->get_members().size() ? ", " : "")
             + "completion: @escaping " + response_string + ")";
