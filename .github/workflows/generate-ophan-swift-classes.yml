@@ -1,0 +1,15 @@
+on:
+  push:
+    branches:    
+    - mobile-apps 
+    paths:
+    - 'compiler/cpp/src/thrift/generate/t_swift_generator.cc'
+
+jobs:
+  generate-ophan-swift-classes:
+    runs-on: ubuntu-latest
+    name: Generate Ophan Swift Classes
+    steps:
+      - uses: guardian/ophan-thrift-swift@master
+        with:
+          personal-access-token: ${{ secrets.OphanThriftSwiftAccessToken }}
