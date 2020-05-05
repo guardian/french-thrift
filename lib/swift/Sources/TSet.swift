@@ -29,14 +29,12 @@ public struct TSet<Element : TSerializable & Hashable> : SetAlgebra, Hashable, C
   
   
   /// Mark: Collection
-  
-  public typealias Indices = Storage.Indices
   public typealias Index = Storage.Index
   public typealias IndexDistance = Int
   public typealias SubSequence = Storage.SubSequence
   
   
-  public var indices: Indices { return storage.indices }
+  public var indices: Storage.Indices { return storage.indices }
   
   // Must implement isEmpty even though both SetAlgebra and Collection provide it due to their conflciting default implementations
   public var isEmpty: Bool { return storage.isEmpty }
