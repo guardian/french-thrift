@@ -32,7 +32,7 @@
   },
   "dependencies": {
     "node-int64": "~0.3.0",
-    "q": "1.0.x",
+    "q": "1.5.1",
     "ws": "~0.4.32"
   },
   "devDependencies": {
