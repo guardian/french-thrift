@@ -21,15 +21,20 @@ package thrift
 
 import (
 	"context"
+	"fmt"
 	"io"
-	"io/ioutil"
+	"strings"
 	"testing"
+	"testing/iotest"
+	"testing/quick"
 )
 
-func TestTHeaderHeadersReadWrite(t *testing.T) {
+func testTHeaderHeadersReadWriteProtocolID(t *testing.T, protoID THeaderProtocolID) {
 	trans := NewTMemoryBuffer()
 	reader := NewTHeaderTransport(trans)
-	writer := NewTHeaderTransport(trans)
+	writer := NewTHeaderTransportConf(trans, &TConfiguration{
+		THeaderProtocolID: &protoID,
+	})
 
 	const key1 = "key1"
 	const value1 = "value1"
@@ -76,17 +81,17 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	// Read
 
 	// Make sure multiple calls to ReadFrame is fine.
-	if err := reader.ReadFrame(); err != nil {
+	if err := reader.ReadFrame(context.Background()); err != nil {
 		t.Errorf("reader.ReadFrame returned error: %v", err)
 	}
-	if err := reader.ReadFrame(); err != nil {
+	if err := reader.ReadFrame(context.Background()); err != nil {
 		t.Errorf("reader.ReadFrame returned error: %v", err)
 	}
-	read, err := ioutil.ReadAll(reader)
+	read, err := io.ReadAll(reader)
 	if err != nil {
 		t.Errorf("Read returned error: %v", err)
 	}
-	if err := reader.ReadFrame(); err != nil && err != io.EOF {
+	if err := reader.ReadFrame(context.Background()); err != nil && err != io.EOF {
 		t.Errorf("reader.ReadFrame returned error: %v", err)
 	}
 	if string(read) != payload1+payload2 {
@@ -96,10 +101,10 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 			read,
 		)
 	}
-	if prot := reader.Protocol(); prot != THeaderProtocolBinary {
+	if prot := reader.Protocol(); prot != protoID {
 		t.Errorf(
 			"reader.Protocol() expected %d, got %d",
-			THeaderProtocolBinary,
+			protoID,
 			prot,
 		)
 	}
@@ -119,6 +124,18 @@ func TestTHeaderHeadersReadWrite(t *testing.T) {
 	}
 }
 
+func TestTHeaderHeadersReadWrite(t *testing.T) {
+	for label, id := range map[string]THeaderProtocolID{
+		"default": THeaderProtocolDefault,
+		"binary":  THeaderProtocolBinary,
+		"compact": THeaderProtocolCompact,
+	} {
+		t.Run(label, func(t *testing.T) {
+			testTHeaderHeadersReadWriteProtocolID(t, id)
+		})
+	}
+}
+
 func TestTHeaderTransportNoDoubleWrapping(t *testing.T) {
 	trans := NewTMemoryBuffer()
 	orig := NewTHeaderTransport(trans)
@@ -127,4 +144,234 @@ func TestTHeaderTransportNoDoubleWrapping(t *testing.T) {
 	if wrapped != orig {
 		t.Errorf("NewTHeaderTransport double wrapped THeaderTransport")
 	}
+}
+
+func TestTHeaderTransportNoReadBeyondFrame(t *testing.T) {
+	trans := NewTMemoryBuffer()
+	writeContent := func(writer TTransport, content string) error {
+		if _, err := io.Copy(writer, strings.NewReader(content)); err != nil {
+			return err
+		}
+		if err := writer.Flush(context.Background()); err != nil {
+			return err
+		}
+		return nil
+	}
+	f := func(content string) bool {
+		trans.Reset()
+		if len(content) == 0 {
+			return true
+		}
+
+		reader := NewTHeaderTransport(trans)
+		writer := NewTHeaderTransport(trans)
+		// Write content twice
+		if err := writeContent(writer, content); err != nil {
+			t.Error(err)
+		}
+		if err := writeContent(writer, content); err != nil {
+			t.Error(err)
+		}
+		// buf is big enough to read both content out,
+		// but it shouldn't read beyond the first one in a single Read call.
+		buf := make([]byte, len(content)*3)
+		read, err := reader.Read(buf)
+		if err != nil {
+			t.Error(err)
+		}
+		if read == 0 || read > len(content) {
+			t.Errorf(
+				"Expected read in no more than %d:%q, got %d:%q",
+				len(content),
+				content,
+				read,
+				buf[:read],
+			)
+		}
+
+		// Check for endOfFrame handling
+		if !reader.needReadFrame() {
+			t.Error("Expected needReadFrame to be true after read the frame fully, got false")
+		}
+		return !t.Failed()
+	}
+	if err := quick.Check(f, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestTHeaderTransportEndOfFrameHandling(t *testing.T) {
+	trans := NewTMemoryBuffer()
+	writeContent := func(writer TTransport, content string) error {
+		if _, err := io.Copy(writer, strings.NewReader(content)); err != nil {
+			return err
+		}
+		if err := writer.Flush(context.Background()); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	readFully := func(content string) bool {
+		trans.Reset()
+		if len(content) == 0 {
+			return true
+		}
+
+		reader := NewTHeaderTransport(trans)
+		writer := NewTHeaderTransport(trans)
+		// Write content
+		if err := writeContent(writer, content); err != nil {
+			t.Error(err)
+		}
+		buf := make([]byte, len(content))
+		_, err := reader.Read(buf)
+		if err != nil {
+			t.Error(err)
+		}
+		if !reader.needReadFrame() {
+			t.Error("Expected needReadFrame to be true after read the frame fully, got false")
+		}
+		return !t.Failed()
+	}
+	if err := quick.Check(readFully, nil); err != nil {
+		t.Error(err)
+	}
+
+	readPartially := func(content string) bool {
+		trans.Reset()
+		if len(content) < 1 {
+			return true
+		}
+
+		reader := NewTHeaderTransport(trans)
+		writer := NewTHeaderTransport(trans)
+		// Write content
+		if err := writeContent(writer, content); err != nil {
+			t.Error(err)
+		}
+		// Make the buf smaller so it can't read fully
+		buf := make([]byte, len(content)-1)
+		_, err := reader.Read(buf)
+		if err != nil {
+			t.Error(err)
+		}
+		if reader.needReadFrame() {
+			t.Error("Expected needReadFrame to be false before read the frame fully, got true")
+		}
+		return !t.Failed()
+	}
+	if err := quick.Check(readPartially, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+func BenchmarkTHeaderProtocolIDValidate(b *testing.B) {
+	for _, c := range []THeaderProtocolID{
+		THeaderProtocolBinary,
+		THeaderProtocolCompact,
+		-1,
+	} {
+		b.Run(fmt.Sprintf("%2v", c), func(b *testing.B) {
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					c.Validate()
+				}
+			})
+		})
+	}
+}
+
+func TestSetTHeaderTransportProtocolID(t *testing.T) {
+	const expected = THeaderProtocolCompact
+	factory := NewTHeaderTransportFactoryConf(nil, &TConfiguration{
+		THeaderProtocolID: THeaderProtocolIDPtrMust(expected),
+	})
+	buf := NewTMemoryBuffer()
+	trans, err := factory.GetTransport(buf)
+	if err != nil {
+		t.Fatalf("Failed to get transport from factory: %v", err)
+	}
+	ht, ok := trans.(*THeaderTransport)
+	if !ok {
+		t.Fatalf("Transport is not *THeaderTransport: %#v", trans)
+	}
+	if actual := ht.Protocol(); actual != expected {
+		t.Errorf("Expected protocol id %v, got %v", expected, actual)
+	}
+
+	ht.SetTConfiguration(&TConfiguration{})
+	if actual := ht.Protocol(); actual != expected {
+		t.Errorf("Expected protocol id %v, got %v", expected, actual)
+	}
+}
+
+func TestTHeaderTransportReuseTransport(t *testing.T) {
+	const (
+		content = "Hello, world!"
+		n       = 10
+	)
+	trans := NewTMemoryBuffer()
+	reader := NewTHeaderTransport(trans)
+	writer := NewTHeaderTransport(trans)
+
+	t.Run("pair", func(t *testing.T) {
+		for i := 0; i < n; i++ {
+			// write
+			if _, err := io.Copy(writer, strings.NewReader(content)); err != nil {
+				t.Fatalf("Failed to write on #%d: %v", i, err)
+			}
+			if err := writer.Flush(context.Background()); err != nil {
+				t.Fatalf("Failed to flush on #%d: %v", i, err)
+			}
+
+			// read
+			read, err := io.ReadAll(iotest.OneByteReader(reader))
+			if err != nil {
+				t.Errorf("Failed to read on #%d: %v", i, err)
+			}
+			if string(read) != content {
+				t.Errorf("Read #%d: want %q, got %q", i, content, read)
+			}
+		}
+	})
+
+	t.Run("batched", func(t *testing.T) {
+		// write
+		for i := 0; i < n; i++ {
+			if _, err := io.Copy(writer, strings.NewReader(content)); err != nil {
+				t.Fatalf("Failed to write on #%d: %v", i, err)
+			}
+			if err := writer.Flush(context.Background()); err != nil {
+				t.Fatalf("Failed to flush on #%d: %v", i, err)
+			}
+		}
+
+		// read
+		for i := 0; i < n; i++ {
+			const (
+				size = len(content)
+			)
+			var buf []byte
+			var err error
+			if i%2 == 0 {
+				// on even calls, use OneByteReader to make
+				// sure that small reads are fine
+				buf, err = io.ReadAll(io.LimitReader(iotest.OneByteReader(reader), int64(size)))
+			} else {
+				// on odd calls, make sure that we don't read
+				// more than written per frame
+				buf = make([]byte, size*2)
+				var n int
+				n, err = reader.Read(buf)
+				buf = buf[:n]
+			}
+			if err != nil {
+				t.Errorf("Failed to read on #%d: %v", i, err)
+			}
+			if string(buf) != content {
+				t.Errorf("Read #%d: want %q, got %q", i, content, buf)
+			}
+		}
+	})
 }

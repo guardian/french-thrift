@@ -21,7 +21,6 @@ import Foundation
 
 
 public protocol TSerializable {
-  var hashValue: Int { get }
 
   /// TType for instance
   static var thriftType: TType { get }
@@ -43,10 +42,6 @@ extension TSerializable {
   public var thriftType: TType { return Self.thriftType }
 }
 
-public func ==<T>(lhs: T, rhs: T) -> Bool where T : TSerializable {
-  return lhs.hashValue == rhs.hashValue
-}
-
 /// Default read/write for primitave Thrift types:
 /// Bool, Int8 (byte), Int16, Int32, Int64, Double, String
 
@@ -66,11 +61,11 @@ extension Int8 : TSerializable {
   public static var thriftType: TType { return .i8 }
 
   public static func read(from proto: TProtocol) throws -> Int8 {
-    return Int8(try proto.read() as UInt8)
+    return try proto.read() as Int8
   }
 
   public func write(to proto: TProtocol) throws {
-    try proto.write(UInt8(self))
+    try proto.write(Int8(self))
   }
 }
 
@@ -130,6 +125,18 @@ extension String : TSerializable {
     return try proto.read()
   }
 
+  public func write(to proto: TProtocol) throws {
+    try proto.write(self)
+  }
+}
+
+extension UUID : TSerializable {
+  public static var thriftType: TType { .uuid }
+  
+  public static func read(from proto: TProtocol) throws -> UUID {
+    return try proto.read()
+  }
+  
   public func write(to proto: TProtocol) throws {
     try proto.write(self)
   }

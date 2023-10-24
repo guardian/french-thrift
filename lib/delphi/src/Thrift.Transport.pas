@@ -45,10 +45,6 @@ uses
   Thrift.WinHTTP,
   Thrift.Stream;
 
-const
-  DEFAULT_MAX_MESSAGE_SIZE = 100 * 1024 * 1024; // 100 MB
-  DEFAULT_THRIFT_TIMEOUT = 5 * 1000; // ms
-
 type
   IStreamTransport = interface;
 
@@ -110,7 +106,7 @@ type
     function  MaxMessageSize : Integer;
     property  RemainingMessageSize : Int64 read FRemainingMessageSize;
     property  KnownMessageSize : Int64 read FKnownMessageSize;
-    procedure ResetConsumedMessageSize( const newSize : Int64 = -1); inline;
+    procedure ResetConsumedMessageSize( const newSize : Int64 = -1);
     procedure UpdateKnownMessageSize(const size : Int64); override;
     procedure CheckReadBytesAvailable(const numBytes : Int64); inline;
     procedure CountConsumedMessageBytes(const numBytes : Int64); inline;
@@ -334,8 +330,8 @@ type
   strict private
     FStream : IThriftStream;
     FBufSize : Integer;
-    FReadBuffer : TMemoryStream;
-    FWriteBuffer : TMemoryStream;
+    FReadBuffer : TThriftMemoryStream;
+    FWriteBuffer : TThriftMemoryStream;
   strict protected
     procedure Write( const pBuf : Pointer; offset: Integer; count: Integer); override;
     function Read( const pBuf : Pointer; const buflen : Integer; offset: Integer; count: Integer): Integer; override;
@@ -450,8 +446,8 @@ type
   strict protected type
     TFramedHeader = Int32;
   strict protected
-    FWriteBuffer : TMemoryStream;
-    FReadBuffer : TMemoryStream;
+    FWriteBuffer : TThriftMemoryStream;
+    FReadBuffer : TThriftMemoryStream;
 
     procedure InitWriteBuffer;
     procedure ReadFrame;
@@ -600,7 +596,7 @@ end;
 procedure TEndpointTransportBase.CheckReadBytesAvailable( const numBytes : Int64);
 // Throws if there are not enough bytes in the input stream to satisfy a read of numBytes bytes of data
 begin
-  if RemainingMessageSize < numBytes
+  if (RemainingMessageSize < numBytes) or (numBytes < 0)
   then raise TTransportExceptionEndOfFile.Create('MaxMessageSize reached');
 end;
 
@@ -608,7 +604,7 @@ end;
 procedure TEndpointTransportBase.CountConsumedMessageBytes( const numBytes : Int64);
 // Consumes numBytes from the RemainingMessageSize.
 begin
-  if (RemainingMessageSize >= numBytes)
+  if (RemainingMessageSize >= numBytes) and (numBytes >= 0)
   then Dec( FRemainingMessageSize, numBytes)
   else begin
     FRemainingMessageSize := 0;
@@ -1053,8 +1049,8 @@ begin
   inherited Create;
   FStream := aStream;
   FBufSize := aBufSize;
-  FReadBuffer := TMemoryStream.Create;
-  FWriteBuffer := TMemoryStream.Create;
+  FReadBuffer := TThriftMemoryStream.Create(FBufSize);
+  FWriteBuffer := TThriftMemoryStream.Create(FBufSize);
 end;
 
 destructor TBufferedStreamImpl.Destroy;
@@ -1379,16 +1375,11 @@ begin
   Result := InnerTransport.IsOpen;
 end;
 
-type
-  TAccessMemoryStream = class(TMemoryStream)
-  end;
-
 procedure TFramedTransportImpl.InitWriteBuffer;
 const DUMMY_HEADER : TFramedHeader = 0;
 begin
   FreeAndNil( FWriteBuffer);
-  FWriteBuffer := TMemoryStream.Create;
-  TAccessMemoryStream(FWriteBuffer).Capacity := 1024;
+  FWriteBuffer := TThriftMemoryStream.Create(1024);
   FWriteBuffer.Write( DUMMY_HEADER, SizeOf(DUMMY_HEADER));
 end;
 
@@ -1437,7 +1428,9 @@ begin
 
   if Int64(size) > Int64(Configuration.MaxFrameSize) then begin
     Close();
-    raise TTransportExceptionCorruptedData.Create('Frame size ('+IntToStr(size)+') larger than allowed maximum ('+IntToStr(Configuration.MaxFrameSize)+')');
+    if CharUtils.IsHtmlDoctype(size)
+    then raise TTransportExceptionCorruptedData.Create('Remote end sends HTML instead of data')
+    else raise TTransportExceptionCorruptedData.Create('Frame size ('+IntToStr(size)+') larger than allowed maximum ('+IntToStr(Configuration.MaxFrameSize)+')');
   end;
 
   UpdateKnownMessageSize(size + SizeOf(size));
@@ -1446,7 +1439,7 @@ begin
   InnerTransport.ReadAll( buff, 0, size );
 
   FreeAndNil( FReadBuffer);
-  FReadBuffer := TMemoryStream.Create;
+  FReadBuffer := TThriftMemoryStream.Create(1024);
   if Length(buff) > 0
   then FReadBuffer.Write( Pointer(@buff[0])^, size );
   FReadBuffer.Position := 0;

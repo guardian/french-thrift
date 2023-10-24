@@ -59,7 +59,7 @@ public:
   virtual std::string get_enum_class_name(t_type* type) {
     std::string package = "";
     t_program* program = type->get_program();
-    if (program != NULL && program != program_) {
+    if (program != nullptr && program != program_) {
       package = program->get_namespace("java") + ".";
     }
     return package + type->get_name();
@@ -70,7 +70,7 @@ public:
   }
 
   virtual void generate_java_doc(std::ostream& out, t_field* field) {
-    if (field->get_type()->is_enum()) {
+    if (get_true_type(field->get_type())->is_enum()) {
       std::string combined_message = field->get_doc() + "\n@see "
                                      + get_enum_class_name(field->get_type());
       generate_java_docstring_comment(out, combined_message);

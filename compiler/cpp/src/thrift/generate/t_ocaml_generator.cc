@@ -61,16 +61,15 @@ public:
     out_dir_base_ = "gen-ocaml";
   }
 
-  /**
-   * Init and close methods
-   */
+  ~t_ocaml_generator() override;
 
   void init_generator() override;
-  void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
    */
+
   void generate_program() override;
   void generate_typedef(t_typedef* ttypedef) override;
   void generate_enum(t_enum* tenum) override;
@@ -147,16 +146,20 @@ public:
    * Helper rendering functions
    */
 
-  std::string ocaml_autogen_comment();
+  /** Need to disable codegen comment for unit tests to be version-agnostic */
+  virtual std::string ocaml_autogen_comment();
+
   std::string ocaml_imports();
   std::string type_name(t_type* ttype);
+  std::string exception_ctor(t_type* ttype);
   std::string function_signature(t_function* tfunction, std::string prefix = "");
   std::string function_type(t_function* tfunc, bool method = false, bool options = false);
   std::string argument_list(t_struct* tstruct);
   std::string type_to_enum(t_type* ttype);
   std::string render_ocaml_type(t_type* type);
 
-private:
+// Need access to output file streams for testing.
+protected:
   /**
    * File streams
    */
@@ -216,9 +219,6 @@ void t_ocaml_generator::generate_program() {
   // Generate constants
   vector<t_const*> consts = program_->get_consts();
   generate_consts(consts);
-
-  // Close the generator
-  close_generator();
 }
 
 /**
@@ -262,12 +262,12 @@ string t_ocaml_generator::ocaml_imports() {
   return "open Thrift";
 }
 
-/**
- * Closes the type files
- */
-void t_ocaml_generator::close_generator() {
-  // Close types file
+t_ocaml_generator::~t_ocaml_generator() {
+  f_consts_.close();
   f_types_.close();
+  f_types_i_.close();
+  f_service_.close();
+  f_service_i_.close();
 }
 
 /**
@@ -404,13 +404,13 @@ string t_ocaml_generator::render_const_value(t_type* type, t_const_value* value)
     const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = value->get_map();
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
       string fname = v_iter->first->get_string();
@@ -898,7 +898,7 @@ void t_ocaml_generator::generate_service(t_service* tservice) {
   f_service_ << ocaml_autogen_comment() << endl << ocaml_imports() << endl;
   f_service_i_ << ocaml_autogen_comment() << endl << ocaml_imports() << endl;
 
-  /* if (tservice->get_extends() != NULL) {
+  /* if (tservice->get_extends() != nullptr) {
     f_service_ <<
       "open " << capitalize(tservice->get_extends()->get_name()) << endl;
     f_service_i_ <<
@@ -914,10 +914,6 @@ void t_ocaml_generator::generate_service(t_service* tservice) {
   generate_service_interface(tservice);
   generate_service_client(tservice);
   generate_service_server(tservice);
-
-  // Close service file
-  f_service_.close();
-  f_service_i_.close();
 }
 
 /**
@@ -970,7 +966,7 @@ void t_ocaml_generator::generate_service_interface(t_service* tservice) {
 
   indent_up();
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     string extends = type_name(tservice->get_extends());
     indent(f_service_) << "inherit " << extends << ".iface" << endl;
     indent(f_service_i_) << "inherit " << extends << ".iface" << endl;
@@ -1004,7 +1000,7 @@ void t_ocaml_generator::generate_service_client(t_service* tservice) {
   indent(f_service_i_) << "class client : Protocol.t -> Protocol.t -> " << endl << "object" << endl;
   indent_up();
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = type_name(tservice->get_extends());
     indent(f_service_) << "inherit " << extends << ".client iprot oprot as super" << endl;
     indent(f_service_i_) << "inherit " << extends << ".client" << endl;
@@ -1108,7 +1104,7 @@ void t_ocaml_generator::generate_service_client(t_service* tservice) {
       for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
         f_service_ << indent() << "(match result#get_" << (*x_iter)->get_name()
                    << " with None -> () | Some _v ->" << endl;
-        indent(f_service_) << "  raise (" << capitalize(type_name((*x_iter)->get_type()))
+        indent(f_service_) << "  raise (" << capitalize(exception_ctor((*x_iter)->get_type()))
                            << " _v));" << endl;
       }
 
@@ -1155,7 +1151,7 @@ void t_ocaml_generator::generate_service_server(t_service* tservice) {
   f_service_i_ << indent() << "inherit Processor.t" << endl << endl;
   string extends = "";
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = type_name(tservice->get_extends());
     indent(f_service_) << "inherit " + extends + ".processor (handler :> " + extends + ".iface)"
                        << endl;
@@ -1270,7 +1266,7 @@ void t_ocaml_generator::generate_process_function(t_service* tservice, t_functio
     indent(f_service_) << "with" << endl;
     indent_up();
     for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
-      f_service_ << indent() << "| " << capitalize(type_name((*x_iter)->get_type())) << " "
+      f_service_ << indent() << "| " << capitalize(exception_ctor((*x_iter)->get_type())) << " "
                  << (*x_iter)->get_name() << " -> " << endl;
       indent_up();
       indent_up();
@@ -1377,7 +1373,7 @@ void t_ocaml_generator::generate_deserialize_type(ostream& out, t_type* type) {
 void t_ocaml_generator::generate_deserialize_struct(ostream& out, t_struct* tstruct) {
   string prefix = "";
   t_program* program = tstruct->get_program();
-  if (program != NULL && program != program_) {
+  if (program != nullptr && program != program_) {
     prefix = capitalize(program->get_name()) + "_types.";
   }
   string name = decapitalize(tstruct->get_name());
@@ -1658,7 +1654,7 @@ string t_ocaml_generator::argument_list(t_struct* tstruct) {
 string t_ocaml_generator::type_name(t_type* ttype) {
   string prefix = "";
   t_program* program = ttype->get_program();
-  if (program != NULL && program != program_) {
+  if (program != nullptr && program != program_) {
     if (!ttype->is_service()) {
       prefix = capitalize(program->get_name()) + "_types.";
     }
@@ -1671,6 +1667,18 @@ string t_ocaml_generator::type_name(t_type* ttype) {
     name = decapitalize(name);
   }
   return prefix + name;
+}
+
+string t_ocaml_generator::exception_ctor(t_type* ttype) {
+  string prefix = "";
+  t_program* program = ttype->get_program();
+  if (program != nullptr && program != program_) {
+    if (!ttype->is_service()) {
+      prefix = capitalize(program->get_name()) + "_types.";
+    }
+  }
+
+  return prefix + capitalize(ttype->get_name());
 }
 
 /**
@@ -1698,6 +1706,8 @@ string t_ocaml_generator::type_to_enum(t_type* type) {
       return "Protocol.T_I64";
     case t_base_type::TYPE_DOUBLE:
       return "Protocol.T_DOUBLE";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return "Protocol.T_I32";
@@ -1739,6 +1749,8 @@ string t_ocaml_generator::render_ocaml_type(t_type* type) {
       return "Int64.t";
     case t_base_type::TYPE_DOUBLE:
       return "float";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return capitalize(((t_enum*)type)->get_name()) + ".t";
@@ -1758,5 +1770,10 @@ string t_ocaml_generator::render_ocaml_type(t_type* type) {
 
   throw "INVALID TYPE IN type_to_enum: " + type->get_name();
 }
+
+std::string t_ocaml_generator::display_name() const {
+  return "OCaml";
+}
+
 
 THRIFT_REGISTER_GENERATOR(ocaml, "OCaml", "")

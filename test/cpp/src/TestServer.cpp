@@ -39,6 +39,7 @@
 #include <thrift/transport/TSSLSocket.h>
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TTransportUtils.h>
+#include <thrift/transport/TWebSocketServer.h>
 #include <thrift/transport/TZlibTransport.h>
 
 #include "SecondService.h"
@@ -588,7 +589,7 @@ int main(int argc, char** argv) {
     ("domain-socket", po::value<string>(&domain_socket) ->default_value(domain_socket), "Unix Domain Socket (e.g. /tmp/ThriftTest.thrift)")
     ("abstract-namespace", "Create the domain socket in the Abstract Namespace (no connection with filesystem pathnames)")
     ("server-type", po::value<string>(&server_type)->default_value(server_type), "type of server, \"simple\", \"thread-pool\", \"threaded\", or \"nonblocking\"")
-    ("transport", po::value<string>(&transport_type)->default_value(transport_type), "transport: buffered, framed, http, zlib")
+    ("transport", po::value<string>(&transport_type)->default_value(transport_type), "transport: buffered, framed, http, websocket, zlib")
     ("protocol", po::value<string>(&protocol_type)->default_value(protocol_type), "protocol: binary, compact, header, json, multi, multic, multih, multij")
     ("ssl", "Encrypted Transport using SSL")
     ("zlib", "Wrapped Transport using Zlib")
@@ -635,6 +636,7 @@ int main(int argc, char** argv) {
       if (transport_type == "buffered") {
       } else if (transport_type == "framed") {
       } else if (transport_type == "http") {
+      } else if (transport_type == "websocket") {
       } else if (transport_type == "zlib") {
         // crosstester will pass zlib as a flag and a transport right now...
       } else {
@@ -728,6 +730,12 @@ int main(int argc, char** argv) {
 
   if (transport_type == "http" && server_type != "nonblocking") {
     transportFactory = std::make_shared<THttpServerTransportFactory>();
+  } else if (transport_type == "websocket" && server_type != "nonblocking") {
+    if (protocol_type == "json" || protocol_type == "multij") {
+      transportFactory = std::make_shared<TTextWebSocketServerTransportFactory>();
+    } else {
+      transportFactory = std::make_shared<TBinaryWebSocketServerTransportFactory>();
+    }
   } else if (transport_type == "framed") {
     transportFactory = std::make_shared<TFramedTransportFactory>();
   } else {
@@ -735,8 +743,8 @@ int main(int argc, char** argv) {
   }
 
   if (zlib) {
-    // hmm.. doesn't seem to be a way to make it wrap the others...
-    transportFactory = std::make_shared<TZlibTransportFactory>();
+    // currently TZlibTransportFactory is the only factory than can wrap another:
+    transportFactory = std::make_shared<TZlibTransportFactory>(transportFactory);
   }
 
   // Server Info
@@ -816,7 +824,7 @@ int main(int argc, char** argv) {
       // if using header
       server->setOutputProtocolFactory(std::shared_ptr<TProtocolFactory>());
     }
-    
+
     apache::thrift::concurrency::ThreadFactory factory;
     factory.setDetached(false);
     std::shared_ptr<apache::thrift::concurrency::Runnable> serverThreadRunner(server);
@@ -829,7 +837,7 @@ int main(int argc, char** argv) {
 
     thread->start();
     gMonitor.waitForever();         // wait for a shutdown signal
-    
+
 #ifdef HAVE_SIGNAL_H
     signal(SIGINT, SIG_DFL);
 #endif
@@ -842,4 +850,3 @@ int main(int argc, char** argv) {
   cout << "done." << endl;
   return 0;
 }
-

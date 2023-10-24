@@ -38,6 +38,11 @@ public:
   virtual ~TServerTransport() = default;
 
   /**
+   * Whether this transport is open.
+   */
+  virtual bool isOpen() const { return false; }
+
+  /**
    * Starts the server transport listening for new connections. Prior to this
    * call most transports will not return anything when accept is called.
    *
@@ -49,7 +54,7 @@ public:
    * Gets a new dynamically allocated transport object and passes it to the
    * caller. Note that it is the explicit duty of the caller to free the
    * allocated object. The returned TTransport object must always be in the
-   * opened state. NULL should never be returned, instead an Exception should
+   * opened state. nullptr should never be returned, instead an Exception should
    * always be thrown.
    *
    * @return A new TTransport object
@@ -58,7 +63,7 @@ public:
   std::shared_ptr<TTransport> accept() {
     std::shared_ptr<TTransport> result = acceptImpl();
     if (!result) {
-      throw TTransportException("accept() may not return NULL");
+      throw TTransportException("accept() may not return nullptr");
     }
     return result;
   }

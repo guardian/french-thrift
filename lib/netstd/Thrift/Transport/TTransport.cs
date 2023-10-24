@@ -1,4 +1,4 @@
-// Licensed to the Apache Software Foundation(ASF) under one
+﻿// Licensed to the Apache Software Foundation(ASF) under one
 // or more contributor license agreements.See the NOTICE file
 // distributed with this work for additional information
 // regarding copyright ownership.The ASF licenses this file
@@ -35,6 +35,7 @@ namespace Thrift.Transport
         public abstract TConfiguration Configuration { get; }
         public abstract void UpdateKnownMessageSize(long size);
         public abstract void CheckReadBytesAvailable(long numBytes);
+        public abstract void ResetConsumedMessageSize(long newSize = -1);
         public void Dispose()
         {
             Dispose(true);
@@ -73,12 +74,8 @@ namespace Thrift.Transport
             return true;
         }
 
-        public virtual async Task OpenAsync()
-        {
-            await OpenAsync(CancellationToken.None);
-        }
 
-        public abstract Task OpenAsync(CancellationToken cancellationToken);
+        public abstract Task OpenAsync(CancellationToken cancellationToken = default);
 
         public abstract void Close();
 
@@ -107,25 +104,14 @@ namespace Thrift.Transport
 #endif
         }
 
-        public virtual async ValueTask<int> ReadAsync(byte[] buffer, int offset, int length)
-        {
-            return await ReadAsync(buffer, offset, length, CancellationToken.None);
-        }
 
         public abstract ValueTask<int> ReadAsync(byte[] buffer, int offset, int length, CancellationToken cancellationToken);
 
-        public virtual async ValueTask<int> ReadAllAsync(byte[] buffer, int offset, int length)
-        {
-            return await ReadAllAsync(buffer, offset, length, CancellationToken.None);
-        }
-
         public virtual async ValueTask<int> ReadAllAsync(byte[] buffer, int offset, int length, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             ValidateBufferArgs(buffer, offset, length);
-
-            if (cancellationToken.IsCancellationRequested)
-                return await Task.FromCanceled<int>(cancellationToken);
-
             if (length <= 0)
                 return 0;
 
@@ -164,11 +150,6 @@ namespace Thrift.Transport
             }
         }
 
-        public virtual async Task WriteAsync(byte[] buffer)
-        {
-            await WriteAsync(buffer, CancellationToken.None);
-        }
-
         public virtual async Task WriteAsync(byte[] buffer, CancellationToken cancellationToken)
         {
             await WriteAsync(buffer, 0, buffer.Length, CancellationToken.None);
@@ -181,10 +162,6 @@ namespace Thrift.Transport
 
         public abstract Task WriteAsync(byte[] buffer, int offset, int length, CancellationToken cancellationToken);
 
-        public virtual async Task FlushAsync()
-        {
-            await FlushAsync(CancellationToken.None);
-        }
 
         public abstract Task FlushAsync(CancellationToken cancellationToken);
 

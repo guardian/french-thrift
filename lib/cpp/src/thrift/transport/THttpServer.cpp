@@ -34,7 +34,9 @@ namespace apache {
 namespace thrift {
 namespace transport {
 
-THttpServer::THttpServer(std::shared_ptr<TTransport> transport) : THttpTransport(transport) {
+THttpServer::THttpServer(std::shared_ptr<TTransport> transport, std::shared_ptr<TConfiguration> config) 
+  : THttpTransport(transport, config) {
+
 }
 
 THttpServer::~THttpServer() = default;
@@ -118,18 +120,14 @@ bool THttpServer::parseStatusLine(char* status) {
 }
 
 void THttpServer::flush() {
+  resetConsumedMessageSize();
   // Fetch the contents of the write buffer
   uint8_t* buf;
   uint32_t len;
   writeBuffer_.getBuffer(&buf, &len);
 
   // Construct the HTTP header
-  std::ostringstream h;
-  h << "HTTP/1.1 200 OK" << CRLF << "Date: " << getTimeRFC1123() << CRLF << "Server: Thrift/"
-    << PACKAGE_VERSION << CRLF << "Access-Control-Allow-Origin: *" << CRLF
-    << "Content-Type: application/x-thrift" << CRLF << "Content-Length: " << len << CRLF
-    << "Connection: Keep-Alive" << CRLF << CRLF;
-  string header = h.str();
+  string header = getHeader(len);
 
   // Write the header, then the data, then flush
   // cast should be fine, because none of "header" is under attacker control
@@ -140,6 +138,15 @@ void THttpServer::flush() {
   // Reset the buffer and header variables
   writeBuffer_.resetBuffer();
   readHeaders_ = true;
+}
+
+std::string THttpServer::getHeader(uint32_t len) {
+  std::ostringstream h;
+  h << "HTTP/1.1 200 OK" << CRLF << "Date: " << getTimeRFC1123() << CRLF << "Server: Thrift/"
+    << PACKAGE_VERSION << CRLF << "Access-Control-Allow-Origin: *" << CRLF
+    << "Content-Type: application/x-thrift" << CRLF << "Content-Length: " << len << CRLF
+    << "Connection: Keep-Alive" << CRLF << CRLF;
+  return h.str();
 }
 
 std::string THttpServer::getTimeRFC1123() {

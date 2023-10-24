@@ -67,6 +67,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
@@ -82,7 +83,7 @@ private:
   void generate_element(std::ostream& out,
                         std::string name,
                         t_type* ttype,
-                        t_struct* attrs = NULL,
+                        t_struct* attrs = nullptr,
                         bool optional = false,
                         bool nillable = false,
                         bool list_element = false);
@@ -132,21 +133,8 @@ void t_xsd_generator::close_generator() {
 void t_xsd_generator::generate_typedef(t_typedef* ttypedef) {
   indent(s_xsd_types_) << "<xsd:simpleType name=\"" << ttypedef->get_name() << "\">" << endl;
   indent_up();
-  if (ttypedef->get_type()->is_string() && ((t_base_type*)ttypedef->get_type())->is_string_enum()) {
-    indent(s_xsd_types_) << "<xsd:restriction base=\"" << type_name(ttypedef->get_type()) << "\">"
-                         << endl;
-    indent_up();
-    const vector<string>& values = ((t_base_type*)ttypedef->get_type())->get_string_enum_vals();
-    vector<string>::const_iterator v_iter;
-    for (v_iter = values.begin(); v_iter != values.end(); ++v_iter) {
-      indent(s_xsd_types_) << "<xsd:enumeration value=\"" << (*v_iter) << "\" />" << endl;
-    }
-    indent_down();
-    indent(s_xsd_types_) << "</xsd:restriction>" << endl;
-  } else {
-    indent(s_xsd_types_) << "<xsd:restriction base=\"" << type_name(ttypedef->get_type()) << "\" />"
-                         << endl;
-  }
+  indent(s_xsd_types_) << "<xsd:restriction base=\"" << type_name(ttypedef->get_type()) << "\" />"
+                       << endl;
   indent_down();
   indent(s_xsd_types_) << "</xsd:simpleType>" << endl << endl;
 }
@@ -199,7 +187,7 @@ void t_xsd_generator::generate_element(ostream& out,
   if (ttype->is_void() || ttype->is_list()) {
     indent(out) << "<xsd:element name=\"" << name << "\"" << soptional << snillable << ">" << endl;
     indent_up();
-    if (attrs == NULL && ttype->is_void()) {
+    if (attrs == nullptr && ttype->is_void()) {
       indent(out) << "<xsd:complexType />" << endl;
     } else {
       indent(out) << "<xsd:complexType>" << endl;
@@ -216,12 +204,12 @@ void t_xsd_generator::generate_element(ostream& out,
         }
         f_php_ << "$GLOBALS['" << program_->get_name() << "_xsd_elt_" << name << "'] = '" << subname
                << "';" << endl;
-        generate_element(out, subname, subtype, NULL, false, false, true);
+        generate_element(out, subname, subtype, nullptr, false, false, true);
         indent_down();
         indent(out) << "</xsd:sequence>" << endl;
         indent(out) << "<xsd:attribute name=\"list\" type=\"xsd:boolean\" />" << endl;
       }
-      if (attrs != NULL) {
+      if (attrs != nullptr) {
         const vector<t_field*>& members = attrs->get_members();
         vector<t_field*>::const_iterator a_iter;
         for (a_iter = members.begin(); a_iter != members.end(); ++a_iter) {
@@ -235,7 +223,7 @@ void t_xsd_generator::generate_element(ostream& out,
     indent_down();
     indent(out) << "</xsd:element>" << endl;
   } else {
-    if (attrs == NULL) {
+    if (attrs == nullptr) {
       indent(out) << "<xsd:element name=\"" << name << "\""
                   << " type=\"" << type_name(ttype) << "\"" << soptional << snillable << " />"
                   << endl;
@@ -275,10 +263,10 @@ void t_xsd_generator::generate_service(t_service* tservice) {
   f_xsd_.open(f_xsd_name.c_str());
 
   string ns = program_->get_namespace("xsd");
-  const std::map<std::string, std::string> annot = program_->get_namespace_annotations("xsd");
-  const std::map<std::string, std::string>::const_iterator uri = annot.find("uri");
-  if (uri != annot.end()) {
-    ns = uri->second;
+  const std::map<std::string, std::vector<std::string>> annot = program_->get_namespace_annotations("xsd");
+  const std::map<std::string, std::vector<std::string>>::const_iterator uri = annot.find("uri");
+  if (uri != annot.end() && !uri->second.empty()) {
+    ns = uri->second.back();
   }
   if (ns.size() > 0) {
     ns = " targetNamespace=\"" + ns + "\" xmlns=\"" + ns + "\" "
@@ -372,5 +360,10 @@ string t_xsd_generator::base_type_name(t_base_type::t_base tbase) {
     throw "compiler error: no XSD base type name for base type " + t_base_type::t_base_name(tbase);
   }
 }
+
+std::string t_xsd_generator::display_name() const {
+  return "XSD";
+}
+
 
 THRIFT_REGISTER_GENERATOR(xsd, "XSD", "")

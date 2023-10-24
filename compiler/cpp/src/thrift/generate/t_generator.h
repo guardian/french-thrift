@@ -42,8 +42,9 @@
  */
 class t_generator {
 public:
-  t_generator(t_program* program)
-    : keywords_(lang_keywords()){
+  t_generator(t_program* program) {
+    update_keywords_for_validation();
+
     tmp_ = 0;
     indent_ = 0;
     program_ = program;
@@ -99,16 +100,30 @@ public:
 
   /**
    * Check if all identifiers are valid for the target language
+   * See update_keywords_for_validation()
    */
   virtual void validate_input() const;
 
+  /**
+   * Must override. Should be equivalent to the "long name" parameter at THRIFT_REGISTER_GENERATOR.
+   * TODO: essentially duplicates, so we should find a way to get rid of one 
+   */
+  virtual std::string display_name() const = 0;
 protected:
-  virtual std::set<std::string> lang_keywords() const;
+  virtual std::set<std::string> lang_keywords_for_validation() const;
+
+  /**
+   * Call this from constructor if you implement lang_keywords_for_validation()
+   */
+
+  void update_keywords_for_validation() {
+    keywords_ = lang_keywords_for_validation();
+  }
 
   /**
    * A list of reserved words that cannot be used as identifiers.
    */
-  const std::set<std::string> keywords_;
+  std::set<std::string> keywords_;
 
   virtual void validate_id(const std::string& id) const;
 
@@ -410,7 +425,9 @@ public:
     old_file.open(output_file_path.c_str(), std::ios::in);
 
     if (old_file) {
-      std::string const old_file_contents(static_cast<std::ostringstream const&>(std::ostringstream() << old_file.rdbuf()).str());
+      std::ostringstream oss;
+      oss << old_file.rdbuf();
+      std::string const old_file_contents(oss.str());
       old_file.close();
 
       if (old_file_contents != str()) {

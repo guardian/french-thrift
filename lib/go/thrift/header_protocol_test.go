@@ -24,5 +24,19 @@ import (
 )
 
 func TestReadWriteHeaderProtocol(t *testing.T) {
-	ReadWriteProtocolTest(t, NewTHeaderProtocolFactory())
+	t.Run(
+		"default",
+		func(t *testing.T) {
+			ReadWriteProtocolTest(t, NewTHeaderProtocolFactory())
+		},
+	)
+
+	t.Run(
+		"compact",
+		func(t *testing.T) {
+			ReadWriteProtocolTest(t, NewTHeaderProtocolFactoryConf(&TConfiguration{
+				THeaderProtocolID: THeaderProtocolIDPtrMust(THeaderProtocolCompact),
+			}))
+		},
+	)
 }

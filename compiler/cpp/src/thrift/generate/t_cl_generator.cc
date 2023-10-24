@@ -72,6 +72,7 @@ class t_cl_generator : public t_oop_generator {
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   void generate_typedef     (t_typedef*  ttypedef) override;
   void generate_enum        (t_enum*     tenum) override;
@@ -314,13 +315,13 @@ string t_cl_generator::render_const_value(t_type* type, t_const_value* value) {
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
 
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
 
@@ -396,7 +397,7 @@ void t_cl_generator::generate_cl_struct_internal(std::ostream& out, t_struct* ts
       out << endl << indent() << " ";
     }
     out << "(" << prefix((*m_iter)->get_name()) << " " <<
-        ( (NULL != value) ? render_const_value(type, value) : "nil" ) <<
+        ( (nullptr != value) ? render_const_value(type, value) : "nil" ) <<
         " :id " << (*m_iter)->get_key();
     if ( type->is_base_type() && "string" == typespec(type) )
       if ( ((t_base_type*)type)->is_binary() )
@@ -441,7 +442,7 @@ void t_cl_generator::generate_service(t_service* tservice) {
   vector<t_function*> functions = tservice->get_functions();
   vector<t_function*>::iterator f_iter;
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends_client = type_name(tservice->get_extends());
   }
 
@@ -540,7 +541,7 @@ string t_cl_generator::type_name(t_type* ttype) {
   string prefix = "";
   t_program* program = ttype->get_program();
 
-  if (program != NULL && program != program_)
+  if (program != nullptr && program != program_)
     prefix = package_of(program) == package() ? "" : package_of(program) + ":";
 
   string name = ttype->get_name();
@@ -550,6 +551,11 @@ string t_cl_generator::type_name(t_type* ttype) {
 
   return prefix + name;
 }
+
+std::string t_cl_generator::display_name() const {
+  return "Common Lisp";
+}
+
 
 THRIFT_REGISTER_GENERATOR(
     cl,

@@ -26,10 +26,7 @@ namespace Thrift.Protocol.Utilities
     {
         public static async Task SkipAsync(TProtocol protocol, TType type, CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                await Task.FromCanceled(cancellationToken);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             protocol.IncrementRecursionDepth();
             try
@@ -57,6 +54,9 @@ namespace Thrift.Protocol.Utilities
                     case TType.String:
                         // Don't try to decode the string, just skip it.
                         await protocol.ReadBinaryAsync(cancellationToken);
+                        break;
+                    case TType.Uuid:
+                        await protocol.ReadUuidAsync(cancellationToken);
                         break;
                     case TType.Struct:
                         await protocol.ReadStructBeginAsync(cancellationToken);

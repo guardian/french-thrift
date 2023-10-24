@@ -17,11 +17,13 @@
 # under the License.
 #
 
-stubs: ../ThriftTest.thrift
-	$(THRIFT) -I ./thrifts -out src --gen rs ../ThriftTest.thrift
+stubs: ../v0.16/ThriftTest.thrift
+	$(THRIFT) -I ./thrifts -out src --gen rs ../v0.16/ThriftTest.thrift
 
 precross: stubs
 	$(CARGO) build
+	$(CARGO) fmt --all -- --check
+	$(CARGO) clippy --all -- -D warnings
 	[ -d bin ] || mkdir bin
 	cp target/debug/test_server bin/test_server
 	cp target/debug/test_client bin/test_client

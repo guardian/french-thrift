@@ -139,7 +139,7 @@ impl TBufferChannel {
 }
 
 impl TIoChannel for TBufferChannel {
-    fn split(self) -> ::Result<(ReadHalf<Self>, WriteHalf<Self>)>
+    fn split(self) -> crate::Result<(ReadHalf<Self>, WriteHalf<Self>)>
     where
         Self: Sized,
     {
@@ -153,7 +153,9 @@ impl TIoChannel for TBufferChannel {
             WriteHalf {
                 handle: TBufferChannel {
                     read: self.read.clone(),
-                    write: self.write.clone(),
+                    // NOTE: not cloning here, since this is the last statement
+                    // in this method and `write` can take ownership of `self.write`
+                    write: self.write,
                 },
             },
         ))

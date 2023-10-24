@@ -104,6 +104,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
@@ -460,13 +461,13 @@ t_rb_ofstream& t_rb_generator::render_const_value(t_rb_ofstream& out,
     const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = value->get_map();
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
       out.indent();
@@ -713,7 +714,7 @@ void t_rb_generator::generate_field_defns(t_rb_ofstream& out, t_struct* tstruct)
 void t_rb_generator::generate_field_data(t_rb_ofstream& out,
                                          t_type* field_type,
                                          const std::string& field_name = "",
-                                         t_const_value* field_value = NULL,
+                                         t_const_value* field_value = nullptr,
                                          bool optional = false) {
   field_type = get_true_type(field_type);
 
@@ -724,7 +725,7 @@ void t_rb_generator::generate_field_data(t_rb_ofstream& out,
     out << ", :name => '" << field_name << "'";
   }
 
-  if (field_value != NULL) {
+  if (field_value != nullptr) {
     out << ", :default => ";
     render_const_value(out, field_type, field_value);
   }
@@ -788,7 +789,7 @@ void t_rb_generator::generate_service(t_service* tservice) {
 
   f_service_ << rb_autogen_comment() << endl << render_require_thrift();
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     if (namespaced_) {
       f_service_ << "require '" << rb_namespace_to_path_prefix(
                                        tservice->get_extends()->get_program()->get_namespace("rb"))
@@ -868,7 +869,7 @@ void t_rb_generator::generate_rb_function_helpers(t_function* tfunction) {
 void t_rb_generator::generate_service_client(t_service* tservice) {
   string extends = "";
   string extends_client = "";
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = full_type_name(tservice->get_extends());
     extends_client = " < " + extends + "::Client ";
   }
@@ -943,7 +944,12 @@ void t_rb_generator::generate_service_client(t_service* tservice) {
       f_service_.indent() << "def " << function_signature(&recv_function) << endl;
       f_service_.indent_up();
 
-      // TODO(mcslee): Validate message reply here, seq ids etc.
+      f_service_.indent() << "fname, mtype, rseqid = receive_message_begin()" << endl;
+      f_service_.indent() << "handle_exception(mtype)" << endl;
+
+      f_service_.indent() << "if reply_seqid(rseqid)==false" << endl;
+      f_service_.indent() << "  raise \"seqid reply faild\"" << endl;
+      f_service_.indent() << "end" << endl;
 
       f_service_.indent() << "result = receive_message(" << resultname << ")" << endl;
 
@@ -992,7 +998,7 @@ void t_rb_generator::generate_service_server(t_service* tservice) {
 
   string extends = "";
   string extends_processor = "";
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = full_type_name(tservice->get_extends());
     extends_processor = " < " + extends + "::Processor ";
   }
@@ -1171,6 +1177,8 @@ string t_rb_generator::type_to_enum(t_type* type) {
       return "::Thrift::Types::I64";
     case t_base_type::TYPE_DOUBLE:
       return "::Thrift::Types::DOUBLE";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return "::Thrift::Types::I32";
@@ -1280,6 +1288,11 @@ void t_rb_generator::generate_rb_union_validator(t_rb_ofstream& out, t_struct* t
   out.indent_down();
   out.indent() << "end" << endl << endl;
 }
+
+std::string t_rb_generator::display_name() const {
+  return "Ruby";
+}
+
 
 THRIFT_REGISTER_GENERATOR(
     rb,

@@ -1,6 +1,6 @@
 # Apache Thrift Release Management
 
-Instructions for preparing and distributing a release of Apache Thrift are fairly complex.  These procedures are documented here, and we're working to automate as much of this as possible.  There are few projects like ours that integrate with 28 programming languages.  Given the extreme number of package management systems that Apache Thrift integrates with (compared to perhaps any), part of the burden of releasing Apache Thrift is to manually package and upload some of these [language-specific packages](http://apache.thrift.org/libraries).
+Instructions for preparing and distributing a release of Apache Thrift are fairly complex.  These procedures are documented here, and we're working to automate as much of this as possible.  There are few projects like ours that integrate with 28 programming languages.  Given the extreme number of package management systems that Apache Thrift integrates with (compared to perhaps any), part of the burden of releasing Apache Thrift is to manually package and upload some of these [language-specific packages](http://thrift.apache.org/lib).
 
 It is important to note here that Apache Thrift is designed for version interoperability, so one can use a version 0.7.0 client with a 0.12.0 server.  A particular version number does not make any guarantees as to the features available in any given language.  See the [Language Feature Matrix](https://github.com/apache/thrift/blob/master/LANGUAGES.md) to learn more.
 
@@ -14,13 +14,13 @@ Apache Thrift and the vast majority of package management systems out there conf
 - *minor* is increased for each release cycle;
 - *patch* is increased for patch builds between release cycles to address critical defect, security, or packaging issues
 
-Further, if there are only packaging changes for a single third-party distribution point to correct an issue, the major.minor.patch may remain the same while adding a suffix compatible with that distribution point, for example "0.12.0.1" for nuget, or "0.12.0-1" for maven.
+Further, if there are only packaging changes for a single third-party distribution point to correct an issue, the major.minor.patch may remain the same while adding a suffix compatible with that distribution point, for example, "0.12.0.1" for nuget, or "0.12.0-1" for maven.
 
 #### External Package Patches
 
-It is common to have language-specific critical defects or packaging errors that need to be resolved between releases of Apache Thrift.  The project handles these on a case-by-case basis for languages that have their own [package management systems](http://apache.thrift.org/libraries).  When a language-specific patch is made, the patch level of the distribution pushed to the external package manager is bumped.
+It is common to have language-specific critical defects or packaging errors that need to be resolved between releases of Apache Thrift.  The project handles these on a case-by-case basis for languages that have their own [package management systems](http://thrift.apache.org/lib).  When a language-specific patch is made, the patch level of the distribution pushed to the external package manager is bumped.
 
- As such, there may be cases between Apache Thrift releases where there are (for example) a `0.12.1` and `0.12.2` version of a Haskell Hackage package, and perhaps also a `0.12.3` version of a dlang dub package.  You will not find a tag or an official project release in these cases, however the code changes will be reflected in the release branch and in master.  In these cases we would not release a version of Apache Thrift nor would we refresh all the external language packages.
+ As such, there may be cases between Apache Thrift releases where there are (for example) a `0.12.1` and `0.12.2` version of a Haskell Hackage package, and perhaps also a `0.12.3` version of a dlang dub package.  You will not find a tag or an official project release in these cases, however, the code changes will be reflected in the release branch and in master.  In these cases we would not release a version of Apache Thrift nor would we refresh all the external language packages.
 
 #### Version in the master branch
 
@@ -76,7 +76,7 @@ All Apache Thrift releases go through a 72-hour final release candidate voting p
 
     It is healthy to scrub these periodically, whether or not you are making a new release.
 
-1. Check that the version number in the `master` branch matches the version number of the upcomning release.  To check the `master` branch version, run:
+1. Check that the version number in the `master` branch matches the version number of the upcoming release.  To check the `master` branch version, run:
 
     ```bash
     thrift$ grep AC_INIT configure.ac | cut -d'[' -f3 | cut -d']' -f1
@@ -315,11 +315,11 @@ Voting on the development mailing list provides additional benefits (wisdom from
         --username <apache-username> --password <apache-password>
     ```
 
-    **NOTE** One you check in, you need to wait about a day for all the mirrors to update.  You cannot send the announcement email or update the web site until the mirrors are updated.
+    **NOTE** Once you check-in, you need to wait about a day for all the mirrors to update.  You cannot send the announcement email or update the web site until the mirrors are updated.
 
 1. Create and push a tag for the release, for example "v1.0.0".
 
-    **NOTE:** All new releases must have the "v" prefix to satisfy third  party package managers (dlang dub, golang, etc..)
+    **NOTE:** All new releases must have the "v" prefix to satisfy third-party package managers (dlang dub, golang, etc..)
 
     **NOTE:** You **should** [sign the release tag](https://git-scm.com/book/en/v2/Git-Tools-Signing-Your-Work).  Since you already have a GPG signing key for publishing the Apache Release, you want to [upload that key to your GitHub account](https://help.github.com/en/articles/adding-a-new-gpg-key-to-your-github-account).  Once the key is known by GitHub you can sign the tag.
 
@@ -345,22 +345,7 @@ Voting on the development mailing list provides additional benefits (wisdom from
 
     The merge of 1.0.0 into master should proceed as a fast-forward since the 1.0.0 release branch.  If there are discrepancies the best thing to do is resolve them and then submit a pull request.  This pull request must be *MERGED* and not *REBASED* after the CI build is successful.  You may want to do this yourself and mark the pull request as `[DO NOT MERGE]`.
 
-1. Update the ASF CMS content for thrift to include the new release.  Note over time we will retire this in favor of including all documentation in the GitHub repository.  The page with the variables that are important like the current release or distribution links is in trunk/lib/path.pm in the ASF CMS for thrift.
-
-    1. Go to the [ASF CMS for Thrift](https://cms.apache.org/thrift/).
-    1. Get a working copy.
-    1. On the top right, click on `trunk`.
-    1. Navigate into `lib`.
-    1. Open `path.pm`.
-    1. Edit
-    1. Change `current_release` and `current_release_date` to reflect the correct information.
-    1. Submit
-    1. Commit
-    1. Submit
-    1. Follow Staging Build until it completes.
-    1. Open the Staged site.
-    1. Ensure the download links work.
-    1. Publish Site.
+1. Update the web site content to include the new release. The repository is located at https://github.com/apache/thrift-website and there are plenty of instructions how to update both staging and live web site. With regard to the release, its actually quite simple: check out the main branch and edit two lines in _config.yml, then commit. The build bot will update staging. After checking everything is right, simply fast-forward "asf-site" to "asf-staging" and push, then production site will automatically get updated as well
 
 1. Make an announcement on the dev@ and user@ mailing lists of the release.  There's no template to follow, but you can point folks to the official web site at https://thrift.apache.org, and to the GitHub site at https://github.org/apache.thrift.
 
@@ -389,7 +374,7 @@ Voting on the development mailing list provides additional benefits (wisdom from
 
 #### Third Party Package Managers
 
-See https://thrift.apache.org/lib/ for the current status of each external package manager's distribution.  Information below is from the 0.12.0 release:
+See https://thrift.apache.org/lib/ for the current status of each external package manager's distribution.  The information below is from the 0.12.0 release:
 
   > This section needs to be updated with detailed instructions for each language, or pointers to the README.md files in each language directory with detailed release instructions for the given package management system.
 
@@ -398,9 +383,7 @@ See https://thrift.apache.org/lib/ for the current status of each external packa
   * Go into lib/dart and run "pub publish --dry-run" and resolve any warnings.
   * Run "pub publish" and go through the google account authorization to allow it.
 * [dlang] Within a day, the dlang dub site https://code.dlang.org/packages/apache-thrift?tab=info
-  should pick up the release based on the tag.  No action needed.
-* [haskell] https://hackage.haskell.org/package/thrift
-    https://jira.apache.org/jira/browse/THRIFT-4698
+  should pick up the release based on the tag.  No action is needed.
 * [npmjs] @jfarrell is the only one who can do this right now.
     https://issues.apache.org/jira/browse/THRIFT-4688
 * [perl] A submission to CPAN is necessary (normally jeking3 does this):

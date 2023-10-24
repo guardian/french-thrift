@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -51,12 +52,10 @@ namespace Thrift.Transport.Client
 
         public override bool IsOpen => true;
 
-        public override async Task OpenAsync(CancellationToken cancellationToken)
+        public override Task OpenAsync(CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                await Task.FromCanceled(cancellationToken);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
         }
 
         public override void Close()
@@ -82,7 +81,11 @@ namespace Thrift.Transport.Client
                     "Cannot read from null inputstream");
             }
 
+#if NETSTANDARD2_0
             return await InputStream.ReadAsync(buffer, offset, length, cancellationToken);
+#else
+            return await InputStream.ReadAsync(new Memory<byte>(buffer, offset, length), cancellationToken);
+#endif
         }
 
         public override async Task WriteAsync(byte[] buffer, int offset, int length, CancellationToken cancellationToken)
@@ -93,7 +96,11 @@ namespace Thrift.Transport.Client
                     "Cannot write to null outputstream");
             }
 
+#if NETSTANDARD2_0
             await OutputStream.WriteAsync(buffer, offset, length, cancellationToken);
+#else
+            await OutputStream.WriteAsync(buffer.AsMemory(offset, length), cancellationToken);
+#endif
         }
 
         public override async Task FlushAsync(CancellationToken cancellationToken)

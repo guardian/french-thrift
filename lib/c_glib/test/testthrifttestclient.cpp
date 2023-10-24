@@ -19,6 +19,12 @@
 
 /* test a C client with a C++ server  (that makes sense...) */
 
+#include <thrift/config.h>
+
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -291,7 +297,7 @@ class TestHandler : public ThriftTestIf {
   }
 
   void testException(const std::string &arg)
-    throw(Xception, apache::thrift::TException) override
+    noexcept(false)  override
   {
     cout << "[C -> C++] testException(" << arg << ")" << endl;
     if (arg.compare("Xception") == 0) {
@@ -309,7 +315,7 @@ class TestHandler : public ThriftTestIf {
     }
   }
 
-  void testMultiException(Xtruct &result, const std::string &arg0, const std::string &arg1) throw(Xception, Xception2) override {
+  void testMultiException(Xtruct &result, const std::string &arg0, const std::string &arg1) noexcept(false) override {
 
     cout << "[C -> C++] testMultiException(" << arg0 << ", " << arg1 << ")" << endl;
 
@@ -384,11 +390,11 @@ test_thrift_client (void)
   // create a C client
   tsocket = (ThriftSocket *) g_object_new (THRIFT_TYPE_SOCKET,
                           "hostname", "localhost",
-                          "port", TEST_PORT, NULL);
+                          "port", TEST_PORT, nullptr);
   protocol = (ThriftBinaryProtocol *) g_object_new (THRIFT_TYPE_BINARY_PROTOCOL,
                            "transport",
-                           tsocket, NULL);
-  client = (TTestThriftTestClient *) g_object_new (T_TEST_TYPE_THRIFT_TEST_CLIENT, "input_protocol", protocol, "output_protocol", protocol, NULL);
+                           tsocket, nullptr);
+  client = (TTestThriftTestClient *) g_object_new (T_TEST_TYPE_THRIFT_TEST_CLIENT, "input_protocol", protocol, "output_protocol", protocol, nullptr);
   iface = T_TEST_THRIFT_TEST_IF (client);
 
   // open and send

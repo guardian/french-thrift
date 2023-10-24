@@ -19,13 +19,6 @@
 
 #include <thrift/thrift-config.h>
 
-#include <thrift/transport/TFileTransport.h>
-#include <thrift/transport/TTransportUtils.h>
-#include <thrift/transport/PlatformSocket.h>
-#include <thrift/concurrency/FunctionRunner.h>
-
-#include <boost/version.hpp>
-
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #else
@@ -51,6 +44,11 @@
 #include <io.h>
 #endif
 
+#include <thrift/transport/TFileTransport.h>
+#include <thrift/transport/TTransportUtils.h>
+#include <thrift/transport/PlatformSocket.h>
+#include <thrift/concurrency/FunctionRunner.h>
+
 namespace apache {
 namespace thrift {
 namespace transport {
@@ -63,8 +61,9 @@ using std::string;
 using namespace apache::thrift::protocol;
 using namespace apache::thrift::concurrency;
 
-TFileTransport::TFileTransport(string path, bool readOnly)
-  : readState_(),
+TFileTransport::TFileTransport(string path, bool readOnly, std::shared_ptr<TConfiguration> config)
+  : TTransport(config),
+    readState_(),
     readBuff_(nullptr),
     currentEvent_(nullptr),
     readBuffSize_(DEFAULT_READ_BUFF_SIZE),
@@ -426,7 +425,7 @@ void TFileTransport::writerThread() {
 
             auto* zeros = new uint8_t[padding];
             memset(zeros, '\0', padding);
-            boost::scoped_array<uint8_t> array(zeros);
+            std::unique_ptr<uint8_t[]> array(zeros);
             if (-1 == ::THRIFT_WRITE(fd_, zeros, padding)) {
               int errno_copy = THRIFT_ERRNO;
               GlobalOutput.perror("TFileTransport: writerThread() error while padding zeros ",
@@ -519,6 +518,7 @@ void TFileTransport::writerThread() {
 }
 
 void TFileTransport::flush() {
+  resetConsumedMessageSize();
   // file must be open for writing for any flushing to take place
   if (!writerThread_.get()) {
     return;
@@ -537,6 +537,7 @@ void TFileTransport::flush() {
 }
 
 uint32_t TFileTransport::readAll(uint8_t* buf, uint32_t len) {
+  checkReadBytesAvailable(len);
   uint32_t have = 0;
   uint32_t get = 0;
 
@@ -568,6 +569,7 @@ bool TFileTransport::peek() {
 }
 
 uint32_t TFileTransport::read(uint8_t* buf, uint32_t len) {
+  checkReadBytesAvailable(len);
   // check if there an event is ready to be read
   if (!currentEvent_) {
     currentEvent_ = readEvent();
