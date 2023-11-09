@@ -281,70 +281,70 @@ jobs:
             test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestClient
           retention-days: 3
 
-  # lib-rust:
-  #   needs: compiler
-  #   runs-on: ubuntu-20.04
-  #   env:
-  #     TOOLCHAIN_VERSION: 1.61.0
-  #   steps:
-  #     - uses: actions/checkout@v3
+  lib-rust:
+    needs: compiler
+    runs-on: ubuntu-20.04
+    env:
+      TOOLCHAIN_VERSION: 1.65.0
+    steps:
+      - uses: actions/checkout@v3
 
-  #     - name: Install dependencies
-  #       run: |
-  #         sudo apt-get update -yq
-  #         sudo apt-get install -y --no-install-recommends curl $BUILD_DEPS
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends curl $BUILD_DEPS
 
-  #     - name: Setup cargo
-  #       run: |
-  #         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  #         rustup update
-  #         rustup install $TOOLCHAIN_VERSION
-  #         rustup default $TOOLCHAIN_VERSION
-  #         rustup --version
-  #         cargo --version
-  #         rustc --version
+      - name: Setup cargo
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          rustup update
+          rustup install $TOOLCHAIN_VERSION
+          rustup default $TOOLCHAIN_VERSION
+          rustup --version
+          cargo --version
+          rustc --version
 
-  #     - name: Run bootstrap
-  #       run: ./bootstrap.sh
+      - name: Run bootstrap
+        run: ./bootstrap.sh
 
-  #     - name: Run configure
-  #       run: |
-  #         ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-rs/with-rs/')
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-rs/with-rs/')
 
-  #     - uses: actions/download-artifact@v3
-  #       with:
-  #         name: thrift-compiler
-  #         path: compiler/cpp
+      - uses: actions/download-artifact@v3
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
 
-  #     - name: Run thrift-compiler
-  #       run: |
-  #         chmod a+x compiler/cpp/thrift
-  #         compiler/cpp/thrift -version
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
 
-  #     - name: Run make for rust
-  #       run: make -C lib/rs
+      - name: Run make for rust
+        run: make -C lib/rs
 
-  #     - name: Run make check for rust
-  #       run: make -C lib/rs check
+      - name: Run make check for rust
+        run: make -C lib/rs check
 
-  #     - name: Run make test for rust
-  #       run: make -C lib/rs/test check
+      - name: Run make test for rust
+        run: make -C lib/rs/test check
 
-  #     - name: Run make precross for test rust
-  #       run: make -C test/rs precross
+      - name: Run make precross for test rust
+        run: make -C test/rs precross
 
-  #     - name: Upload rust precross artifacts
-  #       uses: actions/upload-artifact@v3
-  #       with:
-  #         name: rs-precross
-  #         if-no-files-found: error
-  #         path: |
-  #           test/rs/bin/test_server
-  #           test/rs/bin/test_client
-  #         retention-days: 3
+      - name: Upload rust precross artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: rs-precross
+          if-no-files-found: error
+          path: |
+            test/rs/bin/test_server
+            test/rs/bin/test_client
+          retention-days: 3
 
-  #     - name: Run make test_recursive for rust
-  #       run: make -C lib/rs/test_recursive check
+      - name: Run make test_recursive for rust
+        run: make -C lib/rs/test_recursive check
 
   lib-python:
     needs: compiler
