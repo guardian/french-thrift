@@ -123,6 +123,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   void export_class_to_library(string file_name, string class_name);
 
@@ -599,13 +600,13 @@ void t_dart_generator::print_const_value(std::ostream& out,
     out << type_name(type) << " " << name << " = new " << type_name(type) << "()";
     indent_up();
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
       string val = render_const_value(out, name, field_type, v_iter->second);
@@ -827,7 +828,7 @@ void t_dart_generator::generate_dart_struct_definition(ostream& out,
   scope_up(out);
   for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
     t_type* t = get_true_type((*m_iter)->get_type());
-    if ((*m_iter)->get_value() != NULL) {
+    if ((*m_iter)->get_value() != nullptr) {
       print_const_value(out,
                         "this." + get_member_name((*m_iter)->get_name()),
                         t,
@@ -1409,7 +1410,7 @@ void t_dart_generator::generate_service(t_service* tservice) {
  */
 void t_dart_generator::generate_service_interface(t_service* tservice) {
   string extends_iface = "";
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends_iface = " extends " + get_ttype_class_name(tservice->get_extends());
   }
 
@@ -1454,7 +1455,7 @@ void t_dart_generator::generate_service_helpers(t_service* tservice) {
 void t_dart_generator::generate_service_client(t_service* tservice) {
   string extends = "";
   string extends_client = "";
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = get_ttype_class_name(tservice->get_extends());
     extends_client = " extends " + extends + "Client";
   }
@@ -1587,7 +1588,7 @@ void t_dart_generator::generate_service_server(t_service* tservice) {
   // Extends stuff
   string extends = "";
   string extends_processor = "";
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     extends = get_ttype_class_name(tservice->get_extends());
     extends_processor = " extends " + extends + "Processor";
   }
@@ -2193,7 +2194,7 @@ string t_dart_generator::declare_field(t_field* tfield, bool init) {
   string result = type_name(tfield->get_type()) + " " + field_name;
   if (init) {
     t_type* ttype = get_true_type(tfield->get_type());
-    if (ttype->is_base_type() && tfield->get_value() != NULL) {
+    if (ttype->is_base_type() && tfield->get_value() != nullptr) {
       std:: ofstream dummy;
       result += " = " + render_const_value(dummy, field_name, ttype, tfield->get_value());
     } else if (ttype->is_base_type()) {
@@ -2216,6 +2217,8 @@ string t_dart_generator::declare_field(t_field* tfield, bool init) {
       case t_base_type::TYPE_DOUBLE:
         result += " = 0.0";
         break;
+      default:
+        throw "compiler error: unhandled type";
       }
 
     } else if (ttype->is_enum()) {
@@ -2297,6 +2300,8 @@ string t_dart_generator::type_to_enum(t_type* type) {
       return "TType.I64";
     case t_base_type::TYPE_DOUBLE:
       return "TType.DOUBLE";
+    default:
+      break;
     }
   } else if (type->is_enum()) {
     return "TType.I32";
@@ -2351,6 +2356,8 @@ std::string t_dart_generator::init_value(t_field* field) {
   case t_base_type::TYPE_STRING:
     result = "";
     break;
+  default:
+    throw "compiler error: unhandled type";
   }
 
   return result;
@@ -2501,6 +2508,11 @@ std::string t_dart_generator::get_ttype_class_name(t_type* ttype) {
     return named_import + "." + ttype->get_name();
   }
 }
+
+std::string t_dart_generator::display_name() const {
+  return "Dart";
+}
+
 
 THRIFT_REGISTER_GENERATOR(
     dart,

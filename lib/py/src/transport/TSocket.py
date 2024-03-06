@@ -39,7 +39,7 @@ class TSocketBase(TTransportBase):
                                       self._socket_family,
                                       socket.SOCK_STREAM,
                                       0,
-                                      socket.AI_PASSIVE | socket.AI_ADDRCONFIG)
+                                      socket.AI_PASSIVE)
 
     def close(self):
         if self.handle:
@@ -74,7 +74,34 @@ class TSocket(TSocketBase):
         self.handle = h
 
     def isOpen(self):
-        return self.handle is not None
+        if self.handle is None:
+            return False
+
+        # this lets us cheaply see if the other end of the socket is still
+        # connected. if disconnected, we'll get EOF back (expressed as zero
+        # bytes of data) otherwise we'll get one byte or an error indicating
+        # we'd have to block for data.
+        #
+        # note that we're not doing this with socket.MSG_DONTWAIT because 1)
+        # it's linux-specific and 2) gevent-patched sockets hide EAGAIN from us
+        # when timeout is non-zero.
+        original_timeout = self.handle.gettimeout()
+        try:
+            self.handle.settimeout(0)
+            try:
+                peeked_bytes = self.handle.recv(1, socket.MSG_PEEK)
+            except (socket.error, OSError) as exc:  # on modern python this is just BlockingIOError
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    return True
+                return False
+            except ValueError:
+                # SSLSocket fails on recv with non-zero flags; fallback to the old behavior
+                return True
+        finally:
+            self.handle.settimeout(original_timeout)
+
+        # the length will be zero if we got EOF (indicating connection closed)
+        return len(peeked_bytes) == 1
 
     def setTimeout(self, ms):
         if ms is None:
@@ -104,9 +131,9 @@ class TSocket(TSocketBase):
         for family, socktype, _, _, sockaddr in addrs:
             handle = self._do_open(family, socktype)
 
-            # TCP_KEEPALIVE
+            # TCP keep-alive
             if self._socket_keepalive:
-                handle.setsockopt(socket.IPPROTO_TCP, socket.SO_KEEPALIVE, 1)
+                handle.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
             handle.settimeout(self._timeout)
             try:
@@ -201,12 +228,14 @@ class TServerSocket(TSocketBase, TServerTransportBase):
                 if eno == errno.ECONNREFUSED:
                     os.unlink(res[4])
 
-        self.handle = socket.socket(res[0], res[1])
-        self.handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(self.handle, 'settimeout'):
-            self.handle.settimeout(None)
-        self.handle.bind(res[4])
-        self.handle.listen(self._backlog)
+        self.handle = s = socket.socket(res[0], res[1])
+        if s.family is socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(s, 'settimeout'):
+            s.settimeout(None)
+        s.bind(res[4])
+        s.listen(self._backlog)
 
     def accept(self):
         client, addr = self.handle.accept()

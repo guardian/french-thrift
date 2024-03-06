@@ -17,8 +17,9 @@
  * under the License.
  */
 
-#include <cassert>
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 
 #include <thrift/transport/TBufferTransports.h>
 
@@ -112,12 +113,13 @@ void TBufferedTransport::writeSlow(const uint8_t* buf, uint32_t len) {
 const uint8_t* TBufferedTransport::borrowSlow(uint8_t* buf, uint32_t* len) {
   (void)buf;
   (void)len;
-  // Simply return NULL.  We don't know if there is actually data available on
+  // Simply return nullptr.  We don't know if there is actually data available on
   // the underlying transport, so calling read() might block.
   return nullptr;
 }
 
 void TBufferedTransport::flush() {
+  resetConsumedMessageSize();
   // Write out any data waiting in the write buffer.
   auto have_bytes = static_cast<uint32_t>(wBase_ - wBuf_.get());
   if (have_bytes > 0) {
@@ -248,6 +250,7 @@ void TFramedTransport::writeSlow(const uint8_t* buf, uint32_t len) {
 }
 
 void TFramedTransport::flush() {
+  resetConsumedMessageSize();
   int32_t sz_hbo, sz_nbo;
   assert(wBufSize_ > sizeof(sz_nbo));
 
@@ -360,16 +363,18 @@ void TMemoryBuffer::ensureCanWrite(uint32_t len) {
     throw TTransportException("Insufficient space in external MemoryBuffer");
   }
 
-  // Grow the buffer as necessary.
-  uint64_t new_size = bufferSize_;
-  while (len > avail) {
-    new_size = new_size > 0 ? new_size * 2 : 1;
-    if (new_size > maxBufferSize_) {
-      throw TTransportException(TTransportException::BAD_ARGS,
-                                "Internal buffer size overflow");
-    }
-    avail = available_write() + (static_cast<uint32_t>(new_size) - bufferSize_);
+  // Grow the buffer as necessary. Use uint64_t to avoid overflow.
+  const uint64_t current_used = bufferSize_ - avail;
+  const uint64_t required_buffer_size = len + current_used;
+  if (required_buffer_size > maxBufferSize_) {
+    throw TTransportException(TTransportException::BAD_ARGS,
+                              "Internal buffer size overflow when requesting a buffer of size " + std::to_string(required_buffer_size));
   }
+
+  // Always grow to the next bigger power of two:
+  const double suggested_buffer_size = std::exp2(std::ceil(std::log2(required_buffer_size)));
+  // Unless the power of two exceeds maxBufferSize_:
+  const uint64_t new_size = static_cast<uint64_t>((std::min)(suggested_buffer_size, static_cast<double>(maxBufferSize_)));
 
   // Allocate into a new pointer so we don't bork ours if it fails.
   auto* new_buffer = static_cast<uint8_t*>(std::realloc(buffer_, static_cast<std::size_t>(new_size)));
@@ -381,6 +386,7 @@ void TMemoryBuffer::ensureCanWrite(uint32_t len) {
   rBound_ = new_buffer + (rBound_ - buffer_);
   wBase_ = new_buffer + (wBase_ - buffer_);
   wBound_ = new_buffer + new_size;
+  // Note: with realloc() we do not need to free the previous buffer:
   buffer_ = new_buffer;
   bufferSize_ = static_cast<uint32_t>(new_size);
 }

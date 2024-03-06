@@ -31,21 +31,17 @@ public let TSocketServerClientConnectionFinished = "TSocketServerClientConnectio
 public let TSocketServerProcessorKey = "TSocketServerProcessor"
 public let TSocketServerTransportKey = "TSocketServerTransport"
 
-class TSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TProcessor, Service> {
+open class TSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TProcessor> {
   var socketFileHandle: FileHandle
   var processingQueue =  DispatchQueue(label: "TSocketServer.processing",
                                        qos: .background,
                                        attributes: .concurrent)
-  var serviceHandler: Service
   let processor: Processor
 
   public init(port: Int,
-              service: Service,
               inProtocol: InProtocol.Type,
               outProtocol: OutProtocol.Type,
               processor: Processor) throws {
-    // set service handler
-    self.serviceHandler = service
     self.processor = processor
 
     // create a socket
@@ -56,21 +52,21 @@ class TSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TP
       let sock = CFSocketCreate(kCFAllocatorDefault, PF_INET, SOCK_STREAM, IPPROTO_TCP, 0, nil, nil)
     #endif
     if sock != nil {
-      CFSocketSetSocketFlags(sock, CFSocketGetSocketFlags(sock) & ~kCFSocketCloseOnInvalidate)
+      CFSocketSetSocketFlags(sock, CFSocketGetSocketFlags(sock) & ~CFOptionFlags(kCFSocketCloseOnInvalidate))
 
       fd = CFSocketGetNative(sock)
       var yes = 1
       setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, UInt32(MemoryLayout<Int>.size))
-
+      let inPort = in_port_t(UInt16(truncatingIfNeeded: port).bigEndian)
       #if os(Linux)
         var addr = sockaddr_in(sin_family: sa_family_t(AF_INET),
-                               sin_port: in_port_t(port.bigEndian),
+                               sin_port: inPort,
                                sin_addr: in_addr(s_addr: in_addr_t(0)),
                                sin_zero: (0, 0, 0, 0, 0, 0, 0, 0))
       #else
         var addr = sockaddr_in(sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
                                sin_family: sa_family_t(AF_INET),
-                               sin_port: in_port_t(port.bigEndian),
+                               sin_port: inPort,
                                sin_addr: in_addr(s_addr: in_addr_t(0)),
                                sin_zero: (0, 0, 0, 0, 0, 0, 0, 0))
       #endif
@@ -82,7 +78,7 @@ class TSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TP
       let address = Data(bytes: ptr, count: MemoryLayout<sockaddr_in>.size)
 
       let cfaddr = address.withUnsafeBytes {
-        CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, $0.bindMemory(to: UInt8.self).baseAddress!, address.count, nil)
+        CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, $0.bindMemory(to: UInt8.self).baseAddress!, address.count, kCFAllocatorNull)
       }
       if CFSocketSetAddress(sock, cfaddr) != CFSocketError.success { //kCFSocketSuccess {
         CFSocketInvalidate(sock)
@@ -101,49 +97,58 @@ class TSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TP
     // throw away our socket
     CFSocketInvalidate(sock)
 
-    // register for notifications of accepted incoming connections
-    _ = NotificationCenter.default.addObserver(forName: .NSFileHandleConnectionAccepted,
-                                               object: nil, queue: nil) {
-                                                [weak self] notification in
-                                                guard let strongSelf = self else { return }
-                                                strongSelf.connectionAccepted(strongSelf.socketFileHandle)
-    }
+    print("TSocketServer: Listening on TCP port \(port)")
 
     // tell socket to listen
-    socketFileHandle.acceptConnectionInBackgroundAndNotify()
-
-    print("TSocketServer: Listening on TCP port \(port)")
+    acceptConnectionInBackgroundAndNotify(handle: socketFileHandle)
   }
 
-  deinit {
-    NotificationCenter.default.removeObserver(self)
+  private func acceptConnectionInBackgroundAndNotify(handle: FileHandle) {
+    DispatchQueue(label: "TSocketServer.connectionAccept").async {
+      let acceptedFD = accept(handle.fileDescriptor, nil, nil)
+      DispatchQueue.main.async {
+        self.connectionAccepted(FileHandle(fileDescriptor: acceptedFD))
+      }
+    }
   }
-
-  func connectionAccepted(_ socket: FileHandle) {
+  func connectionAccepted(_ clientSocket: FileHandle) {
     // Now that we have a client connected, handle the request on queue
     processingQueue.async {
-      self.handleClientConnection(socket)
+      self.handleClientConnection(clientSocket)
     }
+
+    // continue accepting connections
+    acceptConnectionInBackgroundAndNotify(handle: socketFileHandle)
+  }
+
+  open func createTransport(fileHandle: FileHandle) -> TTransport {
+    return TFileHandleTransport(fileHandle: fileHandle)
   }
 
   func handleClientConnection(_ clientSocket: FileHandle) {
-
-    let transport = TFileHandleTransport(fileHandle: clientSocket)
-
+    let transport = createTransport(fileHandle: clientSocket)
     let inProtocol = InProtocol(on: transport)
     let outProtocol = OutProtocol(on: transport)
 
     do {
-      try processor.process(on: inProtocol, outProtocol: outProtocol)
+      while true {
+        try processor.process(on: inProtocol, outProtocol: outProtocol)
+      }
     } catch let error {
-      print("Error processign request: \(error)")
+      print("Error processing request: \(error)")
     }
     DispatchQueue.main.async {
       NotificationCenter.default
         .post(name: Notification.Name(rawValue: TSocketServerClientConnectionFinished),
-              object: self,
+              object: nil,
               userInfo: [TSocketServerProcessorKey: self.processor,
                          TSocketServerTransportKey: transport])
     }
+  }
+}
+
+public class TFramedSocketServer<InProtocol: TProtocol, OutProtocol: TProtocol, Processor: TProcessor>: TSocketServer<InProtocol, OutProtocol, Processor> {
+  open override func createTransport(fileHandle: FileHandle) -> TTransport {
+    return TFramedTransport(transport: super.createTransport(fileHandle: fileHandle))
   }
 }

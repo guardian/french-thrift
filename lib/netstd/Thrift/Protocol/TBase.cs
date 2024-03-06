@@ -18,16 +18,19 @@
 using System.Threading;
 using System.Threading.Tasks;
 
+#pragma warning disable IDE1006   // some interfaces here are intentionally not I-prefixed 
+
 namespace Thrift.Protocol
 {
     public interface TUnionBase
     {
-        Task WriteAsync(TProtocol tProtocol, CancellationToken cancellationToken = default(CancellationToken));
+        Task WriteAsync(TProtocol tProtocol, CancellationToken cancellationToken = default);
     }
 
     // ReSharper disable once InconsistentNaming
     public interface TBase : TUnionBase
     {
-        Task ReadAsync(TProtocol tProtocol, CancellationToken cancellationToken = default(CancellationToken));
+        Task ReadAsync(TProtocol tProtocol, CancellationToken cancellationToken = default);
     }
+
 }

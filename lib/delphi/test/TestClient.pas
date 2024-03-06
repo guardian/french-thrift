@@ -34,7 +34,7 @@ unit TestClient;
 interface
 
 uses
-  Windows, SysUtils, Classes, Math, ComObj, ActiveX,
+  Classes, Windows, SysUtils, Math, ActiveX, ComObj,
   {$IFDEF SupportsAsync} System.Threading, {$ENDIF}
   DateUtils,
   Generics.Collections,
@@ -53,18 +53,21 @@ uses
   Thrift.Test,
   Thrift.WinHTTP,
   Thrift.Utils,
-
   Thrift.Configuration,
   Thrift.Collections;
 
 type
-  TThreadConsole = class
-  private
-    FThread : TThread;
+  TClientThread = class;
+
+  TThreadConsole = class(TThriftConsole)
+  strict private
+    FThread : TClientThread;
+    FLogThreadID : Boolean;
   public
-    procedure Write( const S : string);
-    procedure WriteLine( const S : string);
-    constructor Create( AThread: TThread);
+    constructor Create( const aThread: TClientThread; const aLogThreadID : Boolean);
+
+    procedure Write( const S: string); override;
+    procedure WriteLine( const S: string); override;
   end;
 
   TTestSetup = record
@@ -98,11 +101,13 @@ type
       FifteenMB        // quite a bit of data, but still below the default max frame size
     );
 
-  private
+  strict private
     FSetup : TTestSetup;
     FTransport : ITransport;
     FProtocol : IProtocol;
-    FNumIteration : Integer;
+    FNumIterations : Integer;
+
+    FThreadNo : Integer;
     FConsole : TThreadConsole;
 
     // test reporting, will be refactored out into separate class later
@@ -134,23 +139,28 @@ type
     {$IFDEF Win64}
     procedure UseInterlockedExchangeAdd64;
     {$ENDIF}
-  protected
+
+  strict protected
     procedure Execute; override;
+    property Console : TThreadConsole read FConsole;
+
   public
-    constructor Create( const aSetup : TTestSetup; const aNumIteration: Integer);
+    constructor Create( const aSetup : TTestSetup; const aNumIteration, aThreadNo: Integer; const aLogThreadID : Boolean);
     destructor Destroy; override;
+
+    property ThreadNo : Integer read FThreadNo;
   end;
 
   TTestClient = class
   private
     class var
-      FNumIteration : Integer;
-      FNumThread : Integer;
+      FNumIterations : Integer;
+      FNumThreads : Integer;
 
     class procedure PrintCmdLineHelp;
     class procedure InvalidArgs;
   public
-    class function Execute( const args: array of string) : Byte;
+    class function Execute( const arguments: array of string) : Byte;
   end;
 
 
@@ -191,19 +201,17 @@ class procedure TTestClient.PrintCmdLineHelp;
 const HELPTEXT = ' [options]'#10
                + #10
                + 'Allowed options:'#10
-               + '  -h [ --help ]               produce help message'#10
-               + '  --host arg (=localhost)     Host to connect'#10
-               + '  --port arg (=9090)          Port number to connect'#10
-               + '  --domain-socket arg         Domain Socket (e.g. /tmp/ThriftTest.thrift),'#10
-               + '                              instead of host and port'#10
-               + '  --named-pipe arg            Windows Named Pipe (e.g. MyThriftPipe)'#10
-               + '  --anon-pipes hRead hWrite   Windows Anonymous Pipes pair (handles)'#10
-               + '  --transport arg (=sockets)  Transport: buffered, framed, http, winhttp'#10
-               + '  --protocol arg (=binary)    Protocol: binary, compact, json'#10
-               + '  --ssl                       Encrypted Transport using SSL'#10
-               + '  -n [ --testloops ] arg (=1) Number of Tests'#10
-               + '  -t [ --threads ] arg (=1)   Number of Test threads'#10
-               + '  --performance               Run the built-in performance test (no other arguments)'#10
+               + '  -h | --help                   Produces this help message'#10
+               + '  --host=arg (localhost)        Host to connect'#10
+               + '  --port=arg (9090)             Port number to connect'#10
+               + '  --pipe=arg                    Windows Named Pipe (e.g. MyThriftPipe)'#10
+               + '  --anon-pipes hRead hWrite     Windows Anonymous Pipes pair (handles)'#10
+               + '  --transport=arg (sockets)     Transport: buffered, framed, http, winhttp'#10
+               + '  --protocol=arg (binary)       Protocol: binary, compact, json'#10
+               + '  --ssl                         Encrypted Transport using SSL'#10
+               + '  -n=num | --testloops=num (1)  Number of Tests'#10
+               + '  -t=num | --threads=num (1)    Number of Test threads'#10
+               + '  --performance                 Run the built-in performance test (no other arguments)'#10
                ;
 begin
   Writeln( ChangeFileExt(ExtractFileName(ParamStr(0)),'') + HELPTEXT);
@@ -216,11 +224,22 @@ begin
   Abort;
 end;
 
-class function TTestClient.Execute(const args: array of string) : Byte;
+class function TTestClient.Execute(const arguments: array of string) : Byte;
+
+  function IsSwitch( const aArgument, aSwitch : string; out sValue : string) : Boolean;
+  begin
+    sValue := '';
+    result := (Copy( aArgument, 1, Length(aSwitch)) = aSwitch);
+    if result then begin
+      if (Copy( aArgument, 1, Length(aSwitch)+1) = (aSwitch+'='))
+      then sValue := Copy( aArgument, Length(aSwitch)+2, MAXINT);
+    end;
+  end;
+
 var
-  i : Integer;
+  iArg : Integer;
   threadExitCode : Byte;
-  s : string;
+  sArg, sValue : string;
   threads : array of TThread;
   dtStart : TDateTime;
   test : Integer;
@@ -241,92 +260,83 @@ begin
   end;
 
   try
-    i := 0;
-    while ( i < Length(args) ) do begin
-      s := args[i];
-      Inc( i);
+    iArg := 0;
+    while iArg < Length(arguments) do begin
+      sArg := arguments[iArg];
+      Inc(iArg);
 
-      if (s = '-h') or (s = '--help') then begin
+      if IsSwitch( sArg, '-h', sValue)
+      or IsSwitch( sArg, '--help', sValue)
+      then begin
         // -h [ --help ]               produce help message
         PrintCmdLineHelp;
         result := $FF;   // all tests failed
         Exit;
       end
-      else if s = '--host' then begin
+      else if IsSwitch( sArg, '--host', sValue) then begin
         // --host arg (=localhost)     Host to connect
-        setup.host := args[i];
-        Inc( i);
+        setup.host := sValue;
       end
-      else if s = '--port' then begin
+      else if IsSwitch( sArg, '--port', sValue) then begin
         // --port arg (=9090)          Port number to connect
-        s := args[i];
-        Inc( i);
-        setup.port := StrToIntDef(s,0);
+        setup.port := StrToIntDef(sValue,0);
         if setup.port <= 0 then InvalidArgs;
       end
-      else if s = '--domain-socket' then begin
+      else if IsSwitch( sArg, '--domain-socket', sValue) then begin
         // --domain-socket arg         Domain Socket (e.g. /tmp/ThriftTest.thrift), instead of host and port
         raise Exception.Create('domain-socket not supported');
       end
-      else if s = '--named-pipe' then begin
-        // --named-pipe arg            Windows Named Pipe (e.g. MyThriftPipe)
+        // --pipe arg                 Windows Named Pipe (e.g. MyThriftPipe)
+      else if IsSwitch( sArg, '--pipe', sValue) then begin
+        // --pipe arg                 Windows Named Pipe (e.g. MyThriftPipe)
         setup.endpoint := trns_NamedPipes;
-        setup.sPipeName := args[i];
-        Inc( i);
+        setup.sPipeName := sValue;
         Console.WriteLine('Using named pipe ('+setup.sPipeName+')');
       end
-      else if s = '--anon-pipes' then begin
+      else if IsSwitch( sArg, '--anon-pipes', sValue) then begin
         // --anon-pipes hRead hWrite   Windows Anonymous Pipes pair (handles)
         setup.endpoint := trns_AnonPipes;
-        setup.hAnonRead := THandle( StrToIntDef( args[i], Integer(INVALID_HANDLE_VALUE)));
-        Inc( i);
-        setup.hAnonWrite := THandle( StrToIntDef( args[i], Integer(INVALID_HANDLE_VALUE)));
-        Inc( i);
+        setup.hAnonRead := THandle( StrToIntDef( arguments[iArg], Integer(INVALID_HANDLE_VALUE)));
+        Inc(iArg);
+        setup.hAnonWrite := THandle( StrToIntDef( arguments[iArg], Integer(INVALID_HANDLE_VALUE)));
+        Inc(iArg);
         Console.WriteLine('Using anonymous pipes ('+IntToStr(Integer(setup.hAnonRead))+' and '+IntToStr(Integer(setup.hAnonWrite))+')');
       end
-      else if s = '--transport' then begin
+      else if IsSwitch( sArg, '--transport', sValue) then begin
         // --transport arg (=sockets)  Transport: buffered, framed, http, winhttp, evhttp
-        s := args[i];
-        Inc( i);
-
-        if      s = 'buffered' then Include( setup.layered, trns_Buffered)
-        else if s = 'framed'   then Include( setup.layered, trns_Framed)
-        else if s = 'http'     then setup.endpoint := trns_MsXmlHttp
-        else if s = 'winhttp'  then setup.endpoint := trns_WinHttp
-        else if s = 'evhttp'   then setup.endpoint := trns_EvHttp  // recognized, but not supported
+        if      sValue = 'buffered' then Include( setup.layered, trns_Buffered)
+        else if sValue = 'framed'   then Include( setup.layered, trns_Framed)
+        else if sValue = 'http'     then setup.endpoint := trns_MsXmlHttp
+        else if sValue = 'winhttp'  then setup.endpoint := trns_WinHttp
+        else if sValue = 'evhttp'   then setup.endpoint := trns_EvHttp  // recognized, but not supported
         else InvalidArgs;
       end
-      else if s = '--protocol' then begin
+      else if IsSwitch( sArg, '--protocol', sValue) then begin
         // --protocol arg (=binary)    Protocol: binary, compact, json
-        s := args[i];
-        Inc( i);
-
-        if      s = 'binary'   then setup.protType := prot_Binary
-        else if s = 'compact'  then setup.protType := prot_Compact
-        else if s = 'json'     then setup.protType := prot_JSON
+        if      sValue = 'binary'   then setup.protType := prot_Binary
+        else if sValue = 'compact'  then setup.protType := prot_Compact
+        else if sValue = 'json'     then setup.protType := prot_JSON
         else InvalidArgs;
       end
-      else if s = '--ssl' then begin
+      else if IsSwitch( sArg, '--ssl', sValue) then begin
         // --ssl                       Encrypted Transport using SSL
         setup.useSSL := TRUE;
 
       end
-      else if (s = '-n') or (s = '--testloops') then begin
+      else if IsSwitch( sArg, '-n', sValue) or IsSwitch( sArg, '--testloops', sValue) then begin
         // -n [ --testloops ] arg (=1) Number of Tests
-        FNumIteration := StrToIntDef( args[i], 0);
-        Inc( i);
-        if FNumIteration <= 0
+        FNumIterations := StrToIntDef( sValue, 0);
+        if FNumIterations <= 0
         then InvalidArgs;
 
       end
-      else if (s = '-t') or (s = '--threads') then begin
+      else if IsSwitch( sArg, '-t', sValue) or IsSwitch( sArg, '--threads', sValue) then begin
         // -t [ --threads ] arg (=1)   Number of Test threads
-        FNumThread := StrToIntDef( args[i], 0);
-        Inc( i);
-        if FNumThread <= 0
+        FNumThreads := StrToIntDef( sValue, 0);
+        if FNumThreads <= 0
         then InvalidArgs;
       end
-      else if (s = '--performance') then begin
+      else if IsSwitch( sArg, '--performance', sValue) then begin
         result := TPerformanceTests.Execute;
         Exit;
       end
@@ -343,7 +353,7 @@ begin
                         'Thrift TestClient (Delphi)',
                         MB_OK or MB_ICONEXCLAMATION);
 
-    SetLength( threads, FNumThread);
+    SetLength( threads, FNumThreads);
     dtStart := Now;
 
     // layered transports are not really meant to be stacked upon each other
@@ -356,14 +366,20 @@ begin
 
     Console.WriteLine(THRIFT_PROTOCOLS[setup.protType]+' protocol');
 
-    for test := 0 to FNumThread - 1 do begin
-      thread := TClientThread.Create( setup, FNumIteration);
+    if FNumThreads <> 1
+    then Console.WriteLine(IntToStr(FNumThreads)+' client threads');
+
+    if FNumIterations <> 1
+    then Console.WriteLine(IntToStr(FNumIterations)+' iterations');
+
+    for test := 0 to FNumThreads - 1 do begin
+      thread := TClientThread.Create( setup, FNumIterations, test, FNumThreads<>1);
       threads[test] := thread;
       thread.Start;
     end;
 
     result := 0;
-    for test := 0 to FNumThread - 1 do begin
+    for test := 0 to FNumThreads - 1 do begin
       threadExitCode := threads[test].WaitFor;
       result := result or threadExitCode;
       threads[test].Free;
@@ -394,6 +410,7 @@ var
   i32 : Integer;
   i64 : Int64;
   binOut,binIn : TBytes;
+  guidIn, guidOut : TGuid;
   dub : Double;
   o : IXtruct;
   o2 : IXtruct2;
@@ -409,8 +426,8 @@ var
   strkey : string;
   listout : IThriftList<Integer>;
   listin : IThriftList<Integer>;
-  setout : IHashSet<Integer>;
-  setin : IHashSet<Integer>;
+  setout : IThriftHashSet<Integer>;
+  setin : IThriftHashSet<Integer>;
   ret : TNumberz;
   uid : Int64;
   mm : IThriftDictionary<Integer, IThriftDictionary<Integer, Integer>>;
@@ -474,6 +491,10 @@ begin
     on e:Exception do Expect( FALSE, 'Unexpected exception "'+e.ClassName+'": '+e.Message);
   end;
 
+  // re-open connection if needed
+  if not FTransport.IsOpen
+  then FTransport.Open;
+
   // case 2: exception type NOT declared in IDL at the function call
   // this will close the connection
   try
@@ -505,6 +526,9 @@ begin
   end;
   {$ENDIF Exceptions}
 
+  // re-open connection if needed
+  if not FTransport.IsOpen
+  then FTransport.Open;
 
   // simple things
   StartTestGroup( 'simple Thrift calls', test_BaseTypes);
@@ -536,6 +560,16 @@ begin
   Console.WriteLine('testI64(-34359738368)');
   i64 := client.testI64(-34359738368);
   Expect( i64 = -34359738368, 'testI64(-34359738368) = ' + IntToStr( i64));
+
+  guidOut := StringToGUID('{00112233-4455-6677-8899-AABBCCDDEEFF}');
+  Console.WriteLine('testUuid('+GUIDToString(guidOut)+')');
+  try
+    guidIn := client.testUuid(guidOut);
+    Expect( IsEqualGUID(guidIn, guidOut), 'testUuid('+GUIDToString(guidOut)+') = '+GUIDToString(guidIn));
+  except
+    on e:TApplicationException do Console.WriteLine('testUuid(): '+e.Message);
+    on e:Exception do Expect( FALSE, 'testUuid(): Unexpected exception "'+e.ClassName+'": '+e.Message);
+  end;
 
   // random binary small
   for testsize := Low(TTestSize) to High(TTestSize) do begin
@@ -666,7 +700,7 @@ begin
   // Translates to an STL set, Java HashSet, set in Python, etc.
   // Note: PHP does not support sets, so it is treated similar to a List
   StartTestGroup( 'testSet', test_Containers);
-  setout := THashSetImpl<Integer>.Create;
+  setout := TThriftHashSetImpl<Integer>.Create;
   for j := -2 to 2 do
   begin
     setout.Add( j );
@@ -922,7 +956,7 @@ begin
   except
     on x:TXception do begin
       Expect( x.__isset_ErrorCode, 'x.__isset_ErrorCode = '+BoolToString(x.__isset_ErrorCode));
-      Expect( x.__isset_Message_,  'x.__isset_Message_ = '+BoolToString(x.__isset_Message_));
+      Expect( x.__isset_Message,  'x.__isset_Message = '+BoolToString(x.__isset_Message));
       Expect( x.ErrorCode = 1001, 'x.ErrorCode = '+IntToStr(x.ErrorCode));
       Expect( x.Message_ = 'This is an Xception', 'x.Message = "'+x.Message_+'"');
     end;
@@ -1277,12 +1311,13 @@ begin
 end;
 
 
-constructor TClientThread.Create( const aSetup : TTestSetup; const aNumIteration: Integer);
+constructor TClientThread.Create( const aSetup : TTestSetup; const aNumIteration, aThreadNo: Integer; const aLogThreadID : Boolean);
 begin
   FSetup := aSetup;
-  FNumIteration := ANumIteration;
+  FThreadNo := aThreadNo;
+  FNumIterations := aNumIteration;
 
-  FConsole := TThreadConsole.Create( Self );
+  FConsole := TThreadConsole.Create( Self, aLogThreadID);
   FCurrentTest := test_Unknown;
 
   // error list: keep correct order, allow for duplicates
@@ -1314,7 +1349,7 @@ begin
     // must be run in the context of the thread
     InitializeProtocolTransportStack;
     try
-      for i := 0 to FNumIteration - 1 do begin
+      for i := 0 to FNumIterations - 1 do begin
         ClientTest;
         {$IFDEF SupportsAsync}
         ClientAsyncTest;
@@ -1444,14 +1479,7 @@ begin
   end;
 
   // create protocol instance, default to BinaryProtocol
-  case FSetup.protType of
-    prot_Binary  :  FProtocol := TBinaryProtocolImpl.Create( FTransport, BINARY_STRICT_READ, BINARY_STRICT_WRITE);
-    prot_JSON    :  FProtocol := TJSONProtocolImpl.Create( FTransport);
-    prot_Compact :  FProtocol := TCompactProtocolImpl.Create( FTransport);
-  else
-    raise Exception.Create('Unhandled protocol');
-  end;
-
+  FProtocol := PROTOCOL_CLASSES[FSetup.protType].Create(FTransport);
   ASSERT( (FTransport <> nil) and (FProtocol <> nil));
 end;
 
@@ -1474,38 +1502,30 @@ end;
 
 { TThreadConsole }
 
-constructor TThreadConsole.Create(AThread: TThread);
+constructor TThreadConsole.Create( const aThread: TClientThread; const aLogThreadID : Boolean);
 begin
   inherited Create;
   FThread := AThread;
+  FLogThreadID := aLogThreadID;
 end;
 
 procedure TThreadConsole.Write(const S: string);
-var
-  proc : TThreadProcedure;
 begin
-  proc := procedure
-  begin
-    Console.Write( S );
-  end;
-  TThread.Synchronize( FThread, proc);
+  if FLogThreadID
+  then ConsoleHelper.Console.Write( IntToStr(FThread.ThreadNo)+'> '+S)
+  else ConsoleHelper.Console.Write( S);
 end;
 
 procedure TThreadConsole.WriteLine(const S: string);
-var
-  proc : TThreadProcedure;
 begin
-  proc := procedure
-  begin
-    Console.WriteLine( S );
-  end;
-  TThread.Synchronize( FThread, proc);
+  if FLogThreadID
+  then ConsoleHelper.Console.WriteLine( IntToStr(FThread.ThreadNo)+'> '+S)
+  else ConsoleHelper.Console.WriteLine( S);
 end;
 
+
 initialization
-begin
-  TTestClient.FNumIteration := 1;
-  TTestClient.FNumThread := 1;
-end;
+  TTestClient.FNumIterations := 1;
+  TTestClient.FNumThreads := 1;
 
 end.

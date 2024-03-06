@@ -112,7 +112,10 @@ public:
     objects_.push_back(tx);
     xceptions_.push_back(tx);
   }
-  void add_service(t_service* ts) { services_.push_back(ts); }
+  void add_service(t_service* ts) {
+    ts->validate_unique_members();
+    services_.push_back(ts);
+  }
 
   // Programs to include
   std::vector<t_program*>& get_includes() { return includes_; }
@@ -291,14 +294,6 @@ public:
         pwarning(1, "Namespace 'smalltalk' is deprecated. Use 'st' instead");
         base_language = "st";
       }
-      else if (base_language == "csharp") {
-        pwarning(1, "The '%s' target is no longer available. Use 'netstd' instead.", base_language.c_str());
-        // warn only, don't change base_language
-      }
-      else if (base_language == "netcore") {
-        pwarning(1, "The '%s' target is no longer available. Use 'netstd' instead.", base_language.c_str());
-        // warn only, don't change base_language
-      }
 
       t_generator_registry::gen_map_t my_copy = t_generator_registry::get_generator_map();
 
@@ -336,20 +331,20 @@ public:
      return namespaces_;
   }
 
-  void set_namespace_annotations(std::string language, std::map<std::string, std::string> annotations) {
+  void set_namespace_annotations(std::string language, std::map<std::string, std::vector<std::string>> annotations) {
     namespace_annotations_[language] = annotations;
   }
 
-  const std::map<std::string, std::string>& get_namespace_annotations(const std::string& language) const {
+  const std::map<std::string, std::vector<std::string>>& get_namespace_annotations(const std::string& language) const {
     auto it = namespace_annotations_.find(language);
     if (namespace_annotations_.end() != it) {
       return it->second;
     }
-    static const std::map<std::string, std::string> emptyMap;
+    static const std::map<std::string, std::vector<std::string>> emptyMap;
     return emptyMap;
   }
 
-  std::map<std::string, std::string>& get_namespace_annotations(const std::string& language) {
+  std::map<std::string, std::vector<std::string>>& get_namespace_annotations(const std::string& language) {
     return namespace_annotations_[language];
   }
 
@@ -405,7 +400,7 @@ private:
   std::map<std::string, std::string> namespaces_;
 
   // Annotations for dynamic namespaces
-  std::map<std::string, std::map<std::string, std::string> > namespace_annotations_;
+  std::map<std::string, std::map<std::string, std::vector<std::string>>> namespace_annotations_;
 
   // C++ extra includes
   std::vector<std::string> cpp_includes_;

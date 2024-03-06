@@ -21,7 +21,7 @@
 // which will cause the test to fail
 #define MANUAL_OPENSSL_INIT 1
 #ifdef _WIN32
-#include <WinSock2.h>
+#include <winsock2.h>
 #endif
 
 #include <boost/test/unit_test.hpp>
@@ -88,6 +88,6 @@ boost::unit_test::test_suite* init_unit_test_suite(int argc, char* argv[]) {
 
   suite->add(BOOST_TEST_CASE(test_openssl_availability));
 
-  return NULL;
+  return nullptr;
 }
 #endif

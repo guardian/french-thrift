@@ -22,7 +22,9 @@
         "map",
         "union",
         "struct",
-        "binary"
+        "binary",
+        "uuid",
+        "enum"
       ]
     },
     "base-type": {
@@ -30,7 +32,7 @@
       "type": "object",
       "properties": {
         "typeId": {
-          "enum": ["void", "string", "bool", "byte", "i8", "i16", "i32", "i64", "double", "binary" ]
+          "enum": ["void", "string", "bool", "byte", "i8", "i16", "i32", "i64", "double", "binary", "uuid" ]
         }
       },
       "required": [ "typeId" ]
@@ -66,7 +68,7 @@
       "type": "object",
       "properties": {
         "typeId": {
-          "enum": [ "union", "struct", "exception" ]
+          "enum": [ "union", "struct", "exception", "enum" ]
         }
       },
       "required": [ "typeId", "class" ]

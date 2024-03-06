@@ -18,7 +18,7 @@
  */
 
 #define BOOST_TEST_MODULE TSocketInterruptTest
-#include <boost/test/auto_unit_test.hpp>
+#include <boost/test/unit_test.hpp>
 
 #include <boost/chrono/duration.hpp>
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
@@ -53,6 +53,7 @@ void readerWorkerMustThrow(std::shared_ptr<TTransport> tt) {
 BOOST_AUTO_TEST_CASE(test_interruptable_child_read) {
   TServerSocket sock1("localhost", 0);
   sock1.listen();
+  BOOST_CHECK(sock1.isOpen());
   int port = sock1.getPort();
   TSocket clientSock("localhost", port);
   clientSock.open();

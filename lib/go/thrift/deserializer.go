@@ -20,7 +20,7 @@
 package thrift
 
 import (
-	"sync"
+	"context"
 )
 
 type TDeserializer struct {
@@ -30,35 +30,45 @@ type TDeserializer struct {
 
 func NewTDeserializer() *TDeserializer {
 	transport := NewTMemoryBufferLen(1024)
-
-	protocol := NewTBinaryProtocolFactoryDefault().GetProtocol(transport)
+	protocol := NewTBinaryProtocolTransport(transport)
 
 	return &TDeserializer{
-		transport,
-		protocol}
+		Transport: transport,
+		Protocol:  protocol,
+	}
 }
 
-func (t *TDeserializer) ReadString(msg TStruct, s string) (err error) {
+type reseter interface {
+	Reset()
+}
+
+func (t *TDeserializer) ReadString(ctx context.Context, msg TStruct, s string) (err error) {
 	t.Transport.Reset()
+	if r, ok := t.Protocol.(reseter); ok {
+		r.Reset()
+	}
 
 	err = nil
 	if _, err = t.Transport.Write([]byte(s)); err != nil {
 		return
 	}
-	if err = msg.Read(t.Protocol); err != nil {
+	if err = msg.Read(ctx, t.Protocol); err != nil {
 		return
 	}
 	return
 }
 
-func (t *TDeserializer) Read(msg TStruct, b []byte) (err error) {
+func (t *TDeserializer) Read(ctx context.Context, msg TStruct, b []byte) (err error) {
 	t.Transport.Reset()
+	if r, ok := t.Protocol.(reseter); ok {
+		r.Reset()
+	}
 
 	err = nil
 	if _, err = t.Transport.Write(b); err != nil {
 		return
 	}
-	if err = msg.Read(t.Protocol); err != nil {
+	if err = msg.Read(ctx, t.Protocol); err != nil {
 		return
 	}
 	return
@@ -67,9 +77,10 @@ func (t *TDeserializer) Read(msg TStruct, b []byte) (err error) {
 // TDeserializerPool is the thread-safe version of TDeserializer,
 // it uses resource pool of TDeserializer under the hood.
 //
-// It must be initialized with NewTDeserializerPool.
+// It must be initialized with either NewTDeserializerPool or
+// NewTDeserializerPoolSizeFactory.
 type TDeserializerPool struct {
-	pool sync.Pool
+	pool *pool[TDeserializer]
 }
 
 // NewTDeserializerPool creates a new TDeserializerPool.
@@ -77,22 +88,37 @@ type TDeserializerPool struct {
 // NewTDeserializer can be used as the arg here.
 func NewTDeserializerPool(f func() *TDeserializer) *TDeserializerPool {
 	return &TDeserializerPool{
-		pool: sync.Pool{
-			New: func() interface{} {
-				return f()
-			},
-		},
+		pool: newPool(f, nil),
 	}
 }
 
-func (t *TDeserializerPool) ReadString(msg TStruct, s string) error {
-	d := t.pool.Get().(*TDeserializer)
-	defer t.pool.Put(d)
-	return d.ReadString(msg, s)
+// NewTDeserializerPoolSizeFactory creates a new TDeserializerPool with
+// the given size and protocol factory.
+//
+// Note that the size is not the limit. The TMemoryBuffer underneath can grow
+// larger than that. It just dictates the initial size.
+func NewTDeserializerPoolSizeFactory(size int, factory TProtocolFactory) *TDeserializerPool {
+	return &TDeserializerPool{
+		pool: newPool(func() *TDeserializer {
+			transport := NewTMemoryBufferLen(size)
+			protocol := factory.GetProtocol(transport)
+
+			return &TDeserializer{
+				Transport: transport,
+				Protocol:  protocol,
+			}
+		}, nil),
+	}
 }
 
-func (t *TDeserializerPool) Read(msg TStruct, b []byte) error {
-	d := t.pool.Get().(*TDeserializer)
-	defer t.pool.Put(d)
-	return d.Read(msg, b)
+func (t *TDeserializerPool) ReadString(ctx context.Context, msg TStruct, s string) error {
+	d := t.pool.get()
+	defer t.pool.put(&d)
+	return d.ReadString(ctx, msg, s)
+}
+
+func (t *TDeserializerPool) Read(ctx context.Context, msg TStruct, b []byte) error {
+	d := t.pool.get()
+	defer t.pool.put(&d)
+	return d.Read(ctx, msg, b)
 }

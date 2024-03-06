@@ -54,7 +54,6 @@ using apache::thrift::protocol::TProtocol;
 using apache::thrift::concurrency::Runnable;
 using apache::thrift::concurrency::ThreadManager;
 using apache::thrift::concurrency::ThreadFactory;
-using apache::thrift::concurrency::ThreadFactory;
 using apache::thrift::concurrency::Thread;
 using apache::thrift::concurrency::Mutex;
 using apache::thrift::concurrency::Guard;
@@ -159,7 +158,7 @@ private:
   /// The optional user-provided event-base (for single-thread servers)
   event_base* userEventBase_;
 
-  /// For processing via thread pool, may be NULL
+  /// For processing via thread pool, may be nullptr
   std::shared_ptr<ThreadManager> threadManager_;
 
   /// Is thread pool processing?

@@ -83,8 +83,10 @@ public:
                  int crbuf_size = DEFAULT_CRBUF_SIZE,
                  int uwbuf_size = DEFAULT_UWBUF_SIZE,
                  int cwbuf_size = DEFAULT_CWBUF_SIZE,
-                 int16_t comp_level = Z_DEFAULT_COMPRESSION)
-    : transport_(transport),
+                 int16_t comp_level = Z_DEFAULT_COMPRESSION,
+                 std::shared_ptr<TConfiguration> config = nullptr)
+    : TVirtualTransport(config),
+      transport_(transport),
       urpos_(0),
       uwpos_(0),
       input_ended_(false),
@@ -229,12 +231,19 @@ class TZlibTransportFactory : public TTransportFactory {
 public:
   TZlibTransportFactory() = default;
 
+  /**
+   * Wraps a transport factory into a zlibbed one.
+   */
+  TZlibTransportFactory(std::shared_ptr<TTransportFactory> transportFactory);
+
   ~TZlibTransportFactory() override = default;
 
-  std::shared_ptr<TTransport> getTransport(std::shared_ptr<TTransport> trans) override {
-    return std::shared_ptr<TTransport>(new TZlibTransport(trans));
-  }
+  std::shared_ptr<TTransport> getTransport(std::shared_ptr<TTransport> trans) override;
+
+protected:
+  std::shared_ptr<TTransportFactory> transportFactory_;
 };
+
 }
 }
 } // apache::thrift::transport

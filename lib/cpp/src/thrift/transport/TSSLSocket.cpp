@@ -30,6 +30,9 @@
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
+#ifdef HAVE_POLL_H
+#include <poll.h>
+#endif
 #ifdef HAVE_SYS_POLL_H
 #include <sys/poll.h>
 #endif
@@ -152,7 +155,15 @@ void cleanupOpenSSL() {
   CONF_modules_unload(1);
   EVP_cleanup();
   CRYPTO_cleanup_all_ex_data();
+#if OPENSSL_VERSION_NUMBER >= 0x10100000
+  // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
+  OPENSSL_thread_stop();
+#else
+  // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
+  // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
+  // https://www.openssl.org/docs/manmaster/man3/ERR_remove_state.html
   ERR_remove_state(0);
+#endif
   ERR_free_strings();
 
   mutexes.reset();
@@ -214,34 +225,37 @@ SSL* SSLContext::createSSL() {
 }
 
 // TSSLSocket implementation
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx)
-  : TSocket(), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, std::shared_ptr<TConfiguration> config)
+  : TSocket(config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
 }
 
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, std::shared_ptr<THRIFT_SOCKET> interruptListener)
-        : TSocket(), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, std::shared_ptr<THRIFT_SOCKET> interruptListener,
+                      std::shared_ptr<TConfiguration> config)
+        : TSocket(config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
   interruptListener_ = interruptListener;
 }
 
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, THRIFT_SOCKET socket)
-  : TSocket(socket), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, THRIFT_SOCKET socket, std::shared_ptr<TConfiguration> config)
+  : TSocket(socket, config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
 }
 
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, THRIFT_SOCKET socket, std::shared_ptr<THRIFT_SOCKET> interruptListener)
-        : TSocket(socket, interruptListener), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, THRIFT_SOCKET socket, std::shared_ptr<THRIFT_SOCKET> interruptListener,
+                      std::shared_ptr<TConfiguration> config)
+        : TSocket(socket, interruptListener, config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
 }
 
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, string host, int port)
-  : TSocket(host, port), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, string host, int port, std::shared_ptr<TConfiguration> config)
+  : TSocket(host, port, config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
 }
 
-TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, string host, int port, std::shared_ptr<THRIFT_SOCKET> interruptListener)
-        : TSocket(host, port), server_(false), ssl_(nullptr), ctx_(ctx) {
+TSSLSocket::TSSLSocket(std::shared_ptr<SSLContext> ctx, string host, int port, std::shared_ptr<THRIFT_SOCKET> interruptListener,
+                      std::shared_ptr<TConfiguration> config)
+        : TSocket(host, port, config), server_(false), ssl_(nullptr), ctx_(ctx) {
   init();
   interruptListener_ = interruptListener;
 }
@@ -379,7 +393,15 @@ void TSSLSocket::close() {
     SSL_free(ssl_);
     ssl_ = nullptr;
     handshakeCompleted_ = false;
+#if OPENSSL_VERSION_NUMBER >= 0x10100000
+    // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
+    OPENSSL_thread_stop();
+#else
+    // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
+    // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
+    // https://www.openssl.org/docs/manmaster/man3/ERR_remove_state.html
     ERR_remove_state(0);
+#endif
   }
   TSocket::close();
 }
@@ -391,6 +413,7 @@ void TSSLSocket::close() {
  * exception incase of failure.
 */
 uint32_t TSSLSocket::read(uint8_t* buf, uint32_t len) {
+  checkReadBytesAvailable(len);
   initializeHandshake();
   if (!checkHandshake())
     throw TTransportException(TTransportException::UNKNOWN, "retry again");
@@ -485,7 +508,7 @@ void TSSLSocket::write(const uint8_t* buf, uint32_t len) {
               && (errno_copy != THRIFT_EAGAIN)) {
             break;
           }
-        // fallthrough        
+        // fallthrough
         case SSL_ERROR_WANT_READ:
         case SSL_ERROR_WANT_WRITE:
           if (isLibeventSafe()) {
@@ -553,6 +576,7 @@ uint32_t TSSLSocket::write_partial(const uint8_t* buf, uint32_t len) {
 }
 
 void TSSLSocket::flush() {
+  resetConsumedMessageSize();
   // Don't throw exception if not open. Thrift servers close socket twice.
   if (ssl_ == nullptr) {
     return;
@@ -562,7 +586,7 @@ void TSSLSocket::flush() {
     throw TSSLException("BIO_flush: Handshake is not completed");
   BIO* bio = SSL_get_wbio(ssl_);
   if (bio == nullptr) {
-    throw TSSLException("SSL_get_wbio returns NULL");
+    throw TSSLException("SSL_get_wbio returns nullptr");
   }
   if (BIO_flush(bio) != 1) {
     int errno_copy = THRIFT_GET_SOCKET_ERROR;
@@ -798,10 +822,10 @@ unsigned int TSSLSocket::waitForEvent(bool wantRead) {
   }
 
   if (bio == nullptr) {
-    throw TSSLException("SSL_get_?bio returned NULL");
+    throw TSSLException("SSL_get_?bio returned nullptr");
   }
 
-  if (BIO_get_fd(bio, &fdSocket) <= 0) {
+  if (BIO_get_fd(bio, &fdSocket) < 0) {
     throw TSSLException("BIO_get_fd failed");
   }
 
@@ -943,7 +967,7 @@ void TSSLSocketFactory::authenticate(bool required) {
 void TSSLSocketFactory::loadCertificate(const char* path, const char* format) {
   if (path == nullptr || format == nullptr) {
     throw TTransportException(TTransportException::BAD_ARGS,
-                              "loadCertificateChain: either <path> or <format> is NULL");
+                              "loadCertificateChain: either <path> or <format> is nullptr");
   }
   if (strcmp(format, "PEM") == 0) {
     if (SSL_CTX_use_certificate_chain_file(ctx_->get(), path) == 0) {
@@ -960,15 +984,17 @@ void TSSLSocketFactory::loadCertificate(const char* path, const char* format) {
 void TSSLSocketFactory::loadCertificateFromBuffer(const char* aCertificate, const char* format) {
   if (aCertificate == nullptr || format == nullptr) {
     throw TTransportException(TTransportException::BAD_ARGS,
-                              "loadCertificate: either <path> or <format> is NULL");
+                              "loadCertificate: either <path> or <format> is nullptr");
   }
   if (strcmp(format, "PEM") == 0) {
     BIO* mem = BIO_new(BIO_s_mem());
     BIO_puts(mem, aCertificate);
-    X509* cert = PEM_read_bio_X509(mem, NULL, 0, NULL);
+    X509* cert = PEM_read_bio_X509(mem, nullptr, nullptr, nullptr);
     BIO_free(mem);
+    const int status = SSL_CTX_use_certificate(ctx_->get(), cert);
+    X509_free(cert);
 
-    if (SSL_CTX_use_certificate(ctx_->get(), cert) == 0) {
+    if (status != 1) {
       int errno_copy = THRIFT_GET_SOCKET_ERROR;
       string errors;
       buildErrors(errors, errno_copy);
@@ -982,7 +1008,7 @@ void TSSLSocketFactory::loadCertificateFromBuffer(const char* aCertificate, cons
 void TSSLSocketFactory::loadPrivateKey(const char* path, const char* format) {
   if (path == nullptr || format == nullptr) {
     throw TTransportException(TTransportException::BAD_ARGS,
-                              "loadPrivateKey: either <path> or <format> is NULL");
+                              "loadPrivateKey: either <path> or <format> is nullptr");
   }
   if (strcmp(format, "PEM") == 0) {
     if (SSL_CTX_use_PrivateKey_file(ctx_->get(), path, SSL_FILETYPE_PEM) == 0) {
@@ -997,15 +1023,21 @@ void TSSLSocketFactory::loadPrivateKey(const char* path, const char* format) {
 void TSSLSocketFactory::loadPrivateKeyFromBuffer(const char* aPrivateKey, const char* format) {
   if (aPrivateKey == nullptr || format == nullptr) {
     throw TTransportException(TTransportException::BAD_ARGS,
-                              "loadPrivateKey: either <path> or <format> is NULL");
+                              "loadPrivateKey: either <path> or <format> is nullptr");
   }
   if (strcmp(format, "PEM") == 0) {
-    BIO* mem = BIO_new(BIO_s_mem());
+    EVP_PKEY* cert;
+    BIO* mem;
+
+    mem = BIO_new(BIO_s_mem());
     BIO_puts(mem, aPrivateKey);
-    EVP_PKEY* cert = PEM_read_bio_PrivateKey(mem, nullptr, nullptr, nullptr);
+    cert = PEM_read_bio_PrivateKey(mem, nullptr, nullptr, nullptr);
 
     BIO_free(mem);
-    if (SSL_CTX_use_PrivateKey(ctx_->get(), cert) == 0) {
+    const int status = SSL_CTX_use_PrivateKey(ctx_->get(), cert);
+    EVP_PKEY_free(cert);
+
+    if (status == 0) {
       int errno_copy = THRIFT_GET_SOCKET_ERROR;
       string errors;
       buildErrors(errors, errno_copy);
@@ -1019,7 +1051,7 @@ void TSSLSocketFactory::loadPrivateKeyFromBuffer(const char* aPrivateKey, const 
 void TSSLSocketFactory::loadTrustedCertificates(const char* path, const char* capath) {
   if (path == nullptr) {
     throw TTransportException(TTransportException::BAD_ARGS,
-                              "loadTrustedCertificates: <path> is NULL");
+                              "loadTrustedCertificates: <path> is nullptr");
   }
   if (SSL_CTX_load_verify_locations(ctx_->get(), path, capath) == 0) {
     int errno_copy = THRIFT_GET_SOCKET_ERROR;
@@ -1035,12 +1067,15 @@ void TSSLSocketFactory::loadTrustedCertificatesFromBuffer(const char* aCertifica
                               "loadTrustedCertificates: aCertificate is empty");
   }
   X509_STORE* vX509Store = SSL_CTX_get_cert_store(ctx_->get());
+
   BIO* mem = BIO_new(BIO_s_mem());
   BIO_puts(mem, aCertificate);
-  X509* cert = PEM_read_bio_X509(mem, NULL, 0, NULL);
+  X509* cert = PEM_read_bio_X509(mem, nullptr, nullptr, nullptr);
   BIO_free(mem);
+  const int status = X509_STORE_add_cert(vX509Store, cert);
+  X509_free(cert);
 
-  if (X509_STORE_add_cert(vX509Store, cert) == 0) {
+  if (status != 1) {
     int errno_copy = THRIFT_GET_SOCKET_ERROR;
     string errors;
     buildErrors(errors, errno_copy);
@@ -1050,10 +1085,14 @@ void TSSLSocketFactory::loadTrustedCertificatesFromBuffer(const char* aCertifica
   if (aChain) {
     mem = BIO_new(BIO_s_mem());
     BIO_puts(mem, aChain);
-    cert = PEM_read_bio_X509(mem, NULL, 0, NULL);
+    cert = PEM_read_bio_X509(mem, nullptr, nullptr, nullptr);
     BIO_free(mem);
 
+    // NOTE: The x509 certificate provided to SSL_CTX_add_extra_chain_cert()
+    // will be freed by the library when the SSL_CTX is destroyed. Do not free
+    // the x509 object manually here.
     if (SSL_CTX_add_extra_chain_cert(ctx_->get(), cert) == 0) {
+      X509_free(cert);
       int errno_copy = THRIFT_GET_SOCKET_ERROR;
       string errors;
       buildErrors(errors, errno_copy);

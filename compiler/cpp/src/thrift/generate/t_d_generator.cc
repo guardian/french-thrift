@@ -69,14 +69,15 @@ public:
 
     out_dir_base_ = "gen-d";
   }
+  std::string display_name() const override;
 
 protected:
 
   // D reserved words are suffixed with an underscore
   static string suffix_if_reserved(const string& name) {
-	const bool isIn = std::binary_search(std::begin(d_reserved_words), std::end(d_reserved_words), name);
-	string ret = isIn ? name + "_" : name;
-	return ret;
+    const bool isIn = std::binary_search(std::begin(d_reserved_words), std::end(d_reserved_words), name);
+    string ret = isIn ? name + "_" : name;
+    return ret;
   }
 
   void init_generator() override {
@@ -219,7 +220,7 @@ protected:
     f_service << "import " << suffix_if_reserved(render_package(*get_program())) << program_name_ << "_types;" << endl;
 
     t_service* extends_service = tservice->get_extends();
-    if (extends_service != NULL) {
+    if (extends_service != nullptr) {
       f_service << "import " << suffix_if_reserved(render_package(*(extends_service->get_program())))
                 << suffix_if_reserved(extends_service->get_name()) << ";" << endl;
     }
@@ -227,7 +228,7 @@ protected:
     f_service << endl;
 
     string extends = "";
-    if (tservice->get_extends() != NULL) {
+    if (tservice->get_extends() != nullptr) {
       extends = " : " + suffix_if_reserved(render_type_name(tservice->get_extends()));
     }
 
@@ -299,7 +300,7 @@ protected:
         meta << "TParamMeta(`" << suffix_if_reserved((*p_iter)->get_name()) << "`, " << (*p_iter)->get_key();
 
         t_const_value* cv = (*p_iter)->get_value();
-        if (cv != NULL) {
+        if (cv != nullptr) {
           meta << ", q{" << render_const_value((*p_iter)->get_type(), cv) << "}";
         }
         meta << ")";
@@ -371,6 +372,7 @@ private:
   /**
    * Writes a server skeleton for the passed service to out.
    */
+
   void print_server_skeleton(ostream& out, t_service* tservice) {
     string svc_name = suffix_if_reserved(tservice->get_name());
 
@@ -403,8 +405,8 @@ private:
       out << indent() << "// Your implementation goes here." << endl << indent() << "writeln(\""
           << suffix_if_reserved((*f_iter)->get_name()) << " called\");" << endl;
 
-	  t_type* rt = (*f_iter)->get_returntype();
-	  if (!rt->is_void()) {
+      t_type* rt = (*f_iter)->get_returntype();
+      if (!rt->is_void()) {
         indent(out) << "return typeof(return).init;" << endl;
       }
 
@@ -432,6 +434,7 @@ private:
   /**
    * Writes the definition of a struct or an exception type to out.
    */
+
   void print_struct_definition(ostream& out, t_struct* tstruct, bool is_exception) {
     const vector<t_field*>& members = tstruct->get_members();
 
@@ -475,7 +478,7 @@ private:
         t_const_value* cv = (*m_iter)->get_value();
         t_field::e_req req = (*m_iter)->get_req();
         out << ", " << render_req(req);
-        if (cv != NULL) {
+        if (cv != nullptr) {
           out << ", q{" << render_const_value((*m_iter)->get_type(), cv) << "}";
         }
         out << ")";
@@ -495,6 +498,7 @@ private:
    * Prints the D function signature (including return type) for the given
    * method.
    */
+
   void print_function_signature(ostream& out, t_function* fn) {
     out << render_type_name(fn->get_returntype()) << " " << suffix_if_reserved(fn->get_name()) << "(";
 
@@ -568,13 +572,13 @@ private:
         const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = value->get_map();
         map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
         for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-          t_type* field_type = NULL;
+          t_type* field_type = nullptr;
           for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
             if ((*f_iter)->get_name() == v_iter->first->get_string()) {
               field_type = (*f_iter)->get_type();
             }
           }
-          if (field_type == NULL) {
+          if (field_type == nullptr) {
             throw "Type error: " + type->get_name() + " has no field "
                 + v_iter->first->get_string();
           }
@@ -722,6 +726,7 @@ private:
    * Writes the default list of imports (which are written to every generated
    * module) to f.
    */
+
   void print_default_imports(ostream& out) {
     indent(out) << "import thrift.base;" << endl << "import thrift.codegen.base;" << endl
                 << "import thrift.util.hashset;" << endl << endl;
@@ -770,5 +775,10 @@ vector<string> t_d_generator::d_reserved_words = {
     "typeid", "typeof", "ubyte", "ucent", "uint", "ulong", "union", "unittest",
     "ushort", "version", "void", "wchar", "while", "with"
 };
+
+std::string t_d_generator::display_name() const {
+  return "D";
+}
+
 
 THRIFT_REGISTER_GENERATOR(d, "D", "")

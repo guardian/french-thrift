@@ -81,6 +81,7 @@ public:
 
     init_allowed__markup();
   }
+  std::string display_name() const override;
 
   void generate_program() override;
   void generate_program_toc();
@@ -694,7 +695,7 @@ int t_html_generator::print_type(t_type* ttype) {
     string type_name = ttype->get_name();
     f_out_ << "<a href=\"" << make_file_link(prog_name + ".html") << "#";
     if (ttype->is_typedef()) {
-      f_out_ << "Struct_";
+      f_out_ << "Typedef_";
     } else if (ttype->is_struct() || ttype->is_xception()) {
       f_out_ << "Struct_";
     } else if (ttype->is_enum()) {
@@ -776,13 +777,13 @@ void t_html_generator::print_const_value(t_type* type, t_const_value* tvalue) {
     const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = tvalue->get_map();
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + truetype->get_name() + " has no field "
             + v_iter->first->get_string();
       }
@@ -990,7 +991,7 @@ void t_html_generator::generate_struct(t_struct* tstruct) {
     }
     f_out_ << "</td><td>";
     t_const_value* default_val = (*mem_iter)->get_value();
-    if (default_val != NULL) {
+    if (default_val != nullptr) {
       f_out_ << "<code>";
       print_const_value((*mem_iter)->get_type(), default_val);
       f_out_ << "</code>";
@@ -1049,7 +1050,7 @@ void t_html_generator::generate_service(t_service* tservice) {
       first = false;
       print_type((*arg_iter)->get_type());
       f_out_ << " " << (*arg_iter)->get_name();
-      if ((*arg_iter)->get_value() != NULL) {
+      if ((*arg_iter)->get_value() != nullptr) {
         f_out_ << " = ";
         print_const_value((*arg_iter)->get_type(), (*arg_iter)->get_value());
       }
@@ -1075,6 +1076,11 @@ void t_html_generator::generate_service(t_service* tservice) {
     f_out_ << "</div>";
   }
 }
+
+std::string t_html_generator::display_name() const {
+  return "HTML";
+}
+
 
 THRIFT_REGISTER_GENERATOR(
     html,

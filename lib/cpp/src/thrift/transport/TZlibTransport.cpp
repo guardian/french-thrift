@@ -136,6 +136,7 @@ inline int TZlibTransport::readAvail() const {
 }
 
 uint32_t TZlibTransport::read(uint8_t* buf, uint32_t len) {
+  checkReadBytesAvailable(len);
   uint32_t need = len;
 
   // TODO(dreiss): Skip urbuf on big reads.
@@ -265,6 +266,7 @@ void TZlibTransport::flush() {
   }
 
   flushToTransport(Z_FULL_FLUSH);
+  resetConsumedMessageSize();
 }
 
 void TZlibTransport::finish() {
@@ -335,6 +337,7 @@ const uint8_t* TZlibTransport::borrow(uint8_t* buf, uint32_t* len) {
 }
 
 void TZlibTransport::consume(uint32_t len) {
+  countConsumedMessageBytes(len);
   if (readAvail() >= (int)len) {
     urpos_ += len;
   } else {
@@ -396,6 +399,18 @@ void TZlibTransport::verifyChecksum() {
   throw TTransportException(TTransportException::CORRUPTED_DATA,
                             "verifyChecksum() called before end of "
                             "zlib stream");
+}
+
+TZlibTransportFactory::TZlibTransportFactory(std::shared_ptr<TTransportFactory> transportFactory)
+  :transportFactory_(transportFactory) {
+}
+
+std::shared_ptr<TTransport> TZlibTransportFactory::getTransport(std::shared_ptr<TTransport> trans) {
+  if (transportFactory_) {
+    return std::shared_ptr<TTransport>(new TZlibTransport(transportFactory_->getTransport(trans)));
+  } else {
+    return std::shared_ptr<TTransport>(new TZlibTransport(trans));
+  }
 }
 }
 }

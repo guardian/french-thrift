@@ -116,7 +116,6 @@ class TBinaryProtocolTests: XCTestCase {
     do {
       try writeVal.write(to: proto)
       try? transport.flush()
-
     } catch let error {
       XCTAssertFalse(true, "Caught Error attempting to write \(error)")
     }
@@ -129,6 +128,7 @@ class TBinaryProtocolTests: XCTestCase {
       XCTAssertFalse(true, "Caught Error attempting to read \(error)")
     }
   }
+
   func testUnsafeBitcastUpdate() {
     let value: Double = 3.14159
     let val: Int64 = 31415926
@@ -162,7 +162,8 @@ class TBinaryProtocolTests: XCTestCase {
       ("testBoolWriteRead", testBoolWriteRead),
       ("testStringWriteRead", testStringWriteRead),
       ("testDataWriteRead", testDataWriteRead),
-      ("testStructWriteRead", testStructWriteRead)
+      ("testStructWriteRead", testStructWriteRead),
+      ("testUnsafeBitcastUpdate", testUnsafeBitcastUpdate)
     ]
   }
 }
