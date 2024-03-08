@@ -41,7 +41,7 @@ type
   strict private
     FUri : string;
     FInputStream : IThriftStream;
-    FOutputMemoryStream : TMemoryStream;
+    FOutputMemoryStream : TThriftMemoryStream;
     FDnsResolveTimeout : Integer;
     FConnectionTimeout : Integer;
     FSendTimeout : Integer;
@@ -127,7 +127,7 @@ begin
   FSecureProtocols := DEFAULT_THRIFT_SECUREPROTOCOLS;
 
   FCustomHeaders := TThriftDictionaryImpl<string,string>.Create;
-  FOutputMemoryStream := TMemoryStream.Create;
+  FOutputMemoryStream := TThriftMemoryStream.Create;
 end;
 
 destructor TWinHTTPClientImpl.Destroy;
@@ -151,7 +151,7 @@ begin
     url := TWinHTTPUrlImpl.Create( FUri);
 
     info := TErrorInfo.WinHTTPSession;
-    session := TWinHTTPSessionImpl.Create('Apache Thrift Delphi WinHTTP');
+    session := TWinHTTPSessionImpl.Create('ApacheThriftDelphi/WinHTTP');
     session.EnableSecureProtocols( SecureProtocolsAsWinHTTPFlags);
 
     info := TErrorInfo.WinHTTPConnection;
@@ -269,7 +269,7 @@ end;
 procedure TWinHTTPClientImpl.Open;
 begin
   FreeAndNil( FOutputMemoryStream);
-  FOutputMemoryStream := TMemoryStream.Create;
+  FOutputMemoryStream := TThriftMemoryStream.Create;
 end;
 
 procedure TWinHTTPClientImpl.Close;
@@ -284,7 +284,7 @@ begin
     SendRequest;
   finally
     FreeAndNil( FOutputMemoryStream);
-    FOutputMemoryStream := TMemoryStream.Create;
+    FOutputMemoryStream := TThriftMemoryStream.Create;
     ASSERT( FOutputMemoryStream <> nil);
   end;
 end;
@@ -333,6 +333,8 @@ begin
     else raise TTransportExceptionInterrupted.Create( sMsg);
   end;
 
+  // we're about to receive a new message, so reset everyting
+  ResetConsumedMessageSize(-1);
   FInputStream := THTTPResponseStream.Create( http);
   if http.QueryTotalResponseSize( dwSize)  // FALSE indicates "no info available"
   then UpdateKnownMessageSize( dwSize);

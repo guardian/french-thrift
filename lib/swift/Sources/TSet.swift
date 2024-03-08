@@ -22,35 +22,38 @@ import Foundation
 public struct TSet<Element : TSerializable & Hashable> : SetAlgebra, Hashable, Collection, ExpressibleByArrayLiteral, TSerializable {
   /// Typealias for Storage type
   public typealias Storage = Set<Element>
-  
-  
+
+
   /// Internal Storage used for TSet (Set\<Element\>)
   internal var storage : Storage
-  
-  
+
+
   /// Mark: Collection
+
+  public typealias Element = Storage.Element
+  public typealias Indices = Storage.Indices
   public typealias Index = Storage.Index
   public typealias IndexDistance = Int
   public typealias SubSequence = Storage.SubSequence
-  
-  
+
+
   public var indices: Storage.Indices { return storage.indices }
-  
+
   // Must implement isEmpty even though both SetAlgebra and Collection provide it due to their conflciting default implementations
   public var isEmpty: Bool { return storage.isEmpty }
-  
+
   public func distance(from start: Index, to end: Index) -> IndexDistance {
     return storage.distance(from: start, to: end)
   }
-  
+
   public func index(_ i: Index, offsetBy n: IndexDistance) -> Index {
     return storage.index(i, offsetBy: n)
   }
-  
+
   public func index(_ i: Index, offsetBy n: IndexDistance, limitedBy limit: Index) -> Index? {
     return storage.index(i, offsetBy: n, limitedBy: limit)
   }
-  
+
   #if swift(>=3.2)
   public subscript (position: Storage.Index) -> Element {
       return storage[position]
@@ -60,54 +63,54 @@ public struct TSet<Element : TSerializable & Hashable> : SetAlgebra, Hashable, C
     return storage[position]
   }
   #endif
-  
+
   /// Mark: SetAlgebra
   internal init(storage: Set<Element>) {
     self.storage = storage
   }
-  
+
   public func contains(_ member: Element) -> Bool {
     return storage.contains(member)
   }
-  
+
   public mutating func insert(_ newMember: Element) -> (inserted: Bool, memberAfterInsert: Element) {
     return storage.insert(newMember)
   }
-  
+
   public mutating func remove(_ member: Element) -> Element? {
     return storage.remove(member)
   }
-  
+
   public func union(_ other: TSet<Element>) -> TSet {
     return TSet(storage: storage.union(other.storage))
   }
-  
+
   public mutating func formIntersection(_ other: TSet<Element>) {
     return storage.formIntersection(other.storage)
   }
-  
+
   public mutating func formSymmetricDifference(_ other: TSet<Element>) {
     return storage.formSymmetricDifference(other.storage)
   }
-  
+
   public mutating func formUnion(_ other: TSet<Element>) {
     return storage.formUnion(other.storage)
   }
-  
+
   public func intersection(_ other: TSet<Element>) -> TSet {
     return TSet(storage: storage.intersection(other.storage))
   }
-  
+
   public func symmetricDifference(_ other: TSet<Element>) -> TSet {
     return TSet(storage: storage.symmetricDifference(other.storage))
   }
-  
+
   public mutating func update(with newMember: Element) -> Element? {
     return storage.update(with: newMember)
   }
-  
+
   /// Mark: IndexableBase
-  
+
   public var startIndex: Index { return storage.startIndex }
   public var endIndex: Index { return storage.endIndex }
   public func index(after i: Index) -> Index {
@@ -117,32 +120,32 @@ public struct TSet<Element : TSerializable & Hashable> : SetAlgebra, Hashable, C
   public func formIndex(after i: inout Storage.Index) {
     storage.formIndex(after: &i)
   }
-  
+
   public subscript(bounds: Range<Index>) -> SubSequence {
     return storage[bounds]
   }
 
-  
+
   /// Mark: Hashable
   public func hash(into hasher: inout Hasher) {
     hasher.combine(storage)
   }
-  
+
   /// Mark: TSerializable
   public static var thriftType : TType { return .set }
-  
+
   public init() {
     storage = Storage()
   }
-  
+
   public init(arrayLiteral elements: Element...) {
     self.storage = Storage(elements)
   }
-  
+
   public init<Source : Sequence>(_ sequence: Source) where Source.Iterator.Element == Element {
     storage = Storage(sequence)
   }
-  
+
   public static func read(from proto: TProtocol) throws -> TSet {
     let (elementType, size) = try proto.readSetBegin()
     if elementType != Element.thriftType {
@@ -157,7 +160,7 @@ public struct TSet<Element : TSerializable & Hashable> : SetAlgebra, Hashable, C
     try proto.readSetEnd()
     return set
   }
-  
+
   public func write(to proto: TProtocol) throws {
     try proto.writeSetBegin(elementType: Element.thriftType, size: Int32(self.count))
     for element in self.storage {
@@ -174,7 +177,7 @@ extension TSet: CustomStringConvertible, CustomDebugStringConvertible {
   public var debugDescription : String {
     return storage.debugDescription
   }
-  
+
 }
 
 public func ==<Element>(lhs: TSet<Element>, rhs: TSet<Element>) -> Bool {

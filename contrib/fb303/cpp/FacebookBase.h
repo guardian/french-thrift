@@ -33,11 +33,10 @@
 namespace facebook { namespace fb303 {
 
 using apache::thrift::concurrency::Mutex;
-using apache::thrift::concurrency::ReadWriteMutex;
 using apache::thrift::server::TServer;
 
-struct ReadWriteInt : ReadWriteMutex {int64_t value;};
-struct ReadWriteCounterMap : ReadWriteMutex,
+struct ReadWriteInt : Mutex {int64_t value;};
+struct ReadWriteCounterMap : Mutex,
                              std::map<std::string, ReadWriteInt> {};
 
 /**
@@ -65,7 +64,7 @@ class FacebookBase : virtual public FacebookServiceIf {
   virtual void reinitialize() {}
 
   virtual void shutdown() {
-    if (server_.get() != NULL) {
+    if (server_.get() != nullptr) {
       server_->stop();
     }
   }

@@ -131,6 +131,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
@@ -151,6 +152,7 @@ public:
   /**
    * Structs!
    */
+
   void generate_js_struct(t_struct* tstruct, bool is_exception);
   void generate_js_struct_definition(std::ostream& out,
                                      t_struct* tstruct,
@@ -163,6 +165,7 @@ public:
   /**
    * Service-level generation functions
    */
+
   void generate_service_helpers(t_service* tservice);
   void generate_service_interface(t_service* tservice);
   void generate_service_rest(t_service* tservice);
@@ -223,6 +226,8 @@ public:
   std::string argument_list(t_struct* tstruct, bool include_callback = false);
   std::string type_to_enum(t_type* ttype);
   std::string make_valid_nodeJs_identifier(std::string const& name);
+  std::string next_identifier_name(std::vector<t_field*> const& fields, std::string const& base_name);
+  bool find_field(std::vector<t_field*> const& fields, std::string const& name);
 
   /**
    * Helper parser functions
@@ -265,7 +270,7 @@ public:
 
   std::string js_type_namespace(t_program* p) {
     if (gen_node_) {
-      if (p != NULL && p != program_) {
+      if (p != nullptr && p != program_) {
         return make_valid_nodeJs_identifier(p->get_name()) + "_ttypes.";
       }
       return "ttypes.";
@@ -325,7 +330,7 @@ public:
    * @param t_field The field to check
    * @return string
    */
-  string ts_get_req(t_field* field) {return (field->get_req() == t_field::T_OPTIONAL || field->get_value() != NULL ? "?" : ""); }
+  string ts_get_req(t_field* field) {return (field->get_req() == t_field::T_OPTIONAL || field->get_value() != nullptr ? "?" : ""); }
 
   /**
    * Returns the documentation, if the provided documentable object has one.
@@ -738,13 +743,13 @@ string t_js_generator::render_const_value(t_type* type, t_const_value* value) {
     const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = value->get_map();
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw std::runtime_error("type error: " + type->get_name() + " has no field " + v_iter->first->get_string());
       }
       if (v_iter != val.begin())
@@ -901,20 +906,23 @@ void t_js_generator::generate_js_struct_definition(ostream& out,
   for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
     string dval = declare_field(*m_iter, false, true);
     t_type* t = get_true_type((*m_iter)->get_type());
-    if ((*m_iter)->get_value() != NULL && !(t->is_struct() || t->is_xception())) {
+    if ((*m_iter)->get_value() != nullptr && !(t->is_struct() || t->is_xception())) {
       dval = render_const_value((*m_iter)->get_type(), (*m_iter)->get_value());
       out << indent() << "this." << (*m_iter)->get_name() << " = " << dval << ";" << endl;
     } else {
       out << indent() << dval << ";" << endl;
     }
     if (gen_ts_) {
-      if (gen_node_) {
-        f_types_ts_ << ts_indent() << "public " << (*m_iter)->get_name() << ": "
-                    << ts_get_type((*m_iter)->get_type()) << ";" << endl;
-      } else {
-        f_types_ts_ << ts_indent() << (*m_iter)->get_name() << ": "
-                    << ts_get_type((*m_iter)->get_type()) << ";" << endl;
-      }
+      string ts_access = gen_node_ ? "public " : "";
+      string member_name = (*m_iter)->get_name();
+
+      // Special case. Exceptions derive from Error, and error has a non optional message field.
+      // Ignore the optional flag in this case, otherwise we will generate a incompatible field
+      // in the eyes of typescript. 
+      string optional_flag = is_exception && member_name == "message" ? "" : ts_get_req(*m_iter);
+ 
+      f_types_ts_ << ts_indent() << ts_access << member_name << optional_flag << ": "
+                  << ts_get_type((*m_iter)->get_type()) << ";" << endl;
     }
   }
 
@@ -923,7 +931,7 @@ void t_js_generator::generate_js_struct_definition(ostream& out,
 
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
       t_type* t = get_true_type((*m_iter)->get_type());
-      if ((*m_iter)->get_value() != NULL && (t->is_struct() || t->is_xception())) {
+      if ((*m_iter)->get_value() != nullptr && (t->is_struct() || t->is_xception())) {
         indent(out) << "this." << (*m_iter)->get_name() << " = "
                     << render_const_value(t, (*m_iter)->get_value()) << ";" << endl;
       }
@@ -1210,7 +1218,7 @@ void t_js_generator::generate_service(t_service* tservice) {
   f_service_ << js_includes() << endl << render_includes() << endl;
 
   if (gen_ts_) {
-    if (tservice->get_extends() != NULL) {
+    if (tservice->get_extends() != nullptr) {
       f_service_ts_ << "/// <reference path=\"" << tservice->get_extends()->get_name()
                     << ".d.ts\" />" << endl;
     }
@@ -1262,13 +1270,16 @@ void t_js_generator::generate_service(t_service* tservice) {
   }
 
   if (gen_node_) {
-    if (tservice->get_extends() != NULL) {
+    if (tservice->get_extends() != nullptr) {
       f_service_ << js_const_type_ <<  tservice->get_extends()->get_name() << " = require('./"
                  << tservice->get_extends()->get_name() << "');" << endl << js_const_type_
                  << tservice->get_extends()->get_name()
                  << "Client = " << tservice->get_extends()->get_name() << ".Client;" << endl
                  << js_const_type_ << tservice->get_extends()->get_name()
                  << "Processor = " << tservice->get_extends()->get_name() << ".Processor;" << endl;
+
+      f_service_ts_ << "import " << tservice->get_extends()->get_name() << " = require('./"
+                    << tservice->get_extends()->get_name() << "');" << endl;
     }
 
     f_service_ << js_const_type_ << "ttypes = require('./" + program_->get_name() + "_types');" << endl;
@@ -1311,12 +1322,15 @@ void t_js_generator::generate_service_processor(t_service* tservice) {
     f_service_ << prefix << service_name_ << "Processor = " << "exports.Processor";
     if (gen_ts_) {
       f_service_ts_ << endl << "declare class Processor ";
-      if (tservice->get_extends() != NULL) {
-        f_service_ts_ << "extends " << tservice->get_extends()->get_name() << "Processor ";
+      if (tservice->get_extends() != nullptr) {
+        f_service_ts_ << "extends " << tservice->get_extends()->get_name() << ".Processor ";
       }
       f_service_ts_ << "{" << endl;
       indent_up();
-      f_service_ts_ << ts_indent() << "private _handler: object;" << endl << endl;
+
+      if(tservice->get_extends() == nullptr) {
+        f_service_ts_ << ts_indent() << "private _handler: object;" << endl << endl;
+      }
       f_service_ts_ << ts_indent() << "constructor(handler: object);" << endl;
       f_service_ts_ << ts_indent() << "process(input: thrift.TProtocol, output: thrift.TProtocol): void;" << endl;
       indent_down();
@@ -1326,14 +1340,14 @@ void t_js_generator::generate_service_processor(t_service* tservice) {
              << "exports.Processor";
   }
 
-  bool is_subclass_service = tservice->get_extends() != NULL;
+  bool is_subclass_service = tservice->get_extends() != nullptr;
 
   // ES6 Constructor
   if (gen_es6_) {
     if (is_subclass_service) {
-      f_service_ << " = class extends " << tservice->get_extends()->get_name() << "Processor {" << endl;
+      f_service_ << " = class " << service_name_ << "Processor extends " << tservice->get_extends()->get_name() << "Processor {" << endl;
     } else {
-      f_service_ << " = class {" << endl;
+      f_service_ << " = class " << service_name_ << "Processor {" << endl;
     }
     indent_up();
     indent(f_service_) << "constructor(handler) {" << endl;
@@ -1471,7 +1485,7 @@ void t_js_generator::generate_process_function(t_service* tservice, t_function* 
   indent_up();
 
   if (gen_es6_) {
-    indent(f_service_) << "Promise.resolve(this._handler." << tfunction->get_name() << ".bind(this._handler)(" << endl;
+    indent(f_service_) << "new Promise((resolve) => resolve(this._handler." << tfunction->get_name() << ".bind(this._handler)(" << endl;
   } else {
     string maybeComma = (fields.size() > 0 ? "," : "");
     indent(f_service_) << "Q.fcall(this._handler." << tfunction->get_name() << ".bind(this._handler)"
@@ -1486,7 +1500,7 @@ void t_js_generator::generate_process_function(t_service* tservice, t_function* 
   indent_down();
 
   if (gen_es6_) {
-    indent(f_service_) << ")).then(result => {" << endl;
+    indent(f_service_) << "))).then(result => {" << endl;
   } else {
     indent(f_service_) << ").then(function(result) {" << endl;
   }
@@ -1686,7 +1700,7 @@ void t_js_generator::generate_service_rest(t_service* tservice) {
  */
 void t_js_generator::generate_service_client(t_service* tservice) {
 
-  bool is_subclass_service = tservice->get_extends() != NULL;
+  bool is_subclass_service = tservice->get_extends() != nullptr;
 
   if (gen_node_) {
     string prefix = has_js_namespace(tservice->get_program()) ? js_namespace(tservice->get_program()) : js_const_type_;
@@ -1694,8 +1708,8 @@ void t_js_generator::generate_service_client(t_service* tservice) {
     if (gen_ts_) {
       f_service_ts_ << ts_print_doc(tservice) << ts_indent() << ts_declare() << "class "
                     << "Client ";
-      if (tservice->get_extends() != NULL) {
-        f_service_ts_ << "extends " << tservice->get_extends()->get_name() << "Client ";
+      if (tservice->get_extends() != nullptr) {
+        f_service_ts_ << "extends " << tservice->get_extends()->get_name() << ".Client ";
       }
       f_service_ts_ << "{" << endl;
     }
@@ -1714,11 +1728,12 @@ void t_js_generator::generate_service_client(t_service* tservice) {
 
   // ES6 Constructor
   if (gen_es6_) {
+
     if (is_subclass_service) {
-      f_service_ << " = class extends " << js_namespace(tservice->get_extends()->get_program())
+      f_service_ << " = class " << service_name_ << "Client extends " << js_namespace(tservice->get_extends()->get_program())
                        << tservice->get_extends()->get_name() << "Client {" << endl;
     } else {
-      f_service_ << " = class {" << endl;
+      f_service_ << " = class " << service_name_ << "Client {" << endl;
     }
     indent_up();
     if (gen_node_) {
@@ -1737,16 +1752,22 @@ void t_js_generator::generate_service_client(t_service* tservice) {
   indent_up();
 
   if (gen_node_) {
+    if (gen_es6_ && is_subclass_service) {
+      indent(f_service_) << "super(output, pClass);" << endl;
+    }
     indent(f_service_) << "this.output = output;" << endl;
     indent(f_service_) << "this.pClass = pClass;" << endl;
     indent(f_service_) << "this._seqid = 0;" << endl;
     indent(f_service_) << "this._reqs = {};" << endl;
     if (gen_ts_) {
-      f_service_ts_ << ts_indent() << "private output: thrift.TTransport;" << endl
-                    << ts_indent() << "private pClass: thrift.TProtocol;" << endl
-                    << ts_indent() << "private _seqid: number;" << endl
-                    << endl
-                    << ts_indent() << "constructor(output: thrift.TTransport, pClass: { new(trans: thrift.TTransport): thrift.TProtocol });"
+      if(!is_subclass_service) {
+        f_service_ts_ << ts_indent() << "private output: thrift.TTransport;" << endl
+                      << ts_indent() << "private pClass: thrift.TProtocol;" << endl
+                      << ts_indent() << "private _seqid: number;" << endl
+                      << endl;
+      }
+
+      f_service_ts_ << ts_indent() << "constructor(output: thrift.TTransport, pClass: { new(trans: thrift.TTransport): thrift.TProtocol });"
                     << endl;
     }
   } else {
@@ -1955,7 +1976,10 @@ void t_js_generator::generate_service_client(t_service* tservice) {
                                                      : "Thrift.MessageType.CALL";
     // Build args
     if (fields.size() > 0){
-      f_service_ << indent() << js_const_type_ << "params = {" << endl;
+      // It is possible that a method argument is named "params", we need to ensure the locally
+      // generated identifier "params" is uniquely named
+      std::string params_identifier = this->next_identifier_name(fields, "params");
+      f_service_ << indent() << js_const_type_ << params_identifier << " = {" << endl;
       indent_up();
       for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
         indent(f_service_) << (*fld_iter)->get_name() << ": " << (*fld_iter)->get_name();
@@ -1967,7 +1991,9 @@ void t_js_generator::generate_service_client(t_service* tservice) {
       }
       indent_down();
       indent(f_service_) << "};" << endl;
-      indent(f_service_) << js_const_type_ << "args = new " << argsname << "(params);" << endl;
+
+      // NOTE: "args" is a reserved keyword, so no need to generate a unique identifier
+      indent(f_service_) << js_const_type_ << "args = new " << argsname << "(" << params_identifier << ");" << endl;
     } else {
       indent(f_service_) << js_const_type_ << "args = new " << argsname << "();" << endl;
     }
@@ -2675,6 +2701,8 @@ string t_js_generator::type_to_enum(t_type* type) {
       return "Thrift.Type.I64";
     case t_base_type::TYPE_DOUBLE:
       return "Thrift.Type.DOUBLE";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return "Thrift.Type.I32";
@@ -2705,7 +2733,7 @@ string t_js_generator::ts_get_type(t_type* type) {
     t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
     switch (tbase) {
     case t_base_type::TYPE_STRING:
-      ts_type = "string";
+      ts_type = type->is_binary() ? "Buffer" : "string";
       break;
     case t_base_type::TYPE_BOOL:
       ts_type = "boolean";
@@ -2723,10 +2751,13 @@ string t_js_generator::ts_get_type(t_type* type) {
       break;
     case t_base_type::TYPE_VOID:
       ts_type = "void";
+      break;
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum() || type->is_struct() || type->is_xception()) {
     std::string type_name;
-    
+
     if (type->get_program()) {
       type_name = js_namespace(type->get_program());
 
@@ -2787,8 +2818,16 @@ std::string t_js_generator::ts_function_signature(t_function* tfunction, bool in
 
   str = tfunction->get_name() + "(";
 
+  bool has_written_optional = false;
+
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    str += (*f_iter)->get_name() + ts_get_req(*f_iter) + ": " + ts_get_type((*f_iter)->get_type());
+    // Ensure that non optional parameters do not follow optional parameters
+    // E.g. public foo(a: string, b?: string; c: string) is invalid, c must be optional, or b non-optional
+    string original_optional = ts_get_req(*f_iter);
+    string optional = has_written_optional ? "?" : original_optional;
+    has_written_optional = has_written_optional || optional.size() > 0;
+
+    str += (*f_iter)->get_name() + optional + ": " + ts_get_type((*f_iter)->get_type());
 
     if (f_iter + 1 != fields.end() || (include_callback && fields.size() > 0)) {
       str += ", ";
@@ -2934,6 +2973,38 @@ void t_js_generator::parse_thrift_package_output_directory(const std::string& th
     gen_episode_file_ = true;
   }
 }
+
+/**
+ * Checks is the specified field name is contained in the specified field vector
+ */
+bool t_js_generator::find_field(const std::vector<t_field*>& fields, const std::string& name) {
+    vector<t_field*>::const_iterator f_iter;
+    for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
+        if ((*f_iter)->get_name() == name) {
+          return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Given a vector of fields, generate a valid identifier name that does not conflict with avaliable field names
+ */
+std::string t_js_generator::next_identifier_name(const std::vector<t_field*>& fields, const std::string& base_name) {
+  // Search through fields until a match is not found, if a match is found prepend "_" to the identifier name
+  std::string current_name = this->make_valid_nodeJs_identifier(base_name);
+  while(this->find_field(fields, current_name)) {
+    current_name = this->make_valid_nodeJs_identifier("_" + current_name);
+  }
+
+  return current_name;
+}
+
+std::string t_js_generator::display_name() const {
+  return "Javascript";
+}
+
 
 THRIFT_REGISTER_GENERATOR(js,
                           "Javascript",

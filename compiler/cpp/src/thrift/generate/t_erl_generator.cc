@@ -55,8 +55,9 @@ public:
     std::map<std::string, std::string>::const_iterator iter;
 
     legacy_names_ = false;
+    delimiter_ = ".";
+    app_prefix_ = "";
     maps_ = false;
-    otp16_ = false;
     export_lines_first_ = true;
     export_types_lines_first_ = true;
 
@@ -65,15 +66,13 @@ public:
         legacy_names_ = true;
       } else if( iter->first.compare("maps") == 0) {
         maps_ = true;
-      } else if( iter->first.compare("otp16") == 0) {
-        otp16_ = true;
+      } else if( iter->first.compare("delimiter") == 0) {
+        delimiter_ = iter->second;
+      } else if( iter->first.compare("app_prefix") == 0) {
+        app_prefix_ = iter->second;
       } else {
         throw "unknown option erl:" + iter->first;
       }
-    }
-
-    if (maps_ && otp16_) {
-      throw "argument error: Cannot specify both maps and otp16; maps are not available for Erlang/OTP R16 or older";
     }
 
     out_dir_base_ = "gen-erl";
@@ -85,6 +84,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
@@ -151,9 +151,9 @@ public:
 
   std::string make_safe_for_module_name(std::string in) {
     if (legacy_names_) {
-      return decapitalize(in);
+      return decapitalize(app_prefix_ + in);
     } else {
-      return underscore(in);
+      return underscore(app_prefix_) + underscore(in);
     }
   }
 
@@ -184,8 +184,11 @@ private:
   /* if true use maps instead of dicts in generated code */
   bool maps_;
 
-  /* if true use non-namespaced dict and set instead of dict:dict and sets:set */
-  bool otp16_;
+  /* delimiter between namespace and record name */
+  std::string delimiter_;
+
+  /* used to avoid module name clashes for different applications */
+  std::string app_prefix_;
 
   /**
    * add function to export list
@@ -625,13 +628,13 @@ string t_erl_generator::render_const_value(t_type* type, t_const_value* value) {
 
     bool first = true;
     for (v_iter = val.begin(); v_iter != val.end(); ++v_iter) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
 
@@ -748,17 +751,11 @@ string t_erl_generator::render_member_type(t_field* field) {
   } else if (type->is_map()) {
     if (maps_) {
       return "map()";
-    } else if (otp16_) {
-      return "dict()";
     } else {
       return "dict:dict()";
     }
   } else if (type->is_set()) {
-    if (otp16_) {
-      return "set()";
-    } else {
       return "sets:set()";
-    }
   } else if (type->is_list()) {
     return "list()";
   } else {
@@ -909,7 +906,7 @@ void t_erl_generator::generate_service(t_service* tservice) {
 
   hrl_header(f_service_hrl_, service_name_);
 
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     f_service_hrl_ << "-include(\""
                    << make_safe_for_module_name(tservice->get_extends()->get_name())
                    << "_thrift.hrl\"). % inherit " << endl;
@@ -1013,7 +1010,7 @@ void t_erl_generator::generate_service_interface(t_service* tservice) {
   }
 
   // Inheritance - pass unknown functions to base class
-  if (tservice->get_extends() != NULL) {
+  if (tservice->get_extends() != nullptr) {
     indent(f_service_) << "function_info(Function, InfoType) ->" << endl;
     indent_up();
     indent(f_service_) << make_safe_for_module_name(tservice->get_extends()->get_name())
@@ -1133,7 +1130,13 @@ string t_erl_generator::type_name(t_type* ttype) {
   string prefix = ttype->get_program()->get_namespace("erl");
   size_t prefix_length = prefix.length();
   if (prefix_length > 0 && prefix[prefix_length - 1] != '_') {
-    prefix += '.';
+    size_t delimiter_length = delimiter_.length();
+    if (delimiter_length > 0 && delimiter_length < prefix_length) {
+        bool not_match = prefix.compare(prefix_length - delimiter_length, prefix_length, delimiter_) != 0;
+        if (not_match) {
+            prefix += delimiter_;
+        }
+    }
   }
 
   string name = ttype->get_name();
@@ -1166,6 +1169,8 @@ string t_erl_generator::type_to_enum(t_type* type) {
       return "?tType_I64";
     case t_base_type::TYPE_DOUBLE:
       return "?tType_DOUBLE";
+    default:
+      break;
     }
   } else if (type->is_enum()) {
     return "?tType_I32";
@@ -1209,6 +1214,8 @@ std::string t_erl_generator::render_type_term(t_type* type,
       return "i64";
     case t_base_type::TYPE_DOUBLE:
       return "double";
+    default:
+      break;
     }
   } else if (type->is_enum()) {
     return "i32";
@@ -1274,9 +1281,15 @@ std::string t_erl_generator::type_module(t_type* ttype) {
   return make_safe_for_module_name(ttype->get_program()->get_name()) + "_types";
 }
 
+std::string t_erl_generator::display_name() const {
+  return "Erlang";
+}
+
+
 THRIFT_REGISTER_GENERATOR(
     erl,
     "Erlang",
     "    legacynames:     Output files retain naming conventions of Thrift 0.9.1 and earlier.\n"
-    "    maps:            Generate maps instead of dicts.\n"
-    "    otp16:           Generate non-namespaced dict and set instead of dict:dict and sets:set.\n")
+    "    delimiter=       Delimiter between namespace prefix and record name. Default is '.'.\n"
+    "    app_prefix=      Application prefix for generated Erlang files.\n"
+    "    maps:            Generate maps instead of dicts.\n")

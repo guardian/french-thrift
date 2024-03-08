@@ -56,12 +56,15 @@ public:
   /**
    * Init and close methods
    */
+
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   /**
    * Program-level generation functions
    */
+
   void generate_typedef(t_typedef* ttypedef) override;
   void generate_enum(t_enum* tenum) override;
   void generate_const(t_const* tconst) override;
@@ -80,6 +83,7 @@ private:
   /**
    * Struct-level generation functions
    */
+
   void generate_lua_struct_definition(std::ostream& out,
                                       t_struct* tstruct,
                                       bool is_xception = false);
@@ -89,6 +93,7 @@ private:
   /**
    * Service-level generation functions
    */
+
   void generate_service_client(std::ostream& out, t_service* tservice);
   void generate_service_interface(std::ostream& out, t_service* tservice);
   void generate_service_processor(std::ostream& out, t_service* tservice);
@@ -99,6 +104,7 @@ private:
   /**
    * Deserialization (Read)
    */
+
   void generate_deserialize_field(std::ostream& out,
                                   t_field* tfield,
                                   bool local,
@@ -125,6 +131,7 @@ private:
   /**
    * Serialization (Write)
    */
+
   void generate_serialize_field(std::ostream& out, t_field* tfield, std::string prefix = "");
 
   void generate_serialize_struct(std::ostream& out, t_struct* tstruct, std::string prefix = "");
@@ -259,7 +266,7 @@ string t_lua_generator::render_const_value(t_type* type, t_const_value* value) {
       out << value->get_integer();
       break;
     case t_base_type::TYPE_I64:
-      out << "lualongnumber.new('" << value->get_string() << "')";
+      out << "lualongnumber.new('" << value->get_integer() << "')";
       break;
     case t_base_type::TYPE_DOUBLE:
       if (value->get_type() == t_const_value::CV_INTEGER) {
@@ -282,13 +289,13 @@ string t_lua_generator::render_const_value(t_type* type, t_const_value* value) {
     const map<t_const_value*, t_const_value*, t_const_value::value_compare>& val = value->get_map();
     map<t_const_value*, t_const_value*, t_const_value::value_compare>::const_iterator v_iter;
     for (v_iter = val.begin(); v_iter != val.end();) {
-      t_type* field_type = NULL;
+      t_type* field_type = nullptr;
       for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
         if ((*f_iter)->get_name() == v_iter->first->get_string()) {
           field_type = (*f_iter)->get_type();
         }
       }
-      if (field_type == NULL) {
+      if (field_type == nullptr) {
         throw "type error: " + type->get_name() + " has no field " + v_iter->first->get_string();
       }
 
@@ -513,7 +520,7 @@ void t_lua_generator::generate_service(t_service* tservice) {
   if (gen_requires_) {
     f_service_ << endl << "require '" << cur_ns << "ttypes'" << endl;
 
-    if (tservice->get_extends() != NULL) {
+    if (tservice->get_extends() != nullptr) {
       f_service_ << "require '" << get_namespace(tservice->get_extends()->get_program())
                  << tservice->get_extends()->get_name() << "'" << endl;
     }
@@ -550,7 +557,7 @@ void t_lua_generator::generate_service_client(ostream& out, t_service* tservice)
 
   // Client object definition
   out << classname << " = __TObject.new(";
-  if (extends_s != NULL) {
+  if (extends_s != nullptr) {
     out << extends_s->get_name() << "Client";
   } else {
     out << "__TClient";
@@ -593,7 +600,21 @@ void t_lua_generator::generate_service_client(ostream& out, t_service* tservice)
     vector<t_field*>::const_iterator fld_iter;
     for (fld_iter = args.begin(); fld_iter != args.end(); ++fld_iter) {
       std::string argname = (*fld_iter)->get_name();
-      indent(out) << "args." << argname << " = " << argname << endl;
+      if ((*fld_iter)->get_value() != nullptr) {
+        // Insert default value for nil arguments
+        t_type* type = get_true_type((*fld_iter)->get_type());
+        indent(out) << "if " << argname << " ~= nil then" << endl;
+        indent_up();
+        indent(out) << "args." << argname << " = " << argname << endl;
+        indent_down();
+        indent(out) << "else" << endl;
+        indent_up();
+        indent(out) << "args." << argname << " = " << render_const_value(type, (*fld_iter)->get_value()) << endl;
+        indent_down();
+        indent(out) << "end" << endl;
+      } else {
+        indent(out) << "args." << argname << " = " << argname << endl;
+      }
     }
 
     indent(out) << "args:write(self.oprot)" << endl;
@@ -646,7 +667,7 @@ void t_lua_generator::generate_service_processor(ostream& out, t_service* tservi
 
   // Define processor table
   out << endl << classname << " = __TObject.new(";
-  if (extends_s != NULL) {
+  if (extends_s != nullptr) {
     out << extends_s->get_name() << "Processor" << endl;
   } else {
     out << "__TProcessor" << endl;
@@ -659,7 +680,9 @@ void t_lua_generator::generate_service_processor(ostream& out, t_service* tservi
 
   indent(out) << "local name, mtype, seqid = iprot:readMessageBegin()" << endl;
   indent(out) << "local func_name = 'process_' .. name" << endl;
-  indent(out) << "if not self[func_name] or ttype(self[func_name]) ~= 'function' then";
+  indent(out) << "if not self[func_name] or ttype(self[func_name]) ~= 'function' then" << endl;
+  indent_up();
+  indent(out) << "if oprot ~= nil then";
   indent_up();
   out << endl << indent() << "iprot:skip(TType.STRUCT)" << endl << indent()
       << "iprot:readMessageEnd()" << endl << indent() << "x = TApplicationException:new{" << endl
@@ -668,8 +691,11 @@ void t_lua_generator::generate_service_processor(ostream& out, t_service* tservi
       << "seqid)" << endl << indent() << "x:write(oprot)" << endl << indent()
       << "oprot:writeMessageEnd()" << endl << indent() << "oprot.trans:flush()" << endl;
   indent_down();
+  out << indent() << "end" << endl << indent()
+      << "return false, 'Unknown function '..name" << endl;
+  indent_down();
   indent(out) << "else" << endl << indent()
-              << "  self[func_name](self, seqid, iprot, oprot, server_ctx)" << endl << indent()
+              << "  return self[func_name](self, seqid, iprot, oprot, server_ctx)" << endl << indent()
               << "end" << endl;
 
   indent_down();
@@ -698,37 +724,45 @@ void t_lua_generator::generate_process_function(ostream& out,
   // Read the request
   out << indent() << "local args = " << argsname << ":new{}" << endl << indent()
       << "local reply_type = TMessageType.REPLY" << endl << indent() << "args:read(iprot)" << endl
-      << indent() << "iprot:readMessageEnd()" << endl << indent() << "local result = " << resultname
-      << ":new{}" << endl << indent() << "local status, res = pcall(self.handler." << fn_name
-      << ", self.handler";
+      << indent() << "iprot:readMessageEnd()" << endl;
 
+  if (!tfunction->is_oneway()) {
+      out << indent() << "local result = " << resultname
+          << ":new{}" << endl;
+  }
+
+  out <<  indent() << "local status, res = pcall(self.handler." << fn_name
+      << ", self.handler";
   // Print arguments
   t_struct* args = tfunction->get_arglist();
   if (args->get_members().size() > 0) {
     out << ", " << argument_list(args, "args.");
   }
+  out << ")" << endl;
 
-  // Check for errors
-  out << ")" << endl << indent() << "if not status then" << endl << indent()
-      << "  reply_type = TMessageType.EXCEPTION" << endl << indent()
-      << "  result = TApplicationException:new{message = res}" << endl;
+  if (!tfunction->is_oneway()) {
+      // Check for errors
+      out << indent() << "if not status then" << endl << indent()
+          << "  reply_type = TMessageType.EXCEPTION" << endl << indent()
+          << "  result = TApplicationException:new{message = res}" << endl;
 
-  // Handle custom exceptions
-  const std::vector<t_field*>& xf = tfunction->get_xceptions()->get_members();
-  if (xf.size() > 0) {
-    vector<t_field*>::const_iterator x_iter;
-    for (x_iter = xf.begin(); x_iter != xf.end(); ++x_iter) {
-      out << indent() << "elseif ttype(res) == '" << (*x_iter)->get_type()->get_name() << "' then"
-          << endl << indent() << "  result." << (*x_iter)->get_name() << " = res" << endl;
-    }
+      // Handle custom exceptions
+      const std::vector<t_field*>& xf = tfunction->get_xceptions()->get_members();
+      if (xf.size() > 0) {
+          vector<t_field*>::const_iterator x_iter;
+          for (x_iter = xf.begin(); x_iter != xf.end(); ++x_iter) {
+              out << indent() << "elseif ttype(res) == '" << (*x_iter)->get_type()->get_name() << "' then"
+                  << endl << indent() << "  result." << (*x_iter)->get_name() << " = res" << endl;
+          }
+      }
+
+      // Set the result and write the reply
+      out << indent() << "else" << endl << indent() << "  result.success = res" << endl << indent()
+          << "end" << endl << indent() << "oprot:writeMessageBegin('" << fn_name << "', reply_type, "
+          << "seqid)" << endl << indent() << "result:write(oprot)" << endl << indent()
+          << "oprot:writeMessageEnd()" << endl << indent() << "oprot.trans:flush()" << endl;
   }
-
-  // Set the result and write the reply
-  out << indent() << "else" << endl << indent() << "  result.success = res" << endl << indent()
-      << "end" << endl << indent() << "oprot:writeMessageBegin('" << fn_name << "', reply_type, "
-      << "seqid)" << endl << indent() << "result:write(oprot)" << endl << indent()
-      << "oprot:writeMessageEnd()" << endl << indent() << "oprot.trans:flush()" << endl;
-
+  out << indent() << "return status, res" << endl;
   indent_down();
   indent(out) << "end" << endl;
 }
@@ -1119,6 +1153,8 @@ string t_lua_generator::type_to_enum(t_type* type) {
       return "TType.I64";
     case t_base_type::TYPE_DOUBLE:
       return "TType.DOUBLE";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return "TType.I32";
@@ -1134,6 +1170,11 @@ string t_lua_generator::type_to_enum(t_type* type) {
 
   throw "INVALID TYPE IN type_to_enum: " + type->get_name();
 }
+
+std::string t_lua_generator::display_name() const {
+  return "Lua";
+}
+
 
 THRIFT_REGISTER_GENERATOR(
     lua,

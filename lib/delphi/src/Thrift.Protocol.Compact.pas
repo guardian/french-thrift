@@ -77,8 +77,12 @@ type
       LIST          = $09,
       SET_          = $0A,
       MAP           = $0B,
-      STRUCT        = $0C
+      STRUCT        = $0C,
+      UUID          = $0D
     );
+
+  private type
+    TEightBytesArray = packed array[0..7] of Byte;
 
   strict private const
     ttypeToCompactType : array[TType] of Types = (
@@ -97,7 +101,8 @@ type
       Types.STRUCT,         // Struct  = 12,
       Types.MAP,            // Map     = 13,
       Types.SET_,           // Set_    = 14,
-      Types.LIST            // List    = 15,
+      Types.LIST,           // List    = 15,
+      Types.UUID            // Uuid    = 16
     );
 
     tcompactTypeToType : array[Types] of TType = (
@@ -113,7 +118,8 @@ type
       TType.List,       // LIST
       TType.Set_,       // SET_
       TType.Map,        // MAP
-      TType.Struct      // STRUCT
+      TType.Struct,     // STRUCT
+      TType.Uuid        // UUID
     );
 
   strict private
@@ -131,7 +137,7 @@ type
     strict private  boolValue_  : ( unused, bool_true, bool_false);
 
   public
-    constructor Create(const trans : ITransport);
+    constructor Create(const trans : ITransport);  override;
     destructor Destroy;  override;
 
   strict private
@@ -170,6 +176,7 @@ type
     procedure WriteI64( const i64: Int64); override;
     procedure WriteDouble( const dub: Double); override;
     procedure WriteBinary( const b: TBytes); overload; override;
+    procedure WriteUuid( const uuid: TGuid); override;
 
   private  // unit visible stuff
     class function  DoubleToInt64Bits( const db : Double) : Int64;
@@ -190,7 +197,7 @@ type
     class function intToZigZag( const n : Integer) : Cardinal;
 
     //Convert a Int64 into little-endian bytes in buf starting at off and going until off+7.
-    class procedure fixedLongToBytes( const n : Int64; var buf : TBytes);
+    class procedure fixedLongToBytes( const n : Int64; var buf : TEightBytesArray); inline;
 
   strict protected
     function GetMinSerializedSize( const aType : TType) : Integer;  override;
@@ -216,6 +223,7 @@ type
     function  ReadI64: Int64; override;
     function  ReadDouble:Double; override;
     function  ReadBinary: TBytes; overload; override;
+    function  ReadUuid: TGuid; override;
 
   private
     // Internal Reading methods
@@ -240,7 +248,7 @@ type
     // Note that it's important that the mask bytes are Int64 literals,
     // otherwise they'll default to ints, and when you shift an Integer left 56 bits,
     // you just get a messed up Integer.
-    class function bytesToLong( const bytes : TBytes) : Int64;
+    class function bytesToLong( const bytes : TEightBytesArray) : Int64; inline;
 
     // type testing and converting
     class function isBoolType( const b : byte) : Boolean;
@@ -319,10 +327,9 @@ end;
 
 // Write an i32 as a varint. Results in 1-5 bytes on the wire.
 procedure TCompactProtocolImpl.WriteVarint32( n : Cardinal);
-var i32buf : TBytes;
-    idx : Integer;
+var idx : Integer;
+    i32buf : packed array[0..4] of Byte;
 begin
-  SetLength( i32buf, 5);
   idx := 0;
   while TRUE do begin
     ASSERT( idx < Length(i32buf));
@@ -339,7 +346,7 @@ begin
     n := n shr 7;
   end;
 
-  Transport.Write( i32buf, 0, idx);
+  Transport.Write( @i32buf[0], 0, idx);
 end;
 
 
@@ -521,10 +528,10 @@ end;
 
 // Write a double to the wire as 8 bytes.
 procedure TCompactProtocolImpl.WriteDouble( const dub: Double);
-var data : TBytes;
+var data : TEightBytesArray;
 begin
   fixedLongToBytes( DoubleToInt64Bits(dub), data);
-  Transport.Write( data);
+  Transport.Write( @data[0], 0, SizeOf(data));
 end;
 
 
@@ -533,6 +540,14 @@ procedure TCompactProtocolImpl.WriteBinary( const b: TBytes);
 begin
   WriteVarint32( Cardinal(Length(b)));
   Transport.Write( b);
+end;
+
+procedure TCompactProtocolImpl.WriteUuid( const uuid: TGuid);
+var network : TGuid;  // in network order (Big Endian)
+begin
+  ASSERT( SizeOf(uuid) = 16);
+  network := GuidUtils.SwapByteOrder(uuid);
+  Transport.Write( @network, 0, SizeOf(network));
 end;
 
 procedure TCompactProtocolImpl.WriteMessageEnd;
@@ -580,10 +595,9 @@ end;
 
 // Write an i64 as a varint. Results in 1-10 bytes on the wire.
 procedure TCompactProtocolImpl.WriteVarint64( n : UInt64);
-var varint64out : TBytes;
-    idx : Integer;
+var idx : Integer;
+    varint64out : packed array[0..9] of Byte;
 begin
-  SetLength( varint64out, 10);
   idx := 0;
   while TRUE do begin
     ASSERT( idx < Length(varint64out));
@@ -600,7 +614,7 @@ begin
     n := n shr 7;
   end;
 
-  Transport.Write( varint64out, 0, idx);
+  Transport.Write( @varint64out[0], 0, idx);
 end;
 
 
@@ -627,9 +641,9 @@ end;
 
 
 // Convert a Int64 into 8 little-endian bytes in buf
-class procedure TCompactProtocolImpl.fixedLongToBytes( const n : Int64; var buf : TBytes);
+class procedure TCompactProtocolImpl.fixedLongToBytes( const n : Int64; var buf : TEightBytesArray);
 begin
-  SetLength( buf, 8);
+  ASSERT( Length(buf) >= 8);
   buf[0] := Byte( n         and $FF);
   buf[1] := Byte((n shr 8)  and $FF);
   buf[2] := Byte((n shr 16) and $FF);
@@ -829,11 +843,11 @@ end;
 
 
 // No magic here - just Read a double off the wire.
-function TCompactProtocolImpl.ReadDouble:Double;
-var longBits : TBytes;
+function TCompactProtocolImpl.ReadDouble : Double;
+var longBits : TEightBytesArray;
 begin
-  SetLength( longBits, 8);
-  Transport.ReadAll( longBits, 0, 8);
+  ASSERT( SizeOf(longBits) = SizeOf(result));
+  Transport.ReadAll( @longBits[0], SizeOf(longBits), 0, SizeOf(longBits));
   result := Int64BitsToDouble( bytesToLong( longBits));
 end;
 
@@ -847,6 +861,14 @@ begin
   SetLength( result, length);
   if (length > 0)
   then Transport.ReadAll( result, 0, length);
+end;
+
+function TCompactProtocolImpl.ReadUuid: TGuid;
+var network : TGuid;  // in network order (Big Endian)
+begin
+  ASSERT( SizeOf(result) = 16);
+  FTrans.ReadAll( @network, SizeOf(network), 0, SizeOf(network));
+  result := GuidUtils.SwapByteOrder(network);
 end;
 
 
@@ -934,7 +956,7 @@ end;
 // Note that it's important that the mask bytes are Int64 literals,
 // otherwise they'll default to ints, and when you shift an Integer left 56 bits,
 // you just get a messed up Integer.
-class function TCompactProtocolImpl.bytesToLong( const bytes : TBytes) : Int64;
+class function TCompactProtocolImpl.bytesToLong( const bytes : TEightBytesArray) : Int64;
 begin
   ASSERT( Length(bytes) >= 8);
   result := (Int64(bytes[7] and $FF) shl 56) or
@@ -993,6 +1015,7 @@ begin
     TType.Map:     result := SizeOf(Byte);  // element count
     TType.Set_:    result := SizeOf(Byte);  // element count
     TType.List:    result := SizeOf(Byte);  // element count
+    TType.Uuid:    result := SizeOf(TGuid);
   else
     raise TTransportExceptionBadArgs.Create('Unhandled type code');
   end;
@@ -1104,7 +1127,7 @@ end;
 procedure TestLongBytes;
 
   procedure Test( const test : Int64);
-  var buf : TBytes;
+  var buf : TCompactProtocolImpl.TEightBytesArray;
   begin
     TCompactProtocolImpl.fixedLongToBytes( test, buf);
     ASSERT( TCompactProtocolImpl.bytesToLong( buf) = test, IntToStr(test));

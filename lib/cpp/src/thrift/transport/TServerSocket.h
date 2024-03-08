@@ -20,6 +20,8 @@
 #ifndef _THRIFT_TRANSPORT_TSERVERSOCKET_H_
 #define _THRIFT_TRANSPORT_TSERVERSOCKET_H_ 1
 
+#include <functional>
+
 #include <thrift/concurrency/Mutex.h>
 #include <thrift/transport/PlatformSocket.h>
 #include <thrift/transport/TServerTransport.h>
@@ -37,22 +39,6 @@ namespace thrift {
 namespace transport {
 
 class TSocket;
-
-class TGetAddrInfoWrapper {
-public:
-  TGetAddrInfoWrapper(const char* node, const char* service, const struct addrinfo* hints);
-
-  virtual ~TGetAddrInfoWrapper();
-
-  int init();
-  const struct addrinfo* res();
-
-private:
-  const char* node_;
-  const char* service_;
-  const struct addrinfo* hints_;
-  struct addrinfo* res_;
-};
 
 /**
  * Server socket implementation of TServerTransport. Wrapper around a unix
@@ -98,6 +84,9 @@ public:
 
   ~TServerSocket() override;
 
+
+  bool isOpen() const override;
+
   void setSendTimeout(int sendTimeout);
   void setRecvTimeout(int recvTimeout);
 
@@ -138,7 +127,11 @@ public:
 
   THRIFT_SOCKET getSocketFD() override { return serverSocket_; }
 
-  int getPort();
+  int getPort() const;
+
+  std::string getPath() const;
+
+  bool isUnixDomainSocket() const;
 
   void listen() override;
   void interrupt() override;
@@ -153,6 +146,9 @@ protected:
 
 private:
   void notify(THRIFT_SOCKET notifySock);
+  void _setup_sockopts();
+  void _setup_unixdomain_sockopts();
+  void _setup_tcp_sockopts();
 
   int port_;
   std::string address_;

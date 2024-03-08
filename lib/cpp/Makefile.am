@@ -87,6 +87,8 @@ libthrift_la_SOURCES = src/thrift/TApplicationException.cpp \
                        src/thrift/transport/TNonblockingSSLServerSocket.cpp \
                        src/thrift/transport/TTransportUtils.cpp \
                        src/thrift/transport/TBufferTransports.cpp \
+                       src/thrift/transport/TWebSocketServer.cpp \
+                       src/thrift/transport/SocketCommon.cpp \
                        src/thrift/server/TConnectedClient.cpp \
                        src/thrift/server/TServer.cpp \
                        src/thrift/server/TServerFramework.cpp \
@@ -125,12 +127,13 @@ libthriftnb_la_CXXFLAGS = $(AM_CXXFLAGS)
 libthriftz_la_CXXFLAGS  = $(AM_CXXFLAGS)
 libthriftqt5_la_CXXFLAGS  = $(AM_CXXFLAGS)
 libthriftnb_la_LDFLAGS  = -release $(VERSION) $(BOOST_LDFLAGS)
-libthriftz_la_LDFLAGS   = -release $(VERSION) $(BOOST_LDFLAGS) $(ZLIB_LIBS)
+libthriftz_la_LDFLAGS   = -release $(VERSION) $(BOOST_LDFLAGS) $(ZLIB_LDFLAGS) $(ZLIB_LIBS)
 libthriftqt5_la_LDFLAGS   = -release $(VERSION) $(BOOST_LDFLAGS) $(QT5_LIBS)
 
 include_thriftdir = $(includedir)/thrift
 include_thrift_HEADERS = \
                          $(top_builddir)/config.h \
+                         src/thrift/numeric_cast.h \
                          src/thrift/thrift-config.h \
                          src/thrift/thrift_export.h \
                          src/thrift/TDispatchProcessor.h \
@@ -140,7 +143,9 @@ include_thrift_HEADERS = \
                          src/thrift/TApplicationException.h \
                          src/thrift/TLogging.h \
                          src/thrift/TToString.h \
-                         src/thrift/TBase.h
+                         src/thrift/TBase.h \
+                         src/thrift/TConfiguration.h \
+                         src/thrift/TNonCopyable.h
 
 include_concurrencydir = $(include_thriftdir)/concurrency
 include_concurrency_HEADERS = \
@@ -155,6 +160,10 @@ include_concurrency_HEADERS = \
 
 include_protocoldir = $(include_thriftdir)/protocol
 include_protocol_HEADERS = \
+                         src/thrift/protocol/TEnum.h \
+                         src/thrift/protocol/TList.h \
+                         src/thrift/protocol/TSet.h \
+                         src/thrift/protocol/TMap.h \
                          src/thrift/protocol/TBinaryProtocol.h \
                          src/thrift/protocol/TBinaryProtocol.tcc \
                          src/thrift/protocol/TCompactProtocol.h \
@@ -188,6 +197,7 @@ include_transport_HEADERS = \
                          src/thrift/transport/THttpClient.h \
                          src/thrift/transport/THttpServer.h \
                          src/thrift/transport/TSocket.h \
+                         src/thrift/transport/TSocketUtils.h \
                          src/thrift/transport/TPipe.h \
                          src/thrift/transport/TPipeServer.h \
                          src/thrift/transport/TSSLSocket.h \
@@ -198,7 +208,9 @@ include_transport_HEADERS = \
                          src/thrift/transport/TTransportUtils.h \
                          src/thrift/transport/TBufferTransports.h \
                          src/thrift/transport/TShortReadTransport.h \
-                         src/thrift/transport/TZlibTransport.h
+                         src/thrift/transport/TZlibTransport.h \
+                         src/thrift/transport/TWebSocketServer.h \
+                         src/thrift/transport/SocketCommon.h
 
 include_serverdir = $(include_thriftdir)/server
 include_server_HEADERS = \

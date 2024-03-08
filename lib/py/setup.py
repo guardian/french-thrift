@@ -62,11 +62,26 @@ class ve_build_ext(build_ext):
             raise BuildFailed()
 
 
+def read_file(path):
+    """
+    Return the contents of a file
+
+    Arguments:
+      - path: path to the file
+
+    Returns:
+      - contents of the file
+    """
+    with open(path, "r") as desc_file:
+        return desc_file.read().rstrip()
+
+
 def run_setup(with_binary):
     if with_binary:
         extensions = dict(
             ext_modules=[
                 Extension('thrift.protocol.fastbinary',
+                          extra_compile_args=['-std=c++11'],
                           sources=[
                               'src/ext/module.cpp',
                               'src/ext/types.cpp',
@@ -90,8 +105,10 @@ def run_setup(with_binary):
     twisted_deps = ['twisted']
 
     setup(name='thrift',
-          version='0.14.0',
+          version='0.19.0',
           description='Python bindings for the Apache Thrift RPC system',
+          long_description=read_file("README.md"),
+          long_description_content_type="text/markdown",
           author='Apache Thrift Developers',
           author_email='dev@thrift.apache.org',
           url='http://thrift.apache.org',

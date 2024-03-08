@@ -25,7 +25,7 @@ use super::{
     TMessageIdentifier, TMessageType,
 };
 use super::{TOutputProtocol, TOutputProtocolFactory, TSetIdentifier, TStructIdentifier, TType};
-use transport::{TReadTransport, TWriteTransport};
+use crate::transport::{TReadTransport, TWriteTransport};
 
 const COMPACT_PROTOCOL_ID: u8 = 0x82;
 const COMPACT_VERSION: u8 = 0x01;
@@ -76,22 +76,21 @@ where
             last_read_field_id: 0,
             read_field_id_stack: Vec::new(),
             pending_read_bool_value: None,
-            transport: transport,
+            transport,
         }
     }
 
-    fn read_list_set_begin(&mut self) -> ::Result<(TType, i32)> {
+    fn read_list_set_begin(&mut self) -> crate::Result<(TType, i32)> {
         let header = self.read_byte()?;
         let element_type = collection_u8_to_type(header & 0x0F)?;
 
-        let element_count;
         let possible_element_count = (header & 0xF0) >> 4;
-        if possible_element_count != 15 {
+        let element_count = if possible_element_count != 15 {
             // high bits set high if count and type encoded separately
-            element_count = possible_element_count as i32;
+            possible_element_count as i32
         } else {
-            element_count = self.transport.read_varint::<u32>()? as i32;
-        }
+            self.transport.read_varint::<u32>()? as i32
+        };
 
         Ok((element_type, element_count))
     }
@@ -101,11 +100,11 @@ impl<T> TInputProtocol for TCompactInputProtocol<T>
 where
     T: TReadTransport,
 {
-    fn read_message_begin(&mut self) -> ::Result<TMessageIdentifier> {
+    fn read_message_begin(&mut self) -> crate::Result<TMessageIdentifier> {
         let compact_id = self.read_byte()?;
         if compact_id != COMPACT_PROTOCOL_ID {
-            Err(::Error::Protocol(::ProtocolError {
-                kind: ::ProtocolErrorKind::BadVersion,
+            Err(crate::Error::Protocol(crate::ProtocolError {
+                kind: crate::ProtocolErrorKind::BadVersion,
                 message: format!("invalid compact protocol header {:?}", compact_id),
             }))
         } else {
@@ -115,8 +114,8 @@ where
         let type_and_byte = self.read_byte()?;
         let received_version = type_and_byte & COMPACT_VERSION_MASK;
         if received_version != COMPACT_VERSION {
-            Err(::Error::Protocol(::ProtocolError {
-                kind: ::ProtocolErrorKind::BadVersion,
+            Err(crate::Error::Protocol(crate::ProtocolError {
+                kind: crate::ProtocolErrorKind::BadVersion,
                 message: format!(
                     "cannot process compact protocol version {:?}",
                     received_version
@@ -128,7 +127,8 @@ where
 
         // NOTE: unsigned right shift will pad with 0s
         let message_type: TMessageType = TMessageType::try_from(type_and_byte >> 5)?;
-        let sequence_number = self.read_i32()?;
+        // writing side wrote signed sequence number as u32 to avoid zigzag encoding
+        let sequence_number = self.transport.read_varint::<u32>()? as i32;
         let service_call_name = self.read_string()?;
 
         self.last_read_field_id = 0;
@@ -140,17 +140,17 @@ where
         ))
     }
 
-    fn read_message_end(&mut self) -> ::Result<()> {
+    fn read_message_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn read_struct_begin(&mut self) -> ::Result<Option<TStructIdentifier>> {
+    fn read_struct_begin(&mut self) -> crate::Result<Option<TStructIdentifier>> {
         self.read_field_id_stack.push(self.last_read_field_id);
         self.last_read_field_id = 0;
         Ok(None)
     }
 
-    fn read_struct_end(&mut self) -> ::Result<()> {
+    fn read_struct_end(&mut self) -> crate::Result<()> {
         self.last_read_field_id = self
             .read_field_id_stack
             .pop()
@@ -158,7 +158,7 @@ where
         Ok(())
     }
 
-    fn read_field_begin(&mut self) -> ::Result<TFieldIdentifier> {
+    fn read_field_begin(&mut self) -> crate::Result<TFieldIdentifier> {
         // we can read at least one byte, which is:
         // - the type
         // - the field delta and the type
@@ -193,18 +193,18 @@ where
 
                 Ok(TFieldIdentifier {
                     name: None,
-                    field_type: field_type,
+                    field_type,
                     id: Some(self.last_read_field_id),
                 })
             }
         }
     }
 
-    fn read_field_end(&mut self) -> ::Result<()> {
+    fn read_field_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn read_bool(&mut self) -> ::Result<bool> {
+    fn read_bool(&mut self) -> crate::Result<bool> {
         match self.pending_read_bool_value.take() {
             Some(b) => Ok(b),
             None => {
@@ -212,8 +212,8 @@ where
                 match b {
                     0x01 => Ok(true),
                     0x02 => Ok(false),
-                    unkn => Err(::Error::Protocol(::ProtocolError {
-                        kind: ::ProtocolErrorKind::InvalidData,
+                    unkn => Err(crate::Error::Protocol(crate::ProtocolError {
+                        kind: crate::ProtocolErrorKind::InvalidData,
                         message: format!("cannot convert {} into bool", unkn),
                     })),
                 }
@@ -221,7 +221,7 @@ where
         }
     }
 
-    fn read_bytes(&mut self) -> ::Result<Vec<u8>> {
+    fn read_bytes(&mut self) -> crate::Result<Vec<u8>> {
         let len = self.transport.read_varint::<u32>()?;
         let mut buf = vec![0u8; len as usize];
         self.transport
@@ -230,50 +230,52 @@ where
             .map(|_| buf)
     }
 
-    fn read_i8(&mut self) -> ::Result<i8> {
+    fn read_i8(&mut self) -> crate::Result<i8> {
         self.read_byte().map(|i| i as i8)
     }
 
-    fn read_i16(&mut self) -> ::Result<i16> {
+    fn read_i16(&mut self) -> crate::Result<i16> {
         self.transport.read_varint::<i16>().map_err(From::from)
     }
 
-    fn read_i32(&mut self) -> ::Result<i32> {
+    fn read_i32(&mut self) -> crate::Result<i32> {
         self.transport.read_varint::<i32>().map_err(From::from)
     }
 
-    fn read_i64(&mut self) -> ::Result<i64> {
+    fn read_i64(&mut self) -> crate::Result<i64> {
         self.transport.read_varint::<i64>().map_err(From::from)
     }
 
-    fn read_double(&mut self) -> ::Result<f64> {
-        self.transport.read_f64::<LittleEndian>().map_err(From::from)
+    fn read_double(&mut self) -> crate::Result<f64> {
+        self.transport
+            .read_f64::<LittleEndian>()
+            .map_err(From::from)
     }
 
-    fn read_string(&mut self) -> ::Result<String> {
+    fn read_string(&mut self) -> crate::Result<String> {
         let bytes = self.read_bytes()?;
         String::from_utf8(bytes).map_err(From::from)
     }
 
-    fn read_list_begin(&mut self) -> ::Result<TListIdentifier> {
+    fn read_list_begin(&mut self) -> crate::Result<TListIdentifier> {
         let (element_type, element_count) = self.read_list_set_begin()?;
         Ok(TListIdentifier::new(element_type, element_count))
     }
 
-    fn read_list_end(&mut self) -> ::Result<()> {
+    fn read_list_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn read_set_begin(&mut self) -> ::Result<TSetIdentifier> {
+    fn read_set_begin(&mut self) -> crate::Result<TSetIdentifier> {
         let (element_type, element_count) = self.read_list_set_begin()?;
         Ok(TSetIdentifier::new(element_type, element_count))
     }
 
-    fn read_set_end(&mut self) -> ::Result<()> {
+    fn read_set_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn read_map_begin(&mut self) -> ::Result<TMapIdentifier> {
+    fn read_map_begin(&mut self) -> crate::Result<TMapIdentifier> {
         let element_count = self.transport.read_varint::<u32>()? as i32;
         if element_count == 0 {
             Ok(TMapIdentifier::new(None, None, 0))
@@ -285,14 +287,14 @@ where
         }
     }
 
-    fn read_map_end(&mut self) -> ::Result<()> {
+    fn read_map_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
     // utility
     //
 
-    fn read_byte(&mut self) -> ::Result<u8> {
+    fn read_byte(&mut self) -> crate::Result<u8> {
         let mut buf = [0u8; 1];
         self.transport
             .read_exact(&mut buf)
@@ -371,12 +373,12 @@ where
             last_write_field_id: 0,
             write_field_id_stack: Vec::new(),
             pending_write_bool_field_identifier: None,
-            transport: transport,
+            transport,
         }
     }
 
     // FIXME: field_type as unconstrained u8 is bad
-    fn write_field_header(&mut self, field_type: u8, field_id: i16) -> ::Result<()> {
+    fn write_field_header(&mut self, field_type: u8, field_id: i16) -> crate::Result<()> {
         let field_delta = field_id - self.last_write_field_id;
         if field_delta > 0 && field_delta < 15 {
             self.write_byte(((field_delta as u8) << 4) | field_type)?;
@@ -388,7 +390,11 @@ where
         Ok(())
     }
 
-    fn write_list_set_begin(&mut self, element_type: TType, element_count: i32) -> ::Result<()> {
+    fn write_list_set_begin(
+        &mut self,
+        element_type: TType,
+        element_count: i32,
+    ) -> crate::Result<()> {
         let elem_identifier = collection_type_to_u8(element_type);
         if element_count <= 14 {
             let header = (element_count as u8) << 4 | elem_identifier;
@@ -396,6 +402,8 @@ where
         } else {
             let header = 0xF0 | elem_identifier;
             self.write_byte(header)?;
+            // element count is strictly positive as per the spec, so
+            // cast i32 as u32 so that varint writing won't use zigzag encoding
             self.transport
                 .write_varint(element_count as u32)
                 .map_err(From::from)
@@ -414,26 +422,28 @@ impl<T> TOutputProtocol for TCompactOutputProtocol<T>
 where
     T: TWriteTransport,
 {
-    fn write_message_begin(&mut self, identifier: &TMessageIdentifier) -> ::Result<()> {
+    fn write_message_begin(&mut self, identifier: &TMessageIdentifier) -> crate::Result<()> {
         self.write_byte(COMPACT_PROTOCOL_ID)?;
         self.write_byte((u8::from(identifier.message_type) << 5) | COMPACT_VERSION)?;
-        self.write_i32(identifier.sequence_number)?;
+        // cast i32 as u32 so that varint writing won't use zigzag encoding
+        self.transport
+            .write_varint(identifier.sequence_number as u32)?;
         self.write_string(&identifier.name)?;
         Ok(())
     }
 
-    fn write_message_end(&mut self) -> ::Result<()> {
+    fn write_message_end(&mut self) -> crate::Result<()> {
         self.assert_no_pending_bool_write();
         Ok(())
     }
 
-    fn write_struct_begin(&mut self, _: &TStructIdentifier) -> ::Result<()> {
+    fn write_struct_begin(&mut self, _: &TStructIdentifier) -> crate::Result<()> {
         self.write_field_id_stack.push(self.last_write_field_id);
         self.last_write_field_id = 0;
         Ok(())
     }
 
-    fn write_struct_end(&mut self) -> ::Result<()> {
+    fn write_struct_end(&mut self) -> crate::Result<()> {
         self.assert_no_pending_bool_write();
         self.last_write_field_id = self
             .write_field_id_stack
@@ -442,7 +452,7 @@ where
         Ok(())
     }
 
-    fn write_field_begin(&mut self, identifier: &TFieldIdentifier) -> ::Result<()> {
+    fn write_field_begin(&mut self, identifier: &TFieldIdentifier) -> crate::Result<()> {
         match identifier.field_type {
             TType::Bool => {
                 if self.pending_write_bool_field_identifier.is_some() {
@@ -463,17 +473,17 @@ where
         }
     }
 
-    fn write_field_end(&mut self) -> ::Result<()> {
+    fn write_field_end(&mut self) -> crate::Result<()> {
         self.assert_no_pending_bool_write();
         Ok(())
     }
 
-    fn write_field_stop(&mut self) -> ::Result<()> {
+    fn write_field_stop(&mut self) -> crate::Result<()> {
         self.assert_no_pending_bool_write();
         self.write_byte(type_to_u8(TType::Stop))
     }
 
-    fn write_bool(&mut self, b: bool) -> ::Result<()> {
+    fn write_bool(&mut self, b: bool) -> crate::Result<()> {
         match self.pending_write_bool_field_identifier.take() {
             Some(pending) => {
                 let field_id = pending.id.expect("bool field should have a field id");
@@ -490,64 +500,70 @@ where
         }
     }
 
-    fn write_bytes(&mut self, b: &[u8]) -> ::Result<()> {
+    fn write_bytes(&mut self, b: &[u8]) -> crate::Result<()> {
+        // length is strictly positive as per the spec, so
+        // cast i32 as u32 so that varint writing won't use zigzag encoding
         self.transport.write_varint(b.len() as u32)?;
         self.transport.write_all(b).map_err(From::from)
     }
 
-    fn write_i8(&mut self, i: i8) -> ::Result<()> {
+    fn write_i8(&mut self, i: i8) -> crate::Result<()> {
         self.write_byte(i as u8)
     }
 
-    fn write_i16(&mut self, i: i16) -> ::Result<()> {
+    fn write_i16(&mut self, i: i16) -> crate::Result<()> {
         self.transport
             .write_varint(i)
             .map_err(From::from)
             .map(|_| ())
     }
 
-    fn write_i32(&mut self, i: i32) -> ::Result<()> {
+    fn write_i32(&mut self, i: i32) -> crate::Result<()> {
         self.transport
             .write_varint(i)
             .map_err(From::from)
             .map(|_| ())
     }
 
-    fn write_i64(&mut self, i: i64) -> ::Result<()> {
+    fn write_i64(&mut self, i: i64) -> crate::Result<()> {
         self.transport
             .write_varint(i)
             .map_err(From::from)
             .map(|_| ())
     }
 
-    fn write_double(&mut self, d: f64) -> ::Result<()> {
-        self.transport.write_f64::<LittleEndian>(d).map_err(From::from)
+    fn write_double(&mut self, d: f64) -> crate::Result<()> {
+        self.transport
+            .write_f64::<LittleEndian>(d)
+            .map_err(From::from)
     }
 
-    fn write_string(&mut self, s: &str) -> ::Result<()> {
+    fn write_string(&mut self, s: &str) -> crate::Result<()> {
         self.write_bytes(s.as_bytes())
     }
 
-    fn write_list_begin(&mut self, identifier: &TListIdentifier) -> ::Result<()> {
+    fn write_list_begin(&mut self, identifier: &TListIdentifier) -> crate::Result<()> {
         self.write_list_set_begin(identifier.element_type, identifier.size)
     }
 
-    fn write_list_end(&mut self) -> ::Result<()> {
+    fn write_list_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn write_set_begin(&mut self, identifier: &TSetIdentifier) -> ::Result<()> {
+    fn write_set_begin(&mut self, identifier: &TSetIdentifier) -> crate::Result<()> {
         self.write_list_set_begin(identifier.element_type, identifier.size)
     }
 
-    fn write_set_end(&mut self) -> ::Result<()> {
+    fn write_set_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn write_map_begin(&mut self, identifier: &TMapIdentifier) -> ::Result<()> {
+    fn write_map_begin(&mut self, identifier: &TMapIdentifier) -> crate::Result<()> {
         if identifier.size == 0 {
             self.write_byte(0)
         } else {
+            // element count is strictly positive as per the spec, so
+            // cast i32 as u32 so that varint writing won't use zigzag encoding
             self.transport.write_varint(identifier.size as u32)?;
 
             let key_type = identifier
@@ -565,18 +581,18 @@ where
         }
     }
 
-    fn write_map_end(&mut self) -> ::Result<()> {
+    fn write_map_end(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    fn flush(&mut self) -> ::Result<()> {
+    fn flush(&mut self) -> crate::Result<()> {
         self.transport.flush().map_err(From::from)
     }
 
     // utility
     //
 
-    fn write_byte(&mut self, b: u8) -> ::Result<()> {
+    fn write_byte(&mut self, b: u8) -> crate::Result<()> {
         self.transport.write(&[b]).map_err(From::from).map(|_| ())
     }
 }
@@ -593,7 +609,10 @@ impl TCompactOutputProtocolFactory {
 }
 
 impl TOutputProtocolFactory for TCompactOutputProtocolFactory {
-    fn create(&self, transport: Box<dyn TWriteTransport + Send>) -> Box<dyn TOutputProtocol + Send> {
+    fn create(
+        &self,
+        transport: Box<dyn TWriteTransport + Send>,
+    ) -> Box<dyn TOutputProtocol + Send> {
         Box::new(TCompactOutputProtocol::new(transport))
     }
 }
@@ -618,21 +637,18 @@ fn type_to_u8(field_type: TType) -> u8 {
         TType::Set => 0x0A,
         TType::Map => 0x0B,
         TType::Struct => 0x0C,
-        _ => panic!(format!(
-            "should not have attempted to convert {} to u8",
-            field_type
-        )),
+        _ => panic!("should not have attempted to convert {} to u8", field_type),
     }
 }
 
-fn collection_u8_to_type(b: u8) -> ::Result<TType> {
+fn collection_u8_to_type(b: u8) -> crate::Result<TType> {
     match b {
         0x01 => Ok(TType::Bool),
         o => u8_to_type(o),
     }
 }
 
-fn u8_to_type(b: u8) -> ::Result<TType> {
+fn u8_to_type(b: u8) -> crate::Result<TType> {
     match b {
         0x00 => Ok(TType::Stop),
         0x03 => Ok(TType::I08), // equivalent to TType::Byte
@@ -645,8 +661,8 @@ fn u8_to_type(b: u8) -> ::Result<TType> {
         0x0A => Ok(TType::Set),
         0x0B => Ok(TType::Map),
         0x0C => Ok(TType::Struct),
-        unkn => Err(::Error::Protocol(::ProtocolError {
-            kind: ::ProtocolErrorKind::InvalidData,
+        unkn => Err(crate::Error::Protocol(crate::ProtocolError {
+            kind: crate::ProtocolErrorKind::InvalidData,
             message: format!("cannot convert {} into TType", unkn),
         })),
     }
@@ -655,56 +671,35 @@ fn u8_to_type(b: u8) -> ::Result<TType> {
 #[cfg(test)]
 mod tests {
 
-    use protocol::{
+    use std::i32;
+
+    use crate::protocol::{
         TFieldIdentifier, TInputProtocol, TListIdentifier, TMapIdentifier, TMessageIdentifier,
         TMessageType, TOutputProtocol, TSetIdentifier, TStructIdentifier, TType,
     };
-    use transport::{ReadHalf, TBufferChannel, TIoChannel, WriteHalf};
+    use crate::transport::{ReadHalf, TBufferChannel, TIoChannel, WriteHalf};
 
     use super::*;
 
     #[test]
-    fn must_write_message_begin_0() {
-        let (_, mut o_prot) = test_objects();
-
-        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
-            "foo",
-            TMessageType::Call,
-            431
-        )));
-
-        #[cfg_attr(rustfmt, rustfmt::skip)]
-        let expected: [u8; 8] = [
-            0x82, /* protocol ID */
-            0x21, /* message type | protocol version */
-            0xDE,
-            0x06, /* zig-zag varint sequence number */
-            0x03, /* message-name length */
-            0x66,
-            0x6F,
-            0x6F /* "foo" */,
-        ];
-
-        assert_eq_written_bytes!(o_prot, expected);
-    }
-
-    #[test]
-    fn must_write_message_begin_1() {
+    fn must_write_message_begin_largest_maximum_positive_sequence_number() {
         let (_, mut o_prot) = test_objects();
 
         assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
             "bar",
             TMessageType::Reply,
-            991828
+            i32::MAX
         )));
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
-        let expected: [u8; 9] = [
+        #[rustfmt::skip]
+        let expected: [u8; 11] = [
             0x82, /* protocol ID */
             0x41, /* message type | protocol version */
-            0xA8,
-            0x89,
-            0x79, /* zig-zag varint sequence number */
+            0xFF,
+            0xFF,
+            0xFF,
+            0xFF,
+            0x07, /* non-zig-zag varint sequence number */
             0x03, /* message-name length */
             0x62,
             0x61,
@@ -715,6 +710,408 @@ mod tests {
     }
 
     #[test]
+    fn must_read_message_begin_largest_maximum_positive_sequence_number() {
+        let (mut i_prot, _) = test_objects();
+
+        #[rustfmt::skip]
+        let source_bytes: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0xFF,
+            0xFF,
+            0xFF,
+            0xFF,
+            0x07, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("bar", TMessageType::Reply, i32::MAX);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_positive_sequence_number_0() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "foo",
+            TMessageType::Call,
+            431
+        )));
+
+        #[rustfmt::skip]
+        let expected: [u8; 8] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0xAF,
+            0x03, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_positive_sequence_number_0() {
+        let (mut i_prot, _) = test_objects();
+
+        #[rustfmt::skip]
+        let source_bytes: [u8; 8] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0xAF,
+            0x03, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("foo", TMessageType::Call, 431);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_positive_sequence_number_1() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "bar",
+            TMessageType::Reply,
+            991_828
+        )));
+
+        #[rustfmt::skip]
+        let expected: [u8; 9] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0xD4,
+            0xC4,
+            0x3C, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_positive_sequence_number_1() {
+        let (mut i_prot, _) = test_objects();
+
+        #[rustfmt::skip]
+        let source_bytes: [u8; 9] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0xD4,
+            0xC4,
+            0x3C, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("bar", TMessageType::Reply, 991_828);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_zero_sequence_number() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "bar",
+            TMessageType::Reply,
+            0
+        )));
+
+        #[rustfmt::skip]
+        let expected: [u8; 7] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0x00, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_zero_sequence_number() {
+        let (mut i_prot, _) = test_objects();
+
+        #[rustfmt::skip]
+        let source_bytes: [u8; 7] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0x00, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("bar", TMessageType::Reply, 0);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_largest_minimum_negative_sequence_number() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "bar",
+            TMessageType::Reply,
+            i32::MIN
+        )));
+
+        // two's complement notation of i32::MIN = 1000_0000_0000_0000_0000_0000_0000_0000
+        #[rustfmt::skip]
+        let expected: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0x80,
+            0x80,
+            0x80,
+            0x80,
+            0x08, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_largest_minimum_negative_sequence_number() {
+        let (mut i_prot, _) = test_objects();
+
+        // two's complement notation of i32::MIN = 1000_0000_0000_0000_0000_0000_0000_0000
+        #[rustfmt::skip]
+        let source_bytes: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x41, /* message type | protocol version */
+            0x80,
+            0x80,
+            0x80,
+            0x80,
+            0x08, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x62,
+            0x61,
+            0x72 /* "bar" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("bar", TMessageType::Reply, i32::MIN);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_negative_sequence_number_0() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "foo",
+            TMessageType::Call,
+            -431
+        )));
+
+        // signed two's complement of -431 = 1111_1111_1111_1111_1111_1110_0101_0001
+        #[rustfmt::skip]
+        let expected: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0xD1,
+            0xFC,
+            0xFF,
+            0xFF,
+            0x0F, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_negative_sequence_number_0() {
+        let (mut i_prot, _) = test_objects();
+
+        // signed two's complement of -431 = 1111_1111_1111_1111_1111_1110_0101_0001
+        #[rustfmt::skip]
+        let source_bytes: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0xD1,
+            0xFC,
+            0xFF,
+            0xFF,
+            0x0F, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("foo", TMessageType::Call, -431);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_negative_sequence_number_1() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "foo",
+            TMessageType::Call,
+            -73_184_125
+        )));
+
+        // signed two's complement of -73184125 = 1111_1011_1010_0011_0100_1100_1000_0011
+        #[rustfmt::skip]
+        let expected: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0x83,
+            0x99,
+            0x8D,
+            0xDD,
+            0x0F, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_negative_sequence_number_1() {
+        let (mut i_prot, _) = test_objects();
+
+        // signed two's complement of -73184125 = 1111_1011_1010_0011_0100_1100_1000_0011
+        #[rustfmt::skip]
+        let source_bytes: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0x83,
+            0x99,
+            0x8D,
+            0xDD,
+            0x0F, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("foo", TMessageType::Call, -73_184_125);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
+    fn must_write_message_begin_negative_sequence_number_2() {
+        let (_, mut o_prot) = test_objects();
+
+        assert_success!(o_prot.write_message_begin(&TMessageIdentifier::new(
+            "foo",
+            TMessageType::Call,
+            -1_073_741_823
+        )));
+
+        // signed two's complement of -1073741823 = 1100_0000_0000_0000_0000_0000_0000_0001
+        #[rustfmt::skip]
+        let expected: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0x81,
+            0x80,
+            0x80,
+            0x80,
+            0x0C, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F /* "foo" */,
+        ];
+
+        assert_eq_written_bytes!(o_prot, expected);
+    }
+
+    #[test]
+    fn must_read_message_begin_negative_sequence_number_2() {
+        let (mut i_prot, _) = test_objects();
+
+        // signed two's complement of -1073741823 = 1100_0000_0000_0000_0000_0000_0000_0001
+        #[rustfmt::skip]
+        let source_bytes: [u8; 11] = [
+            0x82, /* protocol ID */
+            0x21, /* message type | protocol version */
+            0x81,
+            0x80,
+            0x80,
+            0x80,
+            0x0C, /* non-zig-zag varint sequence number */
+            0x03, /* message-name length */
+            0x66,
+            0x6F,
+            0x6F, /* "foo" */
+        ];
+
+        i_prot.transport.set_readable_bytes(&source_bytes);
+
+        let expected = TMessageIdentifier::new("foo", TMessageType::Call, -1_073_741_823);
+        let res = assert_success!(i_prot.read_message_begin());
+
+        assert_eq!(&expected, &res);
+    }
+
+    #[test]
     fn must_round_trip_upto_i64_maxvalue() {
         // See https://issues.apache.org/jira/browse/THRIFT-5131
         for i in 0..64 {
@@ -722,11 +1119,7 @@ mod tests {
             let val: i64 = ((1u64 << i) - 1) as i64;
 
             o_prot
-                .write_field_begin(&TFieldIdentifier::new(
-                    "val",
-                    TType::I64,
-                    1
-                ))
+                .write_field_begin(&TFieldIdentifier::new("val", TType::I64, 1))
                 .unwrap();
             o_prot.write_i64(val).unwrap();
             o_prot.write_field_end().unwrap();
@@ -743,7 +1136,7 @@ mod tests {
     fn must_round_trip_message_begin() {
         let (mut i_prot, mut o_prot) = test_objects();
 
-        let ident = TMessageIdentifier::new("service_call", TMessageType::Call, 1283948);
+        let ident = TMessageIdentifier::new("service_call", TMessageType::Call, 1_283_948);
 
         assert_success!(o_prot.write_message_begin(&ident));
 
@@ -787,7 +1180,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 5] = [
             0x03, /* field type */
             0x00, /* first field id */
@@ -902,7 +1295,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 4] = [
             0x15, /* field delta (1) | field type */
             0x1A, /* field delta (1) | field type */
@@ -1015,7 +1408,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 8] = [
             0x05, /* field type */
             0x00, /* first field id */
@@ -1139,7 +1532,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 10] = [
             0x16, /* field delta (1) | field type */
             0x85, /* field delta (8) | field type */
@@ -1156,6 +1549,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_struct_with_mix_of_long_and_delta_fields() {
         let (mut i_prot, mut o_prot) = test_objects();
@@ -1304,7 +1698,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 7] = [
             0x16, /* field delta (1) | field type */
             0x85, /* field delta (8) | field type */
@@ -1318,6 +1712,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_nested_structs_0() {
         // last field of the containing struct is a delta
@@ -1477,7 +1872,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 7] = [
             0x16, /* field delta (1) | field type */
             0x85, /* field delta (8) | field type */
@@ -1491,6 +1886,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_nested_structs_1() {
         // last field of the containing struct is a delta
@@ -1650,7 +2046,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 7] = [
             0x16, /* field delta (1) | field type */
             0x08, /* field type */
@@ -1664,6 +2060,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_nested_structs_2() {
         let (mut i_prot, mut o_prot) = test_objects();
@@ -1820,7 +2217,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 8] = [
             0x16, /* field delta (1) | field type */
             0x08, /* field type */
@@ -1835,6 +2232,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_nested_structs_3() {
         // last field of the containing struct is a full write
@@ -1986,7 +2384,7 @@ mod tests {
         assert_success!(o_prot.write_field_stop());
         assert_success!(o_prot.write_struct_end());
 
-        #[cfg_attr(rustfmt, rustfmt::skip)]
+        #[rustfmt::skip]
         let expected: [u8; 7] = [
             0x11, /* field delta (1) | true */
             0x82, /* field delta (8) | false */
@@ -2000,6 +2398,7 @@ mod tests {
         assert_eq_written_bytes!(o_prot, expected);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn must_round_trip_bool_field() {
         let (mut i_prot, mut o_prot) = test_objects();
@@ -2245,7 +2644,7 @@ mod tests {
     fn must_round_trip_large_sized_set_begin() {
         let (mut i_prot, mut o_prot) = test_objects();
 
-        let ident = TSetIdentifier::new(TType::Map, 3928429);
+        let ident = TSetIdentifier::new(TType::Map, 3_928_429);
 
         assert_success!(o_prot.write_set_begin(&ident));
 
@@ -2312,7 +2711,7 @@ mod tests {
     fn must_round_trip_map_begin() {
         let (mut i_prot, mut o_prot) = test_objects();
 
-        let ident = TMapIdentifier::new(TType::Map, TType::List, 1928349);
+        let ident = TMapIdentifier::new(TType::Map, TType::List, 1_928_349);
 
         assert_success!(o_prot.write_map_begin(&ident));
 
@@ -2403,11 +2802,13 @@ mod tests {
     fn must_read_write_double() {
         let (mut i_prot, mut o_prot) = test_objects();
 
-        let double = 3.141592653589793238462643;
+        #[allow(clippy::approx_constant)]
+        let double = 3.141_592_653_589_793;
         o_prot.write_double(double).unwrap();
         copy_write_buffer_to_read_buffer!(o_prot);
 
-        assert_eq!(i_prot.read_double().unwrap(), double);
+        let read_double = i_prot.read_double().unwrap();
+        assert!(read_double - double < std::f64::EPSILON);
     }
 
     #[test]
@@ -2415,16 +2816,16 @@ mod tests {
         let (_, mut o_prot) = test_objects();
         let expected = [24, 45, 68, 84, 251, 33, 9, 64];
 
-        let double = 3.141592653589793238462643;
+        #[allow(clippy::approx_constant)]
+        let double = 3.141_592_653_589_793;
         o_prot.write_double(double).unwrap();
 
         assert_eq_written_bytes!(o_prot, expected);
-
     }
 
     fn assert_no_write<F>(mut write_fn: F)
     where
-        F: FnMut(&mut TCompactOutputProtocol<WriteHalf<TBufferChannel>>) -> ::Result<()>,
+        F: FnMut(&mut TCompactOutputProtocol<WriteHalf<TBufferChannel>>) -> crate::Result<()>,
     {
         let (_, mut o_prot) = test_objects();
         assert!(write_fn(&mut o_prot).is_ok());

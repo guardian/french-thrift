@@ -5,9 +5,9 @@
 // to you under the Apache License, Version 2.0 (the
 // "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -44,13 +44,40 @@ namespace Thrift.Transport.Server
             try
             {
                 // Make server socket
-                _server = new TcpListener(IPAddress.Any, port);
+		_server = new TcpListener(IPAddress.IPv6Any, port);
+                _server.Server.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, false);
                 _server.Server.NoDelay = true;
             }
             catch (Exception)
             {
                 _server = null;
                 throw new TTransportException("Could not create ServerSocket on port " + port + ".");
+            }
+        }
+
+        public override bool IsOpen()
+        {
+            return (_server != null) 
+				&& (_server.Server != null) 
+				&& _server.Server.IsBound;
+        }
+
+        public int GetPort()
+        {
+            if ((_server != null) && (_server.Server != null) && (_server.Server.LocalEndPoint != null))
+            {
+                if (_server.Server.LocalEndPoint is IPEndPoint server)
+                {
+                    return server.Port;
+                }
+                else
+                {
+                    throw new TTransportException("ServerSocket is not a network socket");
+                }
+            }
+            else
+            {
+                throw new TTransportException("ServerSocket is not open");
             }
         }
 
@@ -77,10 +104,7 @@ namespace Thrift.Transport.Server
 
         protected override async ValueTask<TTransport> AcceptImplementationAsync(CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return await Task.FromCanceled<TTransport>(cancellationToken);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (_server == null)
             {
@@ -90,11 +114,14 @@ namespace Thrift.Transport.Server
             try
             {
                 TTransport tSocketTransport = null;
+                #if NET6_0_OR_GREATER
+                var tcpClient = await _server.AcceptTcpClientAsync(cancellationToken);
+                #else
                 var tcpClient = await _server.AcceptTcpClientAsync();
-
+                #endif
                 try
                 {
-                    tSocketTransport = new TSocketTransport(tcpClient,Configuration)
+                    tSocketTransport = new TSocketTransport(tcpClient, Configuration)
                     {
                         Timeout = _clientTimeout
                     };
@@ -109,7 +136,7 @@ namespace Thrift.Transport.Server
                     }
                     else //  Otherwise, clean it up ourselves.
                     {
-                        ((IDisposable) tcpClient).Dispose();
+                        ((IDisposable)tcpClient).Dispose();
                     }
 
                     throw;
