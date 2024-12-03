@@ -19,7 +19,6 @@
 
 #define  MAX_MESSAGE_SIZE  2
 
-#include <boost/test/auto_unit_test.hpp>
 #include <boost/test/unit_test.hpp>
 #include <iostream>
 #include <climits>
@@ -55,8 +54,6 @@ using apache::thrift::transport::TTransportException;
 using apache::thrift::transport::TBufferedTransport;
 using apache::thrift::transport::TFramedTransport;
 using std::shared_ptr;
-using std::cout;
-using std::endl;
 using std::string;
 using std::memset;
 using namespace apache::thrift;
