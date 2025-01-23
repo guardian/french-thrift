@@ -23,7 +23,7 @@ jobs:
         uses: gradle/actions/dependency-submission@d156388eb19639ec20ade50009f3d199ce1e2808 # v4.1.0
         with:
           build-root-directory: lib/java/android
-          gradle-version: 1.5.0
+          gradle-version: 2.13
       - name: Log snapshot for user validation
         id: validate
         run: cat
