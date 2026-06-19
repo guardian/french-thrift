@@ -19,6 +19,8 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Factory;
 
 use PHPUnit\Framework\TestCase;
@@ -32,10 +34,28 @@ class TTransportFactoryTest extends TestCase
      */
     public function testGetTransport()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $factory = new TTransportFactory();
         $result = $factory->getTransport($transport);
 
         $this->assertSame($transport, $result);
+    }
+
+    /**
+     * @return void
+     */
+    public function testGetTransportCreatesNewInstancePerCall()
+    {
+        $factory = new TTransportFactory();
+
+        $transport1 = $this->createStub(TTransport::class);
+        $transport2 = $this->createStub(TTransport::class);
+
+        $this->assertSame($transport1, $factory->getTransport($transport1));
+        $this->assertSame($transport2, $factory->getTransport($transport2));
+        $this->assertNotSame(
+            $factory->getTransport($transport1),
+            $factory->getTransport($transport2)
+        );
     }
 }

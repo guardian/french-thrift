@@ -53,9 +53,27 @@ static const string SYNC_CLIENT_GENERIC_BOUNDS("where IP: TInputProtocol, OP: TO
 
 class t_rs_generator : public t_generator {
 public:
-  t_rs_generator(t_program* program, const std::map<std::string, std::string>&, const std::string&)
+  t_rs_generator(t_program* program,
+                 const std::map<std::string, std::string>& parsed_options,
+                 const std::string&)
     : t_generator(program) {
     gen_dir_ = get_out_dir();
+    crate_prefix_ = "crate";
+
+    std::map<std::string, std::string>::const_iterator iter;
+    for (iter = parsed_options.begin(); iter != parsed_options.end(); ++iter) {
+      if (iter->first.compare("crate_prefix") == 0) {
+        if (iter->second.empty()) {
+          throw std::string("crate_prefix requires a non-empty value, e.g. rs:crate_prefix=super");
+        }
+        crate_prefix_ = iter->second;
+      } else {
+        throw "unknown option rs:" + iter->first;
+      }
+    }
+
+    fprintf(stderr, "We are sorry, but for the lack of active maintainers, the RUST compiler target is being deprecated and may be removed in the next version. Feel free to contact the dev mailing list (dev@thrift.apache.org) for further details.\n");
+
   }
 
   /**
@@ -87,6 +105,10 @@ private:
 
   // Directory to which generated code is written.
   string gen_dir_;
+
+  // Rust path prefix for cross-file imports (default: "crate").
+  // Use --gen rs:crate_prefix=super when generated files are in a submodule.
+  string crate_prefix_;
 
   // File to which generated code is written.
   ofstream_with_content_based_conditional_update f_gen_;
@@ -614,10 +636,10 @@ void t_rs_generator::render_attributes_and_includes() {
       string_replace(module_namespace, ".", "::");
 
       if (module_namespace.empty()) {
-        f_gen_ << "use crate::" << rust_snake_case(module_name) << ";" << '\n';
+        f_gen_ << "use " << crate_prefix_ << "::" << rust_snake_case(module_name) << ";" << '\n';
       } else {
-        f_gen_ << "use crate::" << module_namespace << "::" << rust_snake_case(module_name) << ";"
-               << '\n';
+        f_gen_ << "use " << crate_prefix_ << "::" << module_namespace << "::"
+               << rust_snake_case(module_name) << ";" << '\n';
       }
     }
     f_gen_ << '\n';
@@ -749,8 +771,8 @@ void t_rs_generator::render_const_value(t_type* ttype,
   } else if (ttype->is_enum()) {
     f_gen_ << "{" << '\n';
     indent_up();
-    f_gen_ << indent() << to_rust_type(ttype) << "::try_from(" << tvalue->get_integer()
-           << ").expect(\"expecting valid const value\")" << '\n';
+    f_gen_ << indent() << to_rust_type(ttype) << "::from(" << tvalue->get_integer()
+           << ")" << '\n';
     indent_down();
     f_gen_ << indent() << "}";
   } else if (ttype->is_struct() || ttype->is_xception()) {
@@ -1696,10 +1718,41 @@ void t_rs_generator::render_struct_sync_read(const string& struct_name,
 
     for (members_iter = members.begin(); members_iter != members.end(); ++members_iter) {
       t_field* tfield = (*members_iter);
+      t_type* resolved = get_true_type(tfield->get_type());
+      bool is_union_field = resolved->is_struct() && ((t_struct*)resolved)->is_union();
       f_gen_ << indent() << rust_safe_field_id(tfield->get_key()) << " => {" << '\n';
       indent_up();
-      render_type_sync_read("val", tfield->get_type());
-      f_gen_ << indent() << struct_field_read_temp_variable(tfield) << " = Some(val);" << '\n';
+      if (is_union_field) {
+        // Use the resolved (non-Box) type since Box<T>::method() isn't valid syntax.
+        string resolved_type = to_rust_type(resolved);
+        bool is_boxed = false;
+        {
+          t_type* t = tfield->get_type();
+          while (t->is_typedef()) {
+            if (((t_typedef*)t)->is_forward_typedef()) { is_boxed = true; break; }
+            t = ((t_typedef*)t)->get_type();
+          }
+        }
+        string read_call(resolved_type + "::read_from_in_protocol(i_prot)");
+        string val_expr = is_boxed ? "Box::new(val)" : "val";
+        bool suppress_unknown = (struct_type == T_REGULAR || struct_type == T_EXCEPTION) && is_optional(actual_field_req(tfield, struct_type));
+        if (suppress_unknown) {
+          f_gen_ << indent() << "match " << read_call << " {" << '\n';
+          indent_up();
+          f_gen_ << indent() << "Ok(val) => { " << struct_field_read_temp_variable(tfield) << " = Some(" << val_expr << "); }," << '\n';
+          f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => {" << '\n';
+          f_gen_ << indent() << "}," << '\n';
+          f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+          indent_down();
+          f_gen_ << indent() << "}" << '\n';
+        } else {
+          f_gen_ << indent() << "let val = " << read_call << "?;" << '\n';
+          f_gen_ << indent() << struct_field_read_temp_variable(tfield) << " = Some(" << val_expr << ");" << '\n';
+        }
+      } else {
+        render_type_sync_read("val", tfield->get_type());
+        f_gen_ << indent() << struct_field_read_temp_variable(tfield) << " = Some(val);" << '\n';
+      }
       indent_down();
       f_gen_ << indent() << "}," << '\n';
     }
@@ -1775,6 +1828,7 @@ void t_rs_generator::render_union_sync_read(const string& union_name, t_struct* 
   // completed union as well as a count of fields read
   f_gen_ << indent() << "let mut ret: Option<" << union_name << "> = None;" << '\n';
   f_gen_ << indent() << "let mut received_field_count = 0;" << '\n';
+  f_gen_ << indent() << "let mut total_field_count = 0;" << '\n';
 
   // read the struct preamble
   f_gen_ << indent() << "i_prot.read_struct_begin()?;" << '\n';
@@ -1800,39 +1854,76 @@ void t_rs_generator::render_union_sync_read(const string& union_name, t_struct* 
   vector<t_field*>::const_iterator members_iter;
   for (members_iter = members.begin(); members_iter != members.end(); ++members_iter) {
     t_field* member = (*members_iter);
+    t_type* member_resolved = get_true_type(member->get_type());
+    bool member_is_union = member_resolved->is_struct() && ((t_struct*)member_resolved)->is_union();
     f_gen_ << indent() << rust_safe_field_id(member->get_key()) << " => {" << '\n';
     indent_up();
-    render_type_sync_read("val", member->get_type());
-    f_gen_ << indent() << "if ret.is_none() {" << '\n';
-    indent_up();
-    f_gen_ << indent() << "ret = Some(" << union_name << "::" << rust_union_field_name(member)
-           << "(val));" << '\n';
-    indent_down();
-    f_gen_ << indent() << "}" << '\n';
-    f_gen_ << indent() << "received_field_count += 1;" << '\n';
+    if (member_is_union) {
+      // Use the resolved (non-Box) type since Box<T>::read_from_in_protocol()
+      // isn't valid syntax; a recursive union variant is stored as Box<T>, so the
+      // value read via the resolved type is re-boxed here. Mirrors the struct
+      // reader (see render_struct_sync_read).
+      string member_type = to_rust_type(member_resolved);
+      bool is_boxed = false;
+      {
+        t_type* t = member->get_type();
+        while (t->is_typedef()) {
+          if (((t_typedef*)t)->is_forward_typedef()) { is_boxed = true; break; }
+          t = ((t_typedef*)t)->get_type();
+        }
+      }
+      string val_expr = is_boxed ? "Box::new(val)" : "val";
+      string member_read(member_type + "::read_from_in_protocol(i_prot)");
+      f_gen_ << indent() << "match " << member_read << " {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "Ok(val) => {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "if ret.is_none() {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "ret = Some(" << union_name << "::" << rust_union_field_name(member)
+             << "(" << val_expr << "));" << '\n';
+      indent_down();
+      f_gen_ << indent() << "}" << '\n';
+      f_gen_ << indent() << "received_field_count += 1;" << '\n';
+      indent_down();
+      f_gen_ << indent() << "}," << '\n';
+      f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => {}," << '\n';
+      f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+      indent_down();
+      f_gen_ << indent() << "}" << '\n';
+    } else {
+      render_type_sync_read("val", member->get_type());
+      f_gen_ << indent() << "if ret.is_none() {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "ret = Some(" << union_name << "::" << rust_union_field_name(member)
+             << "(val));" << '\n';
+      indent_down();
+      f_gen_ << indent() << "}" << '\n';
+      f_gen_ << indent() << "received_field_count += 1;" << '\n';
+    }
     indent_down();
     f_gen_ << indent() << "}," << '\n';
   }
 
-  // default case (skip fields)
+  // default case (skip unknown fields without affecting the count)
   f_gen_ << indent() << "_ => {" << '\n';
   indent_up();
   f_gen_ << indent() << "i_prot.skip(field_ident.field_type)?;" << '\n';
-  f_gen_ << indent() << "received_field_count += 1;" << '\n';
   indent_down();
   f_gen_ << indent() << "}," << '\n';
 
   indent_down();
   f_gen_ << indent() << "};" << '\n'; // finish match
+  f_gen_ << indent() << "total_field_count += 1;" << '\n';
   f_gen_ << indent() << "i_prot.read_field_end()?;" << '\n';
   indent_down();
   f_gen_ << indent() << "}" << '\n';                          // finish loop
   f_gen_ << indent() << "i_prot.read_struct_end()?;" << '\n'; // finish reading message from wire
 
   // return the value or an error
-  f_gen_ << indent() << "if received_field_count == 0 {" << '\n';
+  f_gen_ << indent() << "if total_field_count == 0 {" << '\n';
   indent_up();
-  render_thrift_error("Protocol", "ProtocolError", "ProtocolErrorKind::InvalidData",
+  render_thrift_error("Protocol", "ProtocolError", "ProtocolErrorKind::EmptyUnion",
                       "\"received empty union from remote " + union_name + "\"");
   indent_down();
   f_gen_ << indent() << "} else if received_field_count > 1 {" << '\n';
@@ -1840,9 +1931,24 @@ void t_rs_generator::render_union_sync_read(const string& union_name, t_struct* 
   render_thrift_error("Protocol", "ProtocolError", "ProtocolErrorKind::InvalidData",
                       "\"received multiple fields for union from remote " + union_name + "\"");
   indent_down();
+  f_gen_ << indent() << "} else if received_field_count == 0 {" << '\n';
+  indent_up();
+  render_thrift_error("Protocol", "ProtocolError", "ProtocolErrorKind::UnknownUnionVariant",
+                      "\"received union with unknown variant from remote " + union_name + "\"");
+  indent_down();
+  f_gen_ << indent() << "} else if let Some(ret) = ret {" << '\n';
+  indent_up();
+  f_gen_ << indent() << "Ok(ret)" << '\n';
+  indent_down();
   f_gen_ << indent() << "} else {" << '\n';
   indent_up();
-  f_gen_ << indent() << "Ok(ret.expect(\"return value should have been constructed\"))" << '\n';
+  f_gen_ << indent() << "Err(" << '\n';
+  indent_up();
+  f_gen_ << indent() << "thrift::Error::Protocol(" << '\n';
+  f_gen_ << indent() << "  ProtocolError::new(ProtocolErrorKind::InvalidData, \"return value should have been constructed\")" << '\n';
+  f_gen_ << indent() << ")" << '\n';
+  indent_down();
+  f_gen_ << indent() << ")" << '\n';
   indent_down();
   f_gen_ << indent() << "}" << '\n';
 
@@ -1932,8 +2038,22 @@ void t_rs_generator::render_list_sync_read(t_list* tlist, const string& list_var
   indent_up();
 
   string list_elem_var = tmp("list_elem_");
-  render_type_sync_read(list_elem_var, elem_type);
-  f_gen_ << indent() << list_var << ".push(" << list_elem_var << ");" << '\n';
+  t_type* resolved_elem = get_true_type(elem_type);
+  bool elem_is_union = resolved_elem->is_struct() && ((t_struct*)resolved_elem)->is_union();
+  if (elem_is_union) {
+    string resolved_type = to_rust_type(resolved_elem);
+    string read_call(resolved_type + "::read_from_in_protocol(i_prot)");
+    f_gen_ << indent() << "match " << read_call << " {" << '\n';
+    indent_up();
+    f_gen_ << indent() << "Ok(elem) => { " << list_var << ".push(Box::new(elem)); }," << '\n';
+    f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => { continue; }," << '\n';
+    f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+    indent_down();
+    f_gen_ << indent() << "}" << '\n';
+  } else {
+    render_type_sync_read(list_elem_var, elem_type);
+    f_gen_ << indent() << list_var << ".push(" << list_elem_var << ");" << '\n';
+  }
 
   indent_down();
 
@@ -1953,8 +2073,22 @@ void t_rs_generator::render_set_sync_read(t_set* tset, const string& set_var) {
   indent_up();
 
   string set_elem_var = tmp("set_elem_");
-  render_type_sync_read(set_elem_var, elem_type);
-  f_gen_ << indent() << set_var << ".insert(" << set_elem_var << ");" << '\n';
+  t_type* resolved_elem = get_true_type(elem_type);
+  bool elem_is_union = resolved_elem->is_struct() && ((t_struct*)resolved_elem)->is_union();
+  if (elem_is_union) {
+    string resolved_type = to_rust_type(resolved_elem);
+    string read_call(resolved_type + "::read_from_in_protocol(i_prot)");
+    f_gen_ << indent() << "match " << read_call << " {" << '\n';
+    indent_up();
+    f_gen_ << indent() << "Ok(elem) => { " << set_var << ".insert(Box::new(elem)); }," << '\n';
+    f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => { continue; }," << '\n';
+    f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+    indent_down();
+    f_gen_ << indent() << "}" << '\n';
+  } else {
+    render_type_sync_read(set_elem_var, elem_type);
+    f_gen_ << indent() << set_var << ".insert(" << set_elem_var << ");" << '\n';
+  }
 
   indent_down();
 
@@ -1974,12 +2108,54 @@ void t_rs_generator::render_map_sync_read(t_map* tmap, const string& map_var) {
 
   indent_up();
 
-  string key_elem_var = tmp("map_key_");
-  render_type_sync_read(key_elem_var, key_type);
-  string val_elem_var = tmp("map_val_");
-  render_type_sync_read(val_elem_var, val_type);
-  f_gen_ << indent() << map_var << ".insert(" << key_elem_var << ", " << val_elem_var << ");"
-         << '\n';
+  t_type* resolved_key = get_true_type(key_type);
+  t_type* resolved_val = get_true_type(val_type);
+  bool key_is_union = resolved_key->is_struct() && ((t_struct*)resolved_key)->is_union();
+  bool val_is_union = resolved_val->is_struct() && ((t_struct*)resolved_val)->is_union();
+  if (key_is_union || val_is_union) {
+    // Read key
+    string key_elem_var = tmp("map_key_");
+    if (key_is_union) {
+      string key_read(to_rust_type(resolved_key) + "::read_from_in_protocol(i_prot)");
+      f_gen_ << indent() << "let " << key_elem_var << " = match " << key_read << " {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "Ok(val) => val," << '\n';
+      f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => {" << '\n';
+      indent_up();
+      // Skip the value and continue to next entry
+      render_type_sync_read(tmp("discard_"), val_type);
+      f_gen_ << indent() << "continue;" << '\n';
+      indent_down();
+      f_gen_ << indent() << "}," << '\n';
+      f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+      indent_down();
+      f_gen_ << indent() << "};" << '\n';
+    } else {
+      render_type_sync_read(key_elem_var, key_type);
+    }
+    // Read value
+    string val_elem_var = tmp("map_val_");
+    if (val_is_union) {
+      string val_read(to_rust_type(resolved_val) + "::read_from_in_protocol(i_prot)");
+      f_gen_ << indent() << "match " << val_read << " {" << '\n';
+      indent_up();
+      f_gen_ << indent() << "Ok(val) => { " << map_var << ".insert(" << key_elem_var << ", val); }," << '\n';
+      f_gen_ << indent() << "Err(thrift::Error::Protocol(ref e)) if e.kind == ProtocolErrorKind::UnknownUnionVariant => { continue; }," << '\n';
+      f_gen_ << indent() << "Err(e) => return Err(e)," << '\n';
+      indent_down();
+      f_gen_ << indent() << "}" << '\n';
+    } else {
+      render_type_sync_read(val_elem_var, val_type);
+      f_gen_ << indent() << map_var << ".insert(" << key_elem_var << ", " << val_elem_var << ");" << '\n';
+    }
+  } else {
+    string key_elem_var = tmp("map_key_");
+    render_type_sync_read(key_elem_var, key_type);
+    string val_elem_var = tmp("map_val_");
+    render_type_sync_read(val_elem_var, val_type);
+    f_gen_ << indent() << map_var << ".insert(" << key_elem_var << ", " << val_elem_var << ");"
+           << '\n';
+  }
 
   indent_down();
 
@@ -2423,7 +2599,7 @@ void t_rs_generator::render_sync_processor_definition_and_impl(t_service* tservi
   f_gen_ << indent() << "pub struct " << service_processor_name << "<H: " << handler_trait_name
          << "> {" << '\n';
   indent_up();
-  f_gen_ << indent() << "handler: H," << '\n';
+  f_gen_ << indent() << "pub handler: H," << '\n';
   indent_down();
   f_gen_ << indent() << "}" << '\n';
   f_gen_ << '\n';
@@ -3240,4 +3416,9 @@ std::string t_rs_generator::display_name() const {
   return "Rust";
 }
 
-THRIFT_REGISTER_GENERATOR(rs, "Rust", "\n") // no Rust-generator-specific options
+THRIFT_REGISTER_GENERATOR(
+    rs,
+    "Rust",
+    "    crate_prefix=p:  Rust path prefix for cross-file imports (default: crate).\n"
+    "                     Use 'super' when generated files are in a submodule.\n"
+)

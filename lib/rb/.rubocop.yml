@@ -1,0 +1,52 @@
+plugins:
+  - rubocop-performance
+  - rubocop-rspec
+
+AllCops:
+  DisabledByDefault: true
+  SuggestExtensions: false
+  TargetRubyVersion: 2.7
+  Exclude:
+    - "**/vendor/**/*"
+
+Layout/EmptyLines:
+  Enabled: true
+
+Layout/EmptyLinesAroundBlockBody:
+  Enabled: true
+
+Layout/ExtraSpacing:
+  Enabled: true
+
+Layout/IndentationConsistency:
+  Enabled: true
+
+Layout/LeadingCommentSpace:
+  Enabled: true
+
+Layout/LeadingEmptyLines:
+  Enabled: true
+
+Layout/SpaceAfterComma:
+  Enabled: true
+
+Layout/SpaceAroundEqualsInParameterDefault:
+  Enabled: true
+
+Layout/SpaceInsideBlockBraces:
+  Enabled: true
+
+Layout/TrailingEmptyLines:
+  Enabled: true
+
+Layout/TrailingWhitespace:
+  Enabled: true
+
+Lint/OrderedMagicComments:
+  Enabled: true
+
+Performance/UnfreezeString:
+  Enabled: true
+
+Style/FrozenStringLiteralComment:
+  Enabled: true

@@ -17,11 +17,16 @@
 
 # We call npm twice to work around npm issues
 
-stubs: $(top_srcdir)/test/v0.16/ThriftTest.thrift
-	$(THRIFT) --gen js:node -o test/ $(top_srcdir)/test/v0.16/ThriftTest.thrift
+stubs: $(top_srcdir)/test/ThriftTest.thrift
+	$(THRIFT) --gen js:node -o test/ $(top_srcdir)/test/ThriftTest.thrift
 
-deps: $(top_srcdir)/package.json
+deps-root: $(top_srcdir)/package.json
 	$(NPM) install $(top_srcdir)/ || $(NPM) install $(top_srcdir)/
+
+deps-test: test/package.json test/package-lock.json
+	cd test/ && $(NPM) install && cd ..
+
+deps: deps-root deps-test
 
 all-local: deps
 
@@ -33,6 +38,7 @@ check: deps
 
 clean-local:
 	$(RM) -r test/gen-*
+	$(RM) -r test/fuzz/gen-*
 	$(RM) -r $(top_srcdir)/node_modules
 	$(RM) -r test/episodic-code-generation-test/gen*
 	$(RM) -r test/episodic-code-generation-test/node_modules

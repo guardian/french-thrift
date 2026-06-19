@@ -23,6 +23,8 @@
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TCompactProtocol.h>
 
+#include <boost/numeric/conversion/cast.hpp>
+
 #include <limits>
 #include <utility>
 #include <string>
@@ -39,6 +41,20 @@ namespace thrift {
 using std::shared_ptr;
 
 namespace transport {
+
+/**
+ * Legacy code in transport implementations have overflow issues
+ * that need to be enforced.
+ */
+template <typename To, typename From> To safe_numeric_cast(From i) {
+  try {
+    return boost::numeric_cast<To>(i);
+  }
+  catch (const std::bad_cast& bc) {
+    throw TTransportException(TTransportException::CORRUPTED_DATA,
+                              bc.what());
+  }
+}
 
 using namespace apache::thrift::protocol;
 using apache::thrift::protocol::TBinaryProtocol;
@@ -206,7 +222,10 @@ void THeaderTransport::readHeaderFormat(uint16_t headerSize, uint32_t sz) {
   }
   headerSize *= 4;
   const uint8_t* const headerBoundary = ptr + headerSize;
-  if (headerSize > sz) {
+  // ptr already skips the 10-byte common header, so the header section has to
+  // fit in the remaining sz - 10 bytes; comparing against sz alone let the
+  // boundary sit up to 10 bytes past the receive buffer.
+  if (headerSize > sz - 10) {
     throw TTransportException(TTransportException::CORRUPTED_DATA,
                               "Header size is larger than frame");
   }
@@ -298,7 +317,13 @@ void THeaderTransport::untransform(uint8_t* ptr, uint32_t sz) {
                                     "Error while zlib deflateEnd");
       }
 
-      memcpy(ptr, tBuf_.get(), sz);
+      // The result now lives in tBuf_ and is typically larger than the source
+      // section it was read from, so it does not fit back into the receive
+      // buffer at ptr.  Swap the transform buffer in as the receive buffer and
+      // continue from its start instead of copying the result back in place.
+      rBuf_.swap(tBuf_);
+      std::swap(rBufSize_, tBufSize_);
+      ptr = rBuf_.get();
     } else {
       throw TApplicationException(TApplicationException::MISSING_RESULT, "Unknown transform");
     }
@@ -607,6 +632,11 @@ uint32_t THeaderTransport::writeVarint32(int32_t n, uint8_t* pkt) {
 uint32_t THeaderTransport::writeVarint16(int16_t n, uint8_t* pkt) {
   return writeVarint32(n, pkt);
 }
+
+uint16_t THeaderTransport::getNumTransforms() const {
+  return safe_numeric_cast<uint16_t>(writeTrans_.size());
+}
+
 }
 }
 } // apache::thrift::transport

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -19,6 +20,8 @@
  *
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Server;
 
 use Thrift\Transport\TSSLSocket;
@@ -31,64 +34,40 @@ use Thrift\Transport\TSSLSocket;
 class TSSLServerSocket extends TServerSocket
 {
     /**
-     * Remote port
+     * Stream context
      *
-     * @var resource
+     * @var resource|null
      */
-    protected $context_ = null;
+    protected $context;
 
     /**
      * ServerSocket constructor
      *
-     * @param string $host Host to listen on
-     * @param int $port Port to listen on
-     * @param resource $context Stream context
-     * @return void
+     * @param resource|null $context Stream context
      */
-    public function __construct($host = 'localhost', $port = 9090, $context = null)
-    {
-        $ssl_host = $this->getSSLHost($host);
-        parent::__construct($ssl_host, $port);
-        // Initialize a stream context if not provided
-        if ($context === null) {
-            $context = stream_context_create();
-        }
-        $this->context_ = $context;
+    public function __construct(
+        string $host = 'localhost',
+        int $port = 9090,
+        $context = null,
+    ) {
+        parent::__construct($this->ensureSslHostPrefix($host), $port);
+        $this->context = $context ?? stream_context_create();
     }
 
-    public function getSSLHost($host)
+    public function listen(): void
     {
-        $transport_protocol_loc = strpos($host, "://");
-        if ($transport_protocol_loc === false) {
-            $host = 'ssl://' . $host;
-        }
-        return $host;
-    }
-
-    /**
-     * Opens a new socket server handle
-     *
-     * @return void
-     */
-    public function listen()
-    {
-        $this->listener_ = @stream_socket_server(
-            $this->host_ . ':' . $this->port_,
+        $this->listener = @stream_socket_server(
+            $this->host . ':' . $this->port,
             $errno,
             $errstr,
             STREAM_SERVER_BIND | STREAM_SERVER_LISTEN,
-            $this->context_
+            $this->context
         );
     }
 
-    /**
-     * Implementation of accept. If not client is accepted in the given time
-     *
-     * @return TSocket
-     */
-    protected function acceptImpl()
+    protected function acceptImpl(): ?TSSLSocket
     {
-        $handle = @stream_socket_accept($this->listener_, $this->acceptTimeout_ / 1000.0);
+        $handle = @stream_socket_accept($this->listener, $this->acceptTimeout / 1000.0);
         if (!$handle) {
             return null;
         }
@@ -97,5 +76,28 @@ class TSSLServerSocket extends TServerSocket
         $socket->setHandle($handle);
 
         return $socket;
+    }
+
+    /**
+     * Returns the host with an `ssl://` prefix when no transport-protocol
+     * prefix is already present.
+     *
+     * @deprecated Prefix is now applied automatically by the constructor.
+     *             This method will be removed in the next version.
+     */
+    public function getSSLHost(string $host): string
+    {
+        trigger_error(
+            __METHOD__ . '() is deprecated; the ssl:// prefix is applied automatically '
+            . 'by the constructor. This method will be removed in the next version.',
+            E_USER_DEPRECATED,
+        );
+
+        return $this->ensureSslHostPrefix($host);
+    }
+
+    private function ensureSslHostPrefix(string $host): string
+    {
+        return str_contains($host, '://') ? $host : 'ssl://' . $host;
     }
 }

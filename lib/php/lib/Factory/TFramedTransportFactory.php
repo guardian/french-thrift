@@ -19,6 +19,8 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Transport\TFramedTransport;
@@ -26,7 +28,7 @@ use Thrift\Transport\TTransport;
 
 class TFramedTransportFactory implements TTransportFactoryInterface
 {
-    public function getTransport(TTransport $transport)
+    public function getTransport(TTransport $transport): TFramedTransport
     {
         return new TFramedTransport($transport);
     }

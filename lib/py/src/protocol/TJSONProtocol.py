@@ -21,9 +21,7 @@ from .TProtocol import (TType, TProtocolBase, TProtocolException,
                         TProtocolFactory, checkIntegerLimits)
 import base64
 import math
-import sys
-
-from ..compat import str_to_binary
+import uuid
 
 
 __all__ = ['TJSONProtocol',
@@ -67,6 +65,7 @@ ESCAPE_CHARS = {
 }
 NUMERIC_CHAR = b'+-.0123456789Ee'
 
+# Type names as TJSONProtocol.cpp
 CTYPES = {
     TType.BOOL: 'tf',
     TType.BYTE: 'i8',
@@ -79,6 +78,7 @@ CTYPES = {
     TType.LIST: 'lst',
     TType.SET: 'set',
     TType.MAP: 'map',
+    TType.UUID: 'uid',
 }
 
 JTYPES = {}
@@ -213,7 +213,7 @@ class TJSONProtocolBase(TProtocolBase):
             escaped = ESCAPE_CHAR_VALS.get(s, s)
             json_str.append(escaped)
         json_str.append('"')
-        self.trans.write(str_to_binary(''.join(json_str)))
+        self.trans.write(bytes(''.join(json_str), 'utf-8'))
 
     def writeJSONNumber(self, number, formatter='{0}'):
         self.context.write()
@@ -263,19 +263,11 @@ class TJSONProtocolBase(TProtocolBase):
 
     def _toChar(self, high, low=None):
         if not low:
-            if sys.version_info[0] == 2:
-                return ("\\u%04x" % high).decode('unicode-escape') \
-                                         .encode('utf-8')
-            else:
-                return chr(high)
+            return chr(high)
         else:
             codepoint = (1 << 16) + ((high & 0x3ff) << 10)
             codepoint += low & 0x3ff
-            if sys.version_info[0] == 2:
-                s = "\\U%08x" % codepoint
-                return s.decode('unicode-escape').encode('utf-8')
-            else:
-                return chr(codepoint)
+            return chr(codepoint)
 
     def readJSONString(self, skipContext):
         highSurrogate = None
@@ -317,11 +309,11 @@ class TJSONProtocolBase(TProtocolBase):
             elif character in ESCAPE_CHAR_VALS:
                 raise TProtocolException(TProtocolException.INVALID_DATA,
                                          "Unescaped control char")
-            elif sys.version_info[0] > 2:
+            else:
                 utf8_bytes = bytearray([ord(character)])
                 while ord(self.reader.peek()) >= 0x80:
                     utf8_bytes.append(ord(self.reader.read()))
-                character = utf8_bytes.decode('utf8')
+                character = utf8_bytes.decode('utf-8')
             string.append(character)
 
             if highSurrogate:
@@ -491,6 +483,11 @@ class TJSONProtocol(TJSONProtocolBase):
     def readBinary(self):
         return self.readJSONBase64()
 
+    def readUuid(self):
+        buff = self.readJSONString(False)
+        val = uuid.UUID(buff)
+        return val
+
     def writeMessageBegin(self, name, request_type, seqid):
         self.resetWriteContext()
         self.writeJSONArrayStart()
@@ -575,6 +572,9 @@ class TJSONProtocol(TJSONProtocolBase):
 
     def writeBinary(self, binary):
         self.writeJSONBase64(binary)
+
+    def writeUuid(self, uuid):
+        self.writeJSONString(str(uuid))
 
 
 class TJSONProtocolFactory(TProtocolFactory):
@@ -669,6 +669,9 @@ class TSimpleJSONProtocol(TJSONProtocolBase):
 
     def writeBinary(self, binary):
         self.writeJSONBase64(binary)
+
+    def writeUuid(self, uuid):
+        self.writeJSONString(str(uuid))
 
 
 class TSimpleJSONProtocolFactory(TProtocolFactory):

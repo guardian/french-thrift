@@ -67,6 +67,11 @@ set(testgencpp_cob_SOURCES
 )
 add_library(testgencpp_cob STATIC ${testgencpp_cob_SOURCES})
 
+if (WIN32 AND MSVC)
+    add_library(testgencppCLI STATIC ${testgencpp_SOURCES})
+    set_target_properties(testgencppCLI PROPERTIES COMMON_LANGUAGE_RUNTIME "")
+endif()
+
 add_executable(Benchmark Benchmark.cpp)
 target_link_libraries(Benchmark testgencpp)
 target_link_libraries(Benchmark thrift)
@@ -91,6 +96,9 @@ set(UnitTest_SOURCES
 add_executable(UnitTests ${UnitTest_SOURCES})
 target_link_libraries(UnitTests testgencpp ${Boost_LIBRARIES})
 target_link_libraries(UnitTests thrift)
+if(WITH_ZLIB)
+    target_link_libraries(UnitTests thriftz)
+endif()
 add_test(NAME UnitTests COMMAND UnitTests)
 if(MSVC)
     # Disable C4503: decorated name length exceeded, name was truncated
@@ -133,7 +141,7 @@ target_link_libraries(TInterruptTest
     ${Boost_LIBRARIES}
 )
 target_link_libraries(TInterruptTest thrift)
-if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT MINGW)
+if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT MINGW)
     target_link_libraries(TInterruptTest -lrt)
 endif ()
 add_test(NAME TInterruptTest COMMAND TInterruptTest -- "${CMAKE_CURRENT_SOURCE_DIR}/../../../test/keys")
@@ -144,7 +152,7 @@ target_link_libraries(TServerIntegrationTest
     ${Boost_LIBRARIES}
 )
 target_link_libraries(TServerIntegrationTest thrift)
-if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT MINGW)
+if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT MINGW)
     target_link_libraries(TServerIntegrationTest -lrt)
 endif ()
 add_test(NAME TServerIntegrationTest COMMAND TServerIntegrationTest)
@@ -347,7 +355,7 @@ target_link_libraries(SecurityTest
     ${Boost_LIBRARIES}
 )
 target_link_libraries(SecurityTest thrift)
-if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT MINGW)
+if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT MINGW)
     target_link_libraries(SecurityTest -lrt)
 endif ()
 add_test(NAME SecurityTest COMMAND SecurityTest -- "${CMAKE_CURRENT_SOURCE_DIR}/../../../test/keys")
@@ -358,7 +366,7 @@ target_link_libraries(SecurityFromBufferTest
     ${Boost_LIBRARIES}
 )
 target_link_libraries(SecurityFromBufferTest thrift)
-if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT MINGW)
+if (NOT MSVC AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT MINGW)
     target_link_libraries(SecurityFromBufferTest -lrt)
 endif ()
 add_test(NAME SecurityFromBufferTest COMMAND SecurityFromBufferTest -- "${CMAKE_CURRENT_SOURCE_DIR}/../../../test/keys")

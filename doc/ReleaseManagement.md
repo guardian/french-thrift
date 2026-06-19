@@ -32,7 +32,7 @@ The authoritative repository for Apache Thrift is stored in [GitHub](https://git
 
 ### Branches
 
-All code (submitted via pull request or direct push) is committed to the `master` branch.  Until version 1.0 of Apache Thrift each release branch was named `<version>`, for example in version `0.12.0` there is a branch named the same.  For version 1.0 releases any beyond, releases will have a branch named `release/<version>`.
+All code (submitted via pull request or direct push) is committed to the `master` branch.  Former Apache Thrift release branches up to and including 0.23.0 were named `<version>`, for example in version `0.12.0` there is a branch named the same. Releases beyond 0.23.0 will have a branch named `release/<version>`.
 
 ### Tags
 
@@ -70,9 +70,9 @@ All Apache Thrift releases go through a 72-hour final release candidate voting p
 
     1. [Open Issues with a Fix Version](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20THRIFT%20and%20status%20in%20(OPEN%2C%20%27IN%20PROGRESS%27%2C%20REOPENED)%20and%20fixVersion%20is%20not%20empty) - these will be issues that someone placed a fixVersion on in Jira, but have not been resolved or closed yet.  They are likely stale somehow.  Resolutions for these issues include resolving or closing the issue in Jira, or simply removing the fixVersion if the issue hasn't been fixed.
 
-    1. [Open Blocking Issues](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20THRIFT%20and%20priority%20in%20(blocker)%20and%20status%20not%20in%20(closed)%20order%20by%20component%20ASC) - blocking issues should block a release.  Scrub the list to see if they are really blocking the release, and if not change their priority.
+    1. [Open Blocking Issues](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20THRIFT%20and%20priority%20in%20(blocker)%20and%20status%20not%20in%20(closed,resolved)%20order%20by%20component%20ASC) - blocking issues should block a release.  Scrub the list to see if they are really blocking the release, and if not change their priority.
 
-    1. [Open Critical Issues](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20THRIFT%20and%20priority%20in%20(critical)%20and%20status%20not%20in%20(closed)%20and%20type%20not%20in%20(%22wish%22)%20order%20by%20component%20ASC) - this list will end up in the known critical issues list in the changes file.  Scrub it to make sure everything is actually critical.
+    1. [Open Critical Issues](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20THRIFT%20and%20priority%20in%20(critical)%20and%20status%20not%20in%20(closed,resolved)%20and%20type%20not%20in%20(%22wish%22)%20order%20by%20component%20ASC) - this list will end up in the known critical issues list in the changes file.  Scrub it to make sure everything is actually critical.
 
     It is healthy to scrub these periodically, whether or not you are making a new release.
 
@@ -111,7 +111,7 @@ All Apache Thrift releases go through a 72-hour final release candidate voting p
 
 1. Generate the content for `CHANGES.md` - this is one of the most time-consuming parts of the release cycle.  It is a lot of work, but the result is well worth it to the consumers of Apache Thrift:
 
-    1. Find all [Issues Fixed but not Closed in 1.0.0](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20thrift%20and%20fixVersion%20%3D%201.0.0%20and%20status%20!%3D%20closed) (adjust the version in the link to suit your needs).
+    1. Find all [Issues with fixed in 1.0.0 that are not open](https://issues.apache.org/jira/issues/?filter=-1&jql=project%20%3D%20thrift%20and%20resolution%20%3DFixed%20%20AND%20fixVersion%20%3D%201.0.0%20AND%20status%20!%3D%20Open) (adjust the version in the link to suit your needs).
 
     1. Export the list of issues to a CSV (Current Fields) and open in Excel (or a similar spreadsheet).
 
@@ -145,19 +145,19 @@ All Apache Thrift releases go through a 72-hour final release candidate voting p
     1. On a linux system get a clean copy of the release branch, for example:
 
         ```bash
-        ~$ git clone -b "release/1.0.0" git@github.com:apache/thrift.git thrift-1.0.0-src
+        git clone -b "release/1.0.0" git@github.com:apache/thrift.git thrift-1.0.0-src
         ```
 
     1. In the clean copy of the release branch, build the container image:
 	
         ```bash
-        ~$ docker build -t thrift build/docker/ubuntu-jammy
+        docker build -t thrift build/docker/ubuntu-jammy
         ```
 	
     1. Run the container and `make dist`:
 	
         ```bash
-        ~$ docker run -v $(pwd):/thrift/src -it thrift /bin/bash
+        docker run -v $(pwd):/thrift/src -it thrift /bin/bash
         root@8b4101188aa2:/thrift/src# ./bootstrap.sh && ./configure && make dist
         ```
 
@@ -345,7 +345,18 @@ Voting on the development mailing list provides additional benefits (wisdom from
 
     **NOTE:** If you get the error "gpg failed to sign the data" when tagging, try this fix: ```export GPG_TTY=$(tty)```. Alternatively, it may be necessary to specify the ```-u <keyid>``` as an additional argument.
 
-1. Create a new release from the [GitHub Tags Page](https://github.com/apache/thrift/tags).  Attach the statically built Windows thrift compiler as a binary here.
+1. Create a new release from the [GitHub Tags Page](https://github.com/apache/thrift/tags).
+
+    Attach the statically built Windows thrift compiler as a binary here.
+
+    You may find it useful to use the button that automates release notes.
+
+    We have *some* automation in place to get packages published to various package managers.  To leverage this:
+    
+    - Please first create a "pre-release" and save.
+    - Then look at the Actions tab and look for the prereleased action.  It will upload packages to package managers that we have automated and support "test" or "staging" modes.
+    - Go check out those packages and make sure they look correct.
+    - Come back to the release page and uncheck the "pre-release" checkbox and save.  This will cause another action to get launched that publishes     packages for real.
 
 1. Merge the release branch into master.  This ensures all changes made to fix up the release are in master.
 
@@ -358,6 +369,20 @@ Voting on the development mailing list provides additional benefits (wisdom from
     The merge of 1.0.0 into master should proceed as a fast-forward since the 1.0.0 release branch.  If there are discrepancies the best thing to do is resolve them and then submit a pull request.  This pull request must be *MERGED* and not *REBASED* after the CI build is successful.  You may want to do this yourself and mark the pull request as `[DO NOT MERGE]`.
 
 1. Update the web site content to include the new release. The repository is located at https://github.com/apache/thrift-website and there are plenty of instructions how to update both staging and live web site. With regard to the release, its actually quite simple: check out the main branch and edit two lines in _config.yml, then commit. The build bot will update staging. After checking everything is right, simply fast-forward "asf-site" to "asf-staging" and push, then production site will automatically get updated as well
+
+1. Update the Docker Official Image packaging. Docker images are convenience artifacts built from the voted ASF source release; they are not ASF release artifacts and must not block the source release announcement if Docker Library review is delayed. Submit Docker updates only after the vote has passed, release artifacts have been promoted, and the web site/download page has been updated.
+
+    The Docker Official Image library tracks the two latest full Apache Thrift releases. Initial restored Docker image maintenance starts with the current release only; older releases are not backfilled. `latest` and unqualified OS aliases move according to the newest retained release and the explicit base metadata in `docker/versions.json`.
+
+    ```bash
+    thrift$ cd docker
+    thrift/docker$ ./update.sh 1.0.0
+    thrift/docker$ ./test.sh --all-platforms
+    ```
+
+    `update.sh` records archive.apache.org source URLs so retained Docker tags remain rebuildable; if the archive has not synced yet, wait and rerun it. Commit and push the Docker packaging update to Apache Thrift before generating the Docker Library manifest. Then run `./generate-official-images-library.sh /path/to/official-images/library/thrift` from `thrift/docker`; Docker Library manifests are generated artifacts and are not checked into this repository.
+
+    See [`docker/README.md`](../docker/README.md) for the detailed Docker Official Images workflow. Include Docker image availability in the announcement only if the Docker tags have already landed; otherwise follow up after Docker Official Images publishes them.
 
 1. Make an announcement on the dev@ and user@ mailing lists of the release.  There's no template to follow, but you can point folks to the official web site at https://thrift.apache.org, and to the GitHub site at https://github.org/apache.thrift.
 
@@ -407,8 +432,23 @@ See https://thrift.apache.org/lib/ for the current status of each external packa
     increase the suffix. (_1, _2, ...) and upload another.  You cannot replace a release on CPAN.
 * [php] @jfarrell, @bufferoverflow, @jeking3 are the only ones who can do this right now.
   * Once the release is tagged, one just has to hit the "Update" button to pick it up.
-* [pypi] @jfarrell is the only one who can do this right now.
-    https://issues.apache.org/jira/browse/THRIFT-4687
+* [pypi] The `PyPI publishing` GitHub Actions workflow publishes the Python
+  package when the GitHub release is published. It builds the source
+  distribution and platform wheel distributions, then publishes them from a
+  separate job using PyPI Trusted Publishing.
+  * Before publishing, verify that the PyPI `thrift` project has a trusted
+    publisher configured for the `apache/thrift` repository, the
+    `.github/workflows/pypi.yml` workflow, and the `release` environment.
+  * After publishing the GitHub release, verify that the workflow completed and
+    that the PyPI release contains both the `.tar.gz` source distribution and
+    the `.whl` Linux manylinux, Linux musllinux, macOS, and Windows wheel
+    distributions. The manylinux wheels are built on the manylinux2014
+    baseline for glibc 2.17+ compatibility.
+  * Do not upload release candidates, prereleases, branch builds, nightlies, or
+    continuous builds to PyPI.
+  * PyPI distribution filenames are immutable. If an artifact was published with
+    the wrong contents, prepare a new Apache Thrift release rather than trying
+    to replace the existing PyPI file.
 * [rust] Any thrift project committer is allowed to upload a new crate.
 
 If you have any questions email `dev@thrift.apache.org`.

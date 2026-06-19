@@ -152,12 +152,17 @@ void cleanupOpenSSL() {
 #if (OPENSSL_VERSION_NUMBER < OPENSSL_ENGINE_CLEANUP_REQUIRED_BEFORE)
   ENGINE_cleanup();             // https://www.openssl.org/docs/man1.1.0/crypto/ENGINE_cleanup.html - cleanup call is needed before 1.1.0
 #endif
+#if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
   CONF_modules_unload(1);
+#endif
   EVP_cleanup();
   CRYPTO_cleanup_all_ex_data();
 #if OPENSSL_VERSION_NUMBER >= 0x10100000
+  // Do nothing unless an openssl derivative is detected
+#  if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
   // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
   OPENSSL_thread_stop();
+#  endif
 #else
   // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
   // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
@@ -199,11 +204,12 @@ SSLContext::SSLContext(const SSLProtocol& protocol) {
   }
   SSL_CTX_set_mode(ctx_, SSL_MODE_AUTO_RETRY);
 
-  // Disable horribly insecure SSLv2 and SSLv3 protocols but allow a handshake
-  // with older clients so they get a graceful denial.
+  // Keep version-flexible negotiation for current protocol versions while setting
+  // the default protocol floor at TLSv1.2.
   if (protocol == SSLTLS) {
-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv2);
-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv3);   // THRIFT-3164
+    SSL_CTX_set_options(ctx_,
+                        SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1
+                            | SSL_OP_NO_TLSv1_1);
   }
 }
 
@@ -381,21 +387,24 @@ void TSSLSocket::close() {
       if (rc < 0) {
         string errors;
         buildErrors(errors, errno_copy, error);
-        GlobalOutput(("SSL_shutdown: " + errors).c_str());
+        TOutput::instance()(("SSL_shutdown: " + errors).c_str());
       }
     } catch (TTransportException& te) {
       // Don't emit an exception because this method is called by the
       // destructor. There's also not much that a user can do to recover, so
       // just clean up as much as possible without throwing, similar to the rc
       // < 0 case above.
-      GlobalOutput.printf("SSL_shutdown: %s", te.what());
+      TOutput::instance().printf("SSL_shutdown: %s", te.what());
     }
     SSL_free(ssl_);
     ssl_ = nullptr;
     handshakeCompleted_ = false;
 #if OPENSSL_VERSION_NUMBER >= 0x10100000
+    // Do nothing unless an openssl derivative is detected
+#  if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
     // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
     OPENSSL_thread_stop();
+#  endif
 #else
     // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
     // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
@@ -601,7 +610,7 @@ void TSSLSocket::initializeHandshakeParams() {
   int flags;
   if ((flags = THRIFT_FCNTL(socket_, THRIFT_F_GETFL, 0)) < 0
       || THRIFT_FCNTL(socket_, THRIFT_F_SETFL, flags | THRIFT_O_NONBLOCK) < 0) {
-    GlobalOutput.perror("thriftServerEventHandler: set THRIFT_O_NONBLOCK (THRIFT_FCNTL) ",
+    TOutput::instance().perror("thriftServerEventHandler: set THRIFT_O_NONBLOCK (THRIFT_FCNTL) ",
                         THRIFT_GET_SOCKET_ERROR);
     ::THRIFT_CLOSESOCKET(socket_);
     return;
@@ -703,7 +712,7 @@ void TSSLSocket::initializeHandshake() {
 }
 
 void TSSLSocket::authorize() {
-  int rc = SSL_get_verify_result(ssl_);
+  long rc = SSL_get_verify_result(ssl_);
   if (rc != X509_V_OK) { // verify authentication result
     throw TSSLException(string("SSL_get_verify_result(), ") + X509_verify_cert_error_string(rc));
   }
@@ -857,7 +866,7 @@ unsigned int TSSLSocket::waitForEvent(bool wantRead) {
       return TSSL_EINTR; // repeat operation
     }
     int errno_copy = THRIFT_GET_SOCKET_ERROR;
-    GlobalOutput.perror("TSSLSocket::read THRIFT_POLL() ", errno_copy);
+    TOutput::instance().perror("TSSLSocket::read THRIFT_POLL() ", errno_copy);
     throw TTransportException(TTransportException::UNKNOWN, "Unknown", errno_copy);
   } else if (ret > 0){
     if (fds[1].revents & THRIFT_POLLIN) {
@@ -873,25 +882,60 @@ unsigned int TSSLSocket::waitForEvent(bool wantRead) {
 uint64_t TSSLSocketFactory::count_ = 0;
 Mutex TSSLSocketFactory::mutex_;
 bool TSSLSocketFactory::manualOpenSSLInitialization_ = false;
+bool TSSLSocketFactory::didWeInitializeOpenSSL_ = false;
 
 TSSLSocketFactory::TSSLSocketFactory(SSLProtocol protocol) : server_(false) {
+  initializeOpenSSLState();
+  try {
+    ctx_ = std::make_shared<SSLContext>(protocol);
+  } catch (...) {
+    cleanupOpenSSLState();
+    throw;
+  }
+}
+
+TSSLSocketFactory::TSSLSocketFactory(const SSLContextFactory& contextFactory) : server_(false) {
+  if (!contextFactory) {
+    throw TSSLException("SSLContextFactory must not be empty");
+  }
+  initializeOpenSSLState();
+  try {
+    std::shared_ptr<SSLContext> ctx = contextFactory();
+    if (ctx == nullptr) {
+      throw TSSLException("SSLContextFactory must not return null");
+    }
+    ctx_ = ctx;
+  } catch (...) {
+    cleanupOpenSSLState();
+    throw;
+  }
+}
+
+void TSSLSocketFactory::initializeOpenSSLState() {
   Guard guard(mutex_);
   if (count_ == 0) {
     if (!manualOpenSSLInitialization_) {
+      didWeInitializeOpenSSL_ = true;
       initializeOpenSSL();
     }
     randomize();
   }
   count_++;
-  ctx_ = std::make_shared<SSLContext>(protocol);
 }
 
 TSSLSocketFactory::~TSSLSocketFactory() {
+  cleanupOpenSSLState();
+}
+
+void TSSLSocketFactory::cleanupOpenSSLState() {
   Guard guard(mutex_);
   ctx_.reset();
-  count_--;
-  if (count_ == 0 && !manualOpenSSLInitialization_) {
+  if (count_ > 0) {
+    count_--;
+  }
+  if (count_ == 0 && didWeInitializeOpenSSL_) {
     cleanupOpenSSL();
+    didWeInitializeOpenSSL_ = false;
   }
 }
 
@@ -1123,6 +1167,10 @@ int TSSLSocketFactory::passwordCallback(char* password, int size, int, void* dat
   return length;
 }
 
+void TSSLSocketFactory::setManualOpenSSLInitialization(bool manualOpenSSLInitialization) {
+  manualOpenSSLInitialization_ = manualOpenSSLInitialization;
+}
+
 // extract error messages from error queue
 void buildErrors(string& errors, int errno_copy, int sslerrno) {
   unsigned long errorCode;
@@ -1200,6 +1248,12 @@ Decision DefaultClientAccessManager::verify(const sockaddr_storage& sa,
  * @return True, if "host" matches "pattern". False otherwise.
  */
 bool matchName(const char* host, const char* pattern, int size) {
+  // RFC 6125 §6.4.3: wildcard must not appear outside the leftmost label.
+  bool past_first_dot = false;
+  for (int k = 0; k < size; k++) {
+    if (pattern[k] == '.') { past_first_dot = true; continue; }
+    if (pattern[k] == '*' && past_first_dot) return false;
+  }
   bool match = false;
   int i = 0, j = 0;
   while (i < size && host[j] != '\0') {

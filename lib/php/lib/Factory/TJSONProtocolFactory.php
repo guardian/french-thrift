@@ -21,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Protocol\TJSONProtocol;
@@ -31,11 +33,7 @@ use Thrift\Transport\TTransport;
  */
 class TJSONProtocolFactory implements TProtocolFactory
 {
-    /**
-     * @param TTransport $trans
-     * @return TJSONProtocol
-     */
-    public function getProtocol($trans)
+    public function getProtocol(TTransport $trans): TJSONProtocol
     {
         return new TJSONProtocol($trans);
     }

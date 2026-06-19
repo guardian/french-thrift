@@ -35,6 +35,22 @@ struct CoRec2 {
   1: CoRec other
 }
 
+union CoUnion {
+  1:  CoUnion2 & other
+}
+
+union CoUnion2 {
+  1: CoUnion other
+}
+
+exception CoError {
+  1: CoError2 & other
+}
+
+exception CoError2 {
+  1: CoError other
+}
+
 struct VectorTest {
   1: list<RecList> lister;
 }
@@ -43,5 +59,6 @@ service TestService
 {
   RecTree echoTree(1:RecTree tree)
   RecList echoList(1:RecList lst)
-  CoRec echoCoRec(1:CoRec item)
+  CoRec echoCoRec(1:CoRec item) throws (1: CoError err)
+  CoUnion echoCoUnion(1:CoUnion item) throws (1: CoError err)
 }

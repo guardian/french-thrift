@@ -21,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * A memory buffer is a tranpsort that simply reads from and writes to an
@@ -36,38 +37,34 @@ use Thrift\Factory\TStringFuncFactory;
  */
 class TMemoryBuffer extends TTransport
 {
-    protected $buf_ = '';
-
     /**
-     * Constructor. Optionally pass an initial value
-     * for the buffer.
+     * Constructor. Optionally pass an initial value for the buffer.
      */
-    public function __construct($buf = '')
+    public function __construct(protected string $buf = '')
     {
-        $this->buf_ = $buf;
     }
 
-    public function isOpen()
+    public function isOpen(): bool
     {
         return true;
     }
 
-    public function open()
+    public function open(): void
     {
     }
 
-    public function close()
+    public function close(): void
     {
     }
 
-    public function write($buf)
+    public function write(string $buf): void
     {
-        $this->buf_ .= $buf;
+        $this->buf .= $buf;
     }
 
-    public function read($len)
+    public function read(int $len): string
     {
-        $bufLength = TStringFuncFactory::create()->strlen($this->buf_);
+        $bufLength = strlen($this->buf);
 
         if ($bufLength === 0) {
             throw new TTransportException(
@@ -78,30 +75,30 @@ class TMemoryBuffer extends TTransport
         }
 
         if ($bufLength <= $len) {
-            $ret = $this->buf_;
-            $this->buf_ = '';
+            $ret = $this->buf;
+            $this->buf = '';
 
             return $ret;
         }
 
-        $ret = TStringFuncFactory::create()->substr($this->buf_, 0, $len);
-        $this->buf_ = TStringFuncFactory::create()->substr($this->buf_, $len);
+        $ret = substr($this->buf, 0, $len);
+        $this->buf = substr($this->buf, $len);
 
         return $ret;
     }
 
-    public function getBuffer()
+    public function getBuffer(): string
     {
-        return $this->buf_;
+        return $this->buf;
     }
 
-    public function available()
+    public function available(): int
     {
-        return TStringFuncFactory::create()->strlen($this->buf_);
+        return strlen($this->buf);
     }
 
-    public function putBack($data)
+    public function putBack(string $data): void
     {
-        $this->buf_ = $data . $this->buf_;
+        $this->buf = $data . $this->buf;
     }
 }

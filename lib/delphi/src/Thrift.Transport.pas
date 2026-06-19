@@ -68,7 +68,7 @@ type
 
     function  Configuration : IThriftConfiguration;
     function  MaxMessageSize : Integer;
-    procedure ResetConsumedMessageSize( const knownSize : Int64 = -1);
+    procedure ResetMessageSizeAndConsumedBytes( const knownSize : Int64 = -1);
     procedure CheckReadBytesAvailable( const numBytes : Int64);
     procedure UpdateKnownMessageSize( const size : Int64);
   end;
@@ -106,10 +106,10 @@ type
     function  MaxMessageSize : Integer;
     property  RemainingMessageSize : Int64 read FRemainingMessageSize;
     property  KnownMessageSize : Int64 read FKnownMessageSize;
-    procedure ResetConsumedMessageSize( const newSize : Int64 = -1);
+    procedure ResetMessageSizeAndConsumedBytes( const newSize : Int64 = -1);
     procedure UpdateKnownMessageSize(const size : Int64); override;
-    procedure CheckReadBytesAvailable(const numBytes : Int64); inline;
-    procedure CountConsumedMessageBytes(const numBytes : Int64); inline;
+    procedure CheckReadBytesAvailable(const numBytes : Int64); {$IFNDEF Debug} inline; {$ENDIF}
+    procedure CountConsumedMessageBytes(const numBytes : Int64); {$IFNDEF Debug} inline; {$ENDIF}
   public
     constructor Create( const aConfig : IThriftConfiguration);  reintroduce;
   end;
@@ -124,7 +124,7 @@ type
     function  Configuration : IThriftConfiguration; override;
     procedure UpdateKnownMessageSize( const size : Int64); override;
     function  MaxMessageSize : Integer;  inline;
-    procedure ResetConsumedMessageSize( const knownSize : Int64 = -1);  inline;
+    procedure ResetMessageSizeAndConsumedBytes( const knownSize : Int64 = -1);  inline;
     procedure CheckReadBytesAvailable( const numBytes : Int64);   virtual;
   public
     constructor Create( const aTransport: T); reintroduce;
@@ -142,7 +142,8 @@ type
         EndOfFile,
         BadArgs,
         Interrupted,
-        CorruptedData
+        CorruptedData,
+        MessageSizeLimit
       );
   strict protected
     constructor HiddenCreate(const Msg: string);
@@ -200,9 +201,20 @@ type
     class function GetType: TTransportException.TExceptionType;  override;
   end;
 
+  TTransportExceptionMessageSizeLimit = class (TTransportExceptionSpecialized)
+  strict protected
+    class function GetType: TTransportException.TExceptionType;  override;
+  end;
+
   TSecureProtocol = (
-    SSL_2, SSL_3, TLS_1,   // outdated, for compatibilty only
-    TLS_1_1, TLS_1_2       // secure (as of today)
+    // outdated, for compatibility only
+    SSL_2,
+    SSL_3,
+    TLS_1,
+    TLS_1_1,
+    // secure (as of today)
+    TLS_1_2,
+    TLS_1_3
   );
 
   TSecureProtocols = set of TSecureProtocol;
@@ -303,14 +315,18 @@ type
   end;
 
   TStreamTransportImpl = class( TEndpointTransportBase, IStreamTransport)
-  strict protected
-    FInputStream : IThriftStream;
-    FOutputStream : IThriftStream;
+  strict private
+    FInternalInputStream : IThriftStream;
+    FInternalOutputStream : IThriftStream;
+
   strict protected
     function GetIsOpen: Boolean; override;
 
-    function GetInputStream: IThriftStream;
-    function GetOutputStream: IThriftStream;
+    function GetInputStream: IThriftStream; inline;
+    procedure SetInputStream( const stream : IThriftStream);
+
+    function GetOutputStream: IThriftStream; inline;
+    procedure SetOutputStream( const stream : IThriftStream);
 
   strict protected
     procedure Open; override;
@@ -318,6 +334,8 @@ type
     procedure Flush; override;
     function  Read( const pBuf : Pointer; const buflen : Integer; off: Integer; len: Integer): Integer; override;
     procedure Write( const pBuf : Pointer; off, len : Integer); override;
+
+    procedure UpdateKnownMessageSize(const size : Int64); override;
   public
     constructor Create( const aInputStream, aOutputStream : IThriftStream; const aConfig : IThriftConfiguration = nil);  reintroduce;
     destructor Destroy; override;
@@ -340,6 +358,7 @@ type
     procedure Flush; override;
     function IsOpen: Boolean; override;
     function ToArray: TBytes; override;
+    function CanSeek : Boolean; override;
     function Size : Int64; override;
     function Position : Int64; override;
   public
@@ -474,7 +493,13 @@ type
 
 
 const
-  DEFAULT_THRIFT_SECUREPROTOCOLS = [ TSecureProtocol.TLS_1_1, TSecureProtocol.TLS_1_2];
+  // From https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
+  //  > TLS 1.3 is supported starting in Windows 11 and Windows Server 2022.
+  //  > Enabling TLS 1.3 on earlier versions of Windows is not a safe system configuration.
+  DEFAULT_THRIFT_SECUREPROTOCOLS = [
+    TSecureProtocol.TLS_1_2
+    //TSecureProtocol.TLS_1_3   -- not supported on Win10 (see comment)
+  ];
 
 implementation
 
@@ -545,7 +570,7 @@ begin
   then FConfiguration := aConfig
   else FConfiguration := TThriftConfigurationImpl.Create;
 
-  ResetConsumedMessageSize;
+  ResetMessageSizeAndConsumedBytes;
 end;
 
 
@@ -562,7 +587,7 @@ begin
 end;
 
 
-procedure TEndpointTransportBase.ResetConsumedMessageSize( const newSize : Int64);
+procedure TEndpointTransportBase.ResetMessageSizeAndConsumedBytes( const newSize : Int64);
 // Resets RemainingMessageSize to the configured maximum
 begin
   // full reset
@@ -575,7 +600,7 @@ begin
   // update only: message size can shrink, but not grow
   ASSERT( KnownMessageSize <= MaxMessageSize);
   if newSize > KnownMessageSize
-  then raise TTransportExceptionEndOfFile.Create('MaxMessageSize reached');
+  then raise TTransportExceptionMessageSizeLimit.Create('ResetConsumedMessageSize: message size exceeds limit '+IntToStr(MaxMessageSize));
 
   FKnownMessageSize := newSize;
   FRemainingMessageSize := newSize;
@@ -583,12 +608,12 @@ end;
 
 
 procedure TEndpointTransportBase.UpdateKnownMessageSize( const size : Int64);
-// Updates RemainingMessageSize to reflect then known real message size (e.g. framed transport).
+// Updates RemainingMessageSize to reflect the known real message size (e.g. framed transport).
 // Will throw if we already consumed too many bytes.
 var consumed : Int64;
 begin
   consumed := KnownMessageSize - RemainingMessageSize;
-  ResetConsumedMessageSize(size);
+  ResetMessageSizeAndConsumedBytes(size);
   CountConsumedMessageBytes(consumed);
 end;
 
@@ -597,7 +622,7 @@ procedure TEndpointTransportBase.CheckReadBytesAvailable( const numBytes : Int64
 // Throws if there are not enough bytes in the input stream to satisfy a read of numBytes bytes of data
 begin
   if (RemainingMessageSize < numBytes) or (numBytes < 0)
-  then raise TTransportExceptionEndOfFile.Create('MaxMessageSize reached');
+  then raise TTransportExceptionMessageSizeLimit.Create('CheckReadBytesAvailable('+IntToStr(numBytes)+'): message size exceeds limit '+IntToStr(MaxMessageSize)+', only '+IntToStr(RemainingMessageSize)+' bytes available');
 end;
 
 
@@ -608,7 +633,7 @@ begin
   then Dec( FRemainingMessageSize, numBytes)
   else begin
     FRemainingMessageSize := 0;
-    raise TTransportExceptionEndOfFile.Create('MaxMessageSize reached');
+    raise TTransportExceptionMessageSizeLimit.Create('CountConsumedMessageBytes('+IntToStr(numBytes)+'): message size exceeds limit '+IntToStr(MaxMessageSize));
   end;
 end;
 
@@ -642,9 +667,9 @@ begin
 end;
 
 
-procedure TLayeredTransportBase<T>.ResetConsumedMessageSize( const knownSize : Int64 = -1);
+procedure TLayeredTransportBase<T>.ResetMessageSizeAndConsumedBytes( const knownSize : Int64 = -1);
 begin
-  InnerTransport.ResetConsumedMessageSize( knownSize);
+  InnerTransport.ResetMessageSizeAndConsumedBytes( knownSize);
 end;
 
 
@@ -673,12 +698,13 @@ end;
 class function TTransportException.Create(aType: TExceptionType; const msg: string): TTransportException;
 begin
   case aType of
-    TExceptionType.NotOpen:     Result := TTransportExceptionNotOpen.Create(msg);
-    TExceptionType.AlreadyOpen: Result := TTransportExceptionAlreadyOpen.Create(msg);
-    TExceptionType.TimedOut:    Result := TTransportExceptionTimedOut.Create(msg);
-    TExceptionType.EndOfFile:   Result := TTransportExceptionEndOfFile.Create(msg);
-    TExceptionType.BadArgs:     Result := TTransportExceptionBadArgs.Create(msg);
-    TExceptionType.Interrupted: Result := TTransportExceptionInterrupted.Create(msg);
+    TExceptionType.NotOpen:          Result := TTransportExceptionNotOpen.Create(msg);
+    TExceptionType.AlreadyOpen:      Result := TTransportExceptionAlreadyOpen.Create(msg);
+    TExceptionType.TimedOut:         Result := TTransportExceptionTimedOut.Create(msg);
+    TExceptionType.EndOfFile:        Result := TTransportExceptionEndOfFile.Create(msg);
+    TExceptionType.BadArgs:          Result := TTransportExceptionBadArgs.Create(msg);
+    TExceptionType.Interrupted:      Result := TTransportExceptionInterrupted.Create(msg);
+    TExceptionType.MessageSizeLimit: Result := TTransportExceptionMessageSizeLimit.Create(msg);
   else
     ASSERT( TExceptionType.Unknown = aType);
     Result := TTransportExceptionUnknown.Create(msg);
@@ -737,6 +763,11 @@ end;
 class function TTransportExceptionCorruptedData.GetType: TTransportException.TExceptionType;
 begin
   result := TExceptionType.CorruptedData;
+end;
+
+class function TTransportExceptionMessageSizeLimit.GetType: TTransportException.TExceptionType;
+begin
+  result := TExceptionType.MessageSizeLimit;
 end;
 
 { TTransportFactoryImpl }
@@ -964,8 +995,8 @@ procedure TSocketImpl.Close;
 begin
   inherited Close;
 
-  FInputStream := nil;
-  FOutputStream := nil;
+  SetInputStream( nil);
+  SetOutputStream( nil);
 
   if FOwnsClient
   then FreeAndNil( FClient)
@@ -997,8 +1028,8 @@ begin
   FOwnsClient := True;
 
   stream := TTcpSocketStreamImpl.Create( FClient, FTimeout);
-  FInputStream := stream;
-  FOutputStream := stream;
+  SetInputStream( stream);
+  SetOutputStream( stream);
 end;
 
 procedure TSocketImpl.Open;
@@ -1026,8 +1057,8 @@ begin
   FClient.Open;
 {$ENDIF}
 
-  FInputStream := TTcpSocketStreamImpl.Create( FClient, FTimeout);
-  FOutputStream := FInputStream;
+  SetInputStream( TTcpSocketStreamImpl.Create( FClient, FTimeout));
+  SetOutputStream( InputStream);  // same
 end;
 
 { TBufferedStream }
@@ -1156,6 +1187,12 @@ begin
 end;
 
 
+function TBufferedStreamImpl.CanSeek : Boolean;
+begin
+  result := TRUE;
+end;
+
+
 function TBufferedStreamImpl.Size : Int64;
 begin
   result := FReadBuffer.Size;
@@ -1173,45 +1210,57 @@ end;
 constructor TStreamTransportImpl.Create( const aInputStream, aOutputStream : IThriftStream; const aConfig : IThriftConfiguration);
 begin
   inherited Create( aConfig);
-  FInputStream := aInputStream;
-  FOutputStream := aOutputStream;
+  SetInputStream( aInputStream);
+  SetOutputStream( aOutputStream);
 end;
 
 destructor TStreamTransportImpl.Destroy;
 begin
-  FInputStream := nil;
-  FOutputStream := nil;
+  SetInputStream( nil);
+  SetInputStream( nil);
   inherited;
 end;
 
 procedure TStreamTransportImpl.Close;
 begin
-  FInputStream := nil;
-  FOutputStream := nil;
+  SetInputStream( nil);
+  SetInputStream( nil);
 end;
 
 procedure TStreamTransportImpl.Flush;
 begin
-  if FOutputStream = nil then begin
+  if OutputStream = nil then begin
     raise TTransportExceptionNotOpen.Create('Cannot flush null outputstream' );
   end;
 
-  FOutputStream.Flush;
+  OutputStream.Flush;
 end;
 
 function TStreamTransportImpl.GetInputStream: IThriftStream;
 begin
-  Result := FInputStream;
+  Result := FInternalInputStream;
+end;
+
+procedure TStreamTransportImpl.SetInputStream( const stream : IThriftStream);
+begin
+  FInternalInputStream := stream;
+  ResetMessageSizeAndConsumedBytes(-1);  // full reset to configured maximum
+  UpdateKnownMessageSize( -1);           // adjust to real stream size
+end;
+
+function TStreamTransportImpl.GetOutputStream: IThriftStream;
+begin
+  Result := FInternalOutputStream;
+end;
+
+procedure TStreamTransportImpl.SetOutputStream( const stream : IThriftStream);
+begin
+  FInternalOutputStream := stream;
 end;
 
 function TStreamTransportImpl.GetIsOpen: Boolean;
 begin
   Result := True;
-end;
-
-function TStreamTransportImpl.GetOutputStream: IThriftStream;
-begin
-  Result := FOutputStream;
 end;
 
 procedure TStreamTransportImpl.Open;
@@ -1221,19 +1270,36 @@ end;
 
 function TStreamTransportImpl.Read( const pBuf : Pointer; const buflen : Integer; off: Integer; len: Integer): Integer;
 begin
-  if FInputStream = nil
+  if InputStream = nil
   then raise TTransportExceptionNotOpen.Create('Cannot read from null inputstream' );
 
-  Result := FInputStream.Read( pBuf,buflen, off, len );
+  Result := InputStream.Read( pBuf,buflen, off, len );
   CountConsumedMessageBytes( result);
 end;
 
 procedure TStreamTransportImpl.Write( const pBuf : Pointer; off, len : Integer);
 begin
-  if FOutputStream = nil
+  if OutputStream = nil
   then raise TTransportExceptionNotOpen.Create('Cannot write to null outputstream' );
 
-  FOutputStream.Write( pBuf, off, len );
+  OutputStream.Write( pBuf, off, len );
+end;
+
+
+procedure TStreamTransportImpl.UpdateKnownMessageSize(const size : Int64);
+var adjusted : Int64;
+begin
+  if InputStream = nil
+  then adjusted := 0
+  else begin
+    adjusted := MaxMessageSize;
+    if size > 0
+    then adjusted := Math.Min( adjusted, size);
+    if InputStream.CanSeek
+    then adjusted := Math.Min( adjusted, InputStream.Size);
+  end;
+
+  inherited UpdateKnownMessageSize( adjusted);
 end;
 
 { TBufferedTransportImpl }

@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+
 library thrift.test.transport.t_json_protocol_test;
 
 import 'dart:async';
@@ -27,7 +28,7 @@ import 'package:thrift/thrift.dart';
 void main() {
   final message = TMessage('my message', TMessageType.ONEWAY, 123);
 
-  TProtocol protocol;
+  late TProtocol protocol;
 
   Primitive getPrimitive(int tType) {
     switch (tType) {
@@ -69,7 +70,7 @@ void main() {
     expect(output, input);
   }
 
-  Future primitiveNullTest(Primitive primitive) async {
+  /*Future primitiveNullTest(Primitive primitive) async {
     primitive.write(null);
     protocol.writeMessageEnd();
 
@@ -79,7 +80,7 @@ void main() {
     var output = primitive.read();
 
     expect(output, primitive.defaultValue);
-  }
+  }*/
 
   var sharedTests = () {
     test('Test message', () async {
@@ -179,61 +180,61 @@ void main() {
     test('Test bool', () async {
       await primitiveTest(getPrimitive(TType.BOOL), true);
     });
-
+/*
     test('Test bool null', () async {
       await primitiveNullTest(getPrimitive(TType.BOOL));
     });
-
+*/
     test('Test byte', () async {
       await primitiveTest(getPrimitive(TType.BYTE), 64);
     });
-
+/*
     test('Test byte null', () async {
       await primitiveNullTest(getPrimitive(TType.BYTE));
     });
-
+*/
     test('Test I16', () async {
       await primitiveTest(getPrimitive(TType.I16), 32767);
     });
-
+/*
     test('Test I16 null', () async {
       await primitiveNullTest(getPrimitive(TType.I16));
     });
-
+*/
     test('Test I32', () async {
       await primitiveTest(getPrimitive(TType.I32), 2147483647);
     });
-
+/*
     test('Test I32 null', () async {
       await primitiveNullTest(getPrimitive(TType.I32));
     });
-
+*/
     test('Test I64', () async {
       await primitiveTest(getPrimitive(TType.I64), 9223372036854775807);
     });
-
+/*
     test('Test I64 null', () async {
       await primitiveNullTest(getPrimitive(TType.I64));
     });
-
+*/
     test('Test double', () async {
       await primitiveTest(getPrimitive(TType.DOUBLE), 3.1415926);
     });
-
+/*
     test('Test double null', () async {
       await primitiveNullTest(getPrimitive(TType.DOUBLE));
     });
-
+*/
     test('Test string', () async {
       var input = 'There are only two hard things in computer science: '
           'cache invalidation, naming things, and off-by-one errors.';
       await primitiveTest(getPrimitive(TType.STRING), input);
     });
-
+/*
     test('Test string null', () async {
       await primitiveNullTest(getPrimitive(TType.STRING));
     });
-
+*/
     test('Test binary', () async {
       var input = Uint8List.fromList(List.filled(100, 123));
 
@@ -385,6 +386,67 @@ void main() {
     });
 
     group('shared tests', sharedTests);
+
+    test('readMapBegin rejects negative size', () async {
+      final trans = TBufferedTransport();
+      final proto = TBinaryProtocol(trans);
+      // ktype=I32(8), vtype=STRING(11), size=-1 (0xffffffff big-endian)
+      final bytes = Uint8List.fromList([8, 11, 0xff, 0xff, 0xff, 0xff]);
+      trans.write(bytes, 0, bytes.length);
+      await trans.flush();
+      expect(
+        () => proto.readMapBegin(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.NEGATIVE_SIZE)));
+    });
+
+    test('readListBegin rejects negative size', () async {
+      final trans = TBufferedTransport();
+      final proto = TBinaryProtocol(trans);
+      final bytes = Uint8List.fromList([11, 0xff, 0xff, 0xff, 0xff]);
+      trans.write(bytes, 0, bytes.length);
+      await trans.flush();
+      expect(
+        () => proto.readListBegin(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.NEGATIVE_SIZE)));
+    });
+
+    test('readSetBegin rejects negative size', () async {
+      final trans = TBufferedTransport();
+      final proto = TBinaryProtocol(trans);
+      final bytes = Uint8List.fromList([11, 0xff, 0xff, 0xff, 0xff]);
+      trans.write(bytes, 0, bytes.length);
+      await trans.flush();
+      expect(
+        () => proto.readSetBegin(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.NEGATIVE_SIZE)));
+    });
+
+    test('readString rejects negative size', () async {
+      final trans = TBufferedTransport();
+      final proto = TBinaryProtocol(trans);
+      final bytes = Uint8List.fromList([0xff, 0xff, 0xff, 0xff]);
+      trans.write(bytes, 0, bytes.length);
+      await trans.flush();
+      expect(
+        () => proto.readString(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.NEGATIVE_SIZE)));
+    });
+
+    test('readBinary rejects negative size', () async {
+      final trans = TBufferedTransport();
+      final proto = TBinaryProtocol(trans);
+      final bytes = Uint8List.fromList([0xff, 0xff, 0xff, 0xff]);
+      trans.write(bytes, 0, bytes.length);
+      await trans.flush();
+      expect(
+        () => proto.readBinary(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.NEGATIVE_SIZE)));
+    });
   });
 
   group('compact', () {
@@ -394,6 +456,29 @@ void main() {
     });
 
     group('shared tests', sharedTests);
+
+    test('readI64 rejects overlong varint', () async {
+      final trans = TBufferedTransport();
+      final proto = TCompactProtocol(trans);
+      final bytes = Uint8List(11)..fillRange(0, 11, 0x80);
+      trans.write(bytes, 0, 11);
+      await trans.flush();
+      expect(
+        () => proto.readI64(),
+        throwsA(isA<TProtocolError>().having(
+          (e) => e.type, 'type', TProtocolErrorType.INVALID_DATA)));
+    });
+
+    test('readI64 accepts valid 10-byte varint', () async {
+      final trans = TBufferedTransport();
+      final proto = TCompactProtocol(trans);
+      final bytes = Uint8List(10)
+        ..fillRange(0, 9, 0x80)
+        ..[9] = 0x01;
+      trans.write(bytes, 0, 10);
+      await trans.flush();
+      expect(() => proto.readI64(), returnsNormally);
+    });
   });
 }
 

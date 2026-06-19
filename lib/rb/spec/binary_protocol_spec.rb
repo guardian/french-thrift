@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -21,7 +22,6 @@ require 'spec_helper'
 require File.expand_path("#{File.dirname(__FILE__)}/binary_protocol_spec_shared")
 
 describe 'BinaryProtocol' do
-
   it_should_behave_like 'a binary protocol'
 
   def protocol_class
@@ -29,7 +29,6 @@ describe 'BinaryProtocol' do
   end
 
   describe Thrift::BinaryProtocol do
-
     before(:each) do
       @trans = Thrift::MemoryBufferTransport.new
       @prot = protocol_class.new(@trans)

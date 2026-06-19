@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,7 +21,6 @@
 require 'spec_helper'
 
 describe 'BaseProtocol' do
-
   before(:each) do
     @trans = double("MockTransport")
     @prot = Thrift::BaseProtocol.new(@trans)
@@ -210,12 +210,31 @@ describe 'BaseProtocol' do
       expect(@prot).to receive(:read_list_end)
       real_skip.call(Thrift::Types::LIST)
     end
+
+    it "should raise DEPTH_LIMIT when max_depth is exhausted" do
+      expect { @prot.skip(Thrift::Types::STRUCT, 0) }.to raise_error(Thrift::ProtocolException) do |e|
+        expect(e.type).to eq(Thrift::ProtocolException::DEPTH_LIMIT)
+      end
+    end
+
+    it "should skip at max_depth=1 without raising" do
+      expect(@prot).to receive(:read_bool).once
+      expect { @prot.skip(Thrift::Types::BOOL, 1) }.not_to raise_error
+    end
+
+    it "should reject negative container sizes while skipping" do
+      expect(@prot).to receive(:read_list_begin).and_return([Thrift::Types::I32, -1])
+
+      expect { @prot.skip(Thrift::Types::LIST) }.to raise_error(Thrift::ProtocolException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+      end
+    end
   end
 
   describe Thrift::BaseProtocolFactory do
     it "should raise NotImplementedError" do
       # returning nil since Protocol is just an abstract class
-      expect {Thrift::BaseProtocolFactory.new.get_protocol(double("MockTransport"))}.to raise_error(NotImplementedError)
+      expect { Thrift::BaseProtocolFactory.new.get_protocol(double("MockTransport")) }.to raise_error(NotImplementedError)
     end
 
     it "should provide a reasonable to_s" do

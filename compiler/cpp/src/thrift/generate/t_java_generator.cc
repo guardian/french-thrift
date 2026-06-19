@@ -1629,7 +1629,7 @@ void t_java_generator::generate_java_struct_definition(ostream& out,
     }
 
     if (optionals > 0) {
-      std::string output_string = "private static final _Fields optionals[] = {";
+      std::string output_string = "private static final _Fields[] optionals = {";
       for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
         if ((*m_iter)->get_req() == t_field::T_OPTIONAL) {
           output_string = output_string + "_Fields." + constant_name((*m_iter)->get_name()) + ",";
@@ -2997,7 +2997,7 @@ std::string t_java_generator::get_java_type_string(t_type* type) {
 }
 
 void t_java_generator::generate_metadata_for_field_annotations(std::ostream& out, t_field* field) {
-  if (field->annotations_.size() == 0) {
+  if (field->annotations_.size() == 0 && field->get_type()->annotations_.size() == 0) {
     return;
   }
   out << ", " << '\n';
@@ -3010,6 +3010,15 @@ void t_java_generator::generate_metadata_for_field_annotations(std::ostream& out
   indent_up();
   indent_up();
   for (auto& annotation : field->annotations_) {
+    indent(out) << ".add(new java.util.AbstractMap.SimpleImmutableEntry<>(\"" + annotation.first
+                       + "\", \"" + annotation.second.back() + "\"))"
+                << '\n';
+  }
+  for (auto& annotation : field->get_type()->annotations_) {
+    // field annotations have higher priority than type annotations
+    if (field->annotations_.find(annotation.first) != field->annotations_.end()) {
+      continue;
+    }
     indent(out) << ".add(new java.util.AbstractMap.SimpleImmutableEntry<>(\"" + annotation.first
                        + "\", \"" + annotation.second.back() + "\"))"
                 << '\n';
@@ -5517,6 +5526,9 @@ void t_java_generator::generate_standard_reader(ostream& out, t_struct* tstruct)
   indent(out) << "public void read(org.apache.thrift.protocol.TProtocol iprot, "
               << make_valid_java_identifier(tstruct->get_name()) << " struct) throws org.apache.thrift.TException {" << '\n';
   indent_up();
+  indent(out) << "iprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
 
   const vector<t_field*>& fields = tstruct->get_members();
   vector<t_field*>::const_iterator f_iter;
@@ -5603,6 +5615,13 @@ void t_java_generator::generate_standard_reader(ostream& out, t_struct* tstruct)
 
   // performs various checks (e.g. check that all required fields are set)
   indent(out) << "struct.validate();" << '\n';
+
+  indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "iprot.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
 
   indent_down();
   out << indent() << "}" << '\n';
@@ -5696,6 +5715,9 @@ void t_java_generator::generate_java_struct_tuple_reader(ostream& out, t_struct*
   indent(out) << "public void read(org.apache.thrift.protocol.TProtocol prot, "
               << make_valid_java_identifier(tstruct->get_name()) << " struct) throws org.apache.thrift.TException {" << '\n';
   indent_up();
+  indent(out) << "prot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
   indent(out) << "org.apache.thrift.protocol.TTupleProtocol iprot = "
                  "(org.apache.thrift.protocol.TTupleProtocol) prot;"
               << '\n';
@@ -5731,6 +5753,13 @@ void t_java_generator::generate_java_struct_tuple_reader(ostream& out, t_struct*
       }
     }
   }
+  indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "prot.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
+
   indent_down();
   indent(out) << "}" << '\n';
 }

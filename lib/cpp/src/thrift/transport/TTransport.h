@@ -23,6 +23,7 @@
 #include <thrift/Thrift.h>
 #include <thrift/TConfiguration.h>
 #include <thrift/transport/TTransportException.h>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -189,6 +190,16 @@ public:
   }
 
   /**
+   * Called by generated code after a one-way method has been sent or handled.
+   * Transports that receive an out-of-band response can override this to mark
+   * it for discard without making one-way calls wait for a reply. Transports
+   * that must emit an out-of-band response can override this to send it.
+   */
+  virtual void onewayComplete() {
+    // default behaviour is to do nothing
+  }
+
+  /**
    * Attempts to return a pointer to \c len bytes, possibly copied into \c buf.
    * Does not consume the bytes read (i.e.: a later read will return the same
    * data).  This method is meant to support protocols that need to read
@@ -272,9 +283,9 @@ public:
    *
    * @param numBytes  numBytes bytes of data
    */
-  void checkReadBytesAvailable(long int numBytes)
+  void checkReadBytesAvailable(int64_t numBytes)
   {
-    if (remainingMessageSize_ < numBytes)
+    if (remainingMessageSize_ < numBytes || numBytes < 0)
       throw TTransportException(TTransportException::END_OF_FILE, "MaxMessageSize reached");
   }
 

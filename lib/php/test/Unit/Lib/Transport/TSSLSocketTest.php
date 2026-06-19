@@ -19,10 +19,16 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
+use Test\Thrift\Unit\Lib\UserDeprecationCapture;
 use Thrift\Exception\TException;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\TSSLSocket;
@@ -30,10 +36,9 @@ use Thrift\Transport\TSSLSocket;
 class TSSLSocketTest extends TestCase
 {
     use PHPMock;
+    use UserDeprecationCapture;
 
-    /**
-     * @dataProvider openExceptionDataProvider
-     */
+    #[DataProvider('openExceptionDataProvider')]
     public function testOpenException(
         $host,
         $port,
@@ -69,7 +74,7 @@ class TSSLSocketTest extends TestCase
         $socket->open();
     }
 
-    public function openExceptionDataProvider()
+    public static function openExceptionDataProvider()
     {
         yield 'host is empty' => [
             'host' => '',
@@ -150,35 +155,36 @@ class TSSLSocketTest extends TestCase
         };
 
         $this->getFunctionMock('Thrift\Transport', 'stream_socket_client')
-             ->expects($this->once())
-             ->with(
-                 'ssl://' . $host . ':' . $port,
-                 $this->anything(), #$errno,
-                 $this->anything(), #$errstr,
-                 $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
-                 STREAM_CLIENT_CONNECT,
-                 $this->anything() #$context
-             )
-             ->willReturnCallback(
-                 function ($host, &$error_code, &$error_message, $timeout, $flags, $context) {
-                     $error_code = 999;
-                     $error_message = 'Connection refused';
+            ->expects($this->once())
+            ->with(
+                'ssl://' . $host . ':' . $port,
+                $this->anything(), #$errno,
+                $this->anything(), #$errstr,
+                $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                STREAM_CLIENT_CONNECT,
+                $this->anything() #$context
+            )
+            ->willReturnCallback(
+                function ($host, &$error_code, &$error_message, $timeout, $flags, $context) {
+                    $error_code = 999;
+                    $error_message = 'Connection refused';
 
-                     return false;
-                 }
-             );
+                    return false;
+                }
+            );
 
         $this->expectException(\Exception::class);
         $this->expectExceptionMessage('TSocket: Could not connect to');
         $this->expectExceptionCode(0);
 
-        $transport = new TSSLSocket(
-            $host,
-            $port,
-            $context,
-            $debugHandler
+        $transport = null;
+        $deprecations = self::captureUserDeprecations(
+            static function () use (&$transport, $host, $port, $context, $debugHandler): void {
+                $transport = new TSSLSocket($host, $port, $context, $debugHandler);
+                $transport->setDebug(true);
+            },
         );
-        $transport->setDebug(true);
+        $this->assertCount(2, $deprecations);
         $transport->open();
     }
 
@@ -221,9 +227,7 @@ class TSSLSocketTest extends TestCase
         $this->assertTrue($transport->isOpen());
     }
 
-    /**
-     * @dataProvider hostDataProvider
-     */
+    #[DataProvider('hostDataProvider')]
     public function testGetHost($host, $expected)
     {
         $port = 9090;
@@ -238,10 +242,74 @@ class TSSLSocketTest extends TestCase
         $this->assertEquals($expected, $transport->getHost());
     }
 
-    public function hostDataProvider()
+    public static function hostDataProvider()
     {
         yield 'localhost' => ['localhost', 'ssl://localhost'];
         yield 'ssl_localhost' => ['ssl://localhost', 'ssl://localhost'];
         yield 'http_localhost' => ['http://localhost', 'http://localhost'];
+    }
+
+    public function testDebugHandlerWithLoggerInterface(): void
+    {
+        $host = 'nonexistent-host';
+        $port = 9090;
+        $expectedMessage = 'TSocket: Could not connect to ssl://nonexistent-host:9090 (Connection refused [999])';
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())
+               ->method('log')
+               ->with(LogLevel::ERROR, $expectedMessage);
+
+        $this->getFunctionMock('Thrift\Transport', 'stream_socket_client')
+            ->expects($this->once())
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    &$error_code,
+                    &$error_message,
+                    ?float $timeout,
+                    int $flags,
+                    $context
+                ) {
+                    $error_code = 999;
+                    $error_message = 'Connection refused';
+
+                    return false;
+                }
+            );
+
+        $transport = new TSSLSocket($host, $port, null, $logger);
+
+        $this->expectException(TException::class);
+        $transport->open();
+    }
+
+    public function testStringDebugHandlerTriggersDeprecation(): void
+    {
+        $errors = self::captureUserDeprecations(static function (): void {
+            new TSSLSocket('localhost', 9090, null, 'error_log');
+        });
+
+        $this->assertCount(1, $errors);
+        $this->assertSame(E_USER_DEPRECATED, $errors[0]['errno']);
+        $this->assertStringContainsString(
+            'Passing a callable as $debugHandler is deprecated',
+            $errors[0]['errstr'],
+        );
+    }
+
+    public function testClosureDebugHandlerTriggersDeprecation(): void
+    {
+        $errors = self::captureUserDeprecations(static function (): void {
+            new TSSLSocket('localhost', 9090, null, static function (string $m): void {
+            });
+        });
+
+        $this->assertCount(1, $errors);
+        $this->assertSame(E_USER_DEPRECATED, $errors[0]['errno']);
+        $this->assertStringContainsString(
+            'Passing a callable as $debugHandler is deprecated',
+            $errors[0]['errstr'],
+        );
     }
 }

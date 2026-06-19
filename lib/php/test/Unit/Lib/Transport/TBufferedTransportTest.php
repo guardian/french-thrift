@@ -19,14 +19,20 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Test\Thrift\Unit\Lib\ReflectionHelper;
 use Thrift\Transport\TBufferedTransport;
 use Thrift\Transport\TTransport;
 
 class TBufferedTransportTest extends TestCase
 {
+    use ReflectionHelper;
+
     public function testIsOpen()
     {
         $transport = $this->createMock(TTransport::class);
@@ -47,8 +53,7 @@ class TBufferedTransportTest extends TestCase
 
         $transport
             ->expects($this->once())
-            ->method('open')
-            ->willReturn(null);
+            ->method('open');
 
         $this->assertNull($bufferedTransport->open());
     }
@@ -60,30 +65,24 @@ class TBufferedTransportTest extends TestCase
 
         $transport
             ->expects($this->once())
-            ->method('close')
-            ->willReturn(null);
+            ->method('close');
 
         $this->assertNull($bufferedTransport->close());
     }
 
     public function testPutBack()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $bufferedTransport = new TBufferedTransport($transport);
         $bufferedTransport->putBack('test');
 
-        $ref = new \ReflectionClass($bufferedTransport);
-        $property = $ref->getProperty('rBuf_');
-        $property->setAccessible(true);
-        $this->assertEquals('test', $property->getValue($bufferedTransport));
+        $this->assertEquals('test', $this->getPropertyValue($bufferedTransport, 'rBuf'));
 
         $bufferedTransport->putBack('abcde');
-        $this->assertEquals('abcdetest', $property->getValue($bufferedTransport));
+        $this->assertEquals('abcdetest', $this->getPropertyValue($bufferedTransport, 'rBuf'));
     }
 
-    /**
-     * @dataProvider readAllDataProvider
-     */
+    #[DataProvider('readAllDataProvider')]
     public function testReadAll(
         $startBuffer,
         $readLength,
@@ -104,13 +103,10 @@ class TBufferedTransportTest extends TestCase
 
         $this->assertEquals($expectedRead, $bufferedTransport->readAll($readLength));
 
-        $ref = new \ReflectionClass($bufferedTransport);
-        $property = $ref->getProperty('rBuf_');
-        $property->setAccessible(true);
-        $this->assertEquals($expectedBufferValue, $property->getValue($bufferedTransport));
+        $this->assertEquals($expectedBufferValue, $this->getPropertyValue($bufferedTransport, 'rBuf'));
     }
 
-    public function readAllDataProvider()
+    public static function readAllDataProvider()
     {
         yield 'buffer empty' => [
             'startBuffer' => '',
@@ -146,9 +142,7 @@ class TBufferedTransportTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider readDataProvider
-     */
+    #[DataProvider('readDataProvider')]
     public function testRead(
         $readBufferSize,
         $startBuffer,
@@ -169,13 +163,10 @@ class TBufferedTransportTest extends TestCase
 
         $this->assertEquals($expectedRead, $bufferedTransport->read($readLength));
 
-        $ref = new \ReflectionClass($bufferedTransport);
-        $property = $ref->getProperty('rBuf_');
-        $property->setAccessible(true);
-        $this->assertEquals($expectedBufferValue, $property->getValue($bufferedTransport));
+        $this->assertEquals($expectedBufferValue, $this->getPropertyValue($bufferedTransport, 'rBuf'));
     }
 
-    public function readDataProvider()
+    public static function readDataProvider()
     {
         yield 'buffer empty' => [
             'readBufferSize' => 10,
@@ -203,9 +194,7 @@ class TBufferedTransportTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider writeDataProvider
-     */
+    #[DataProvider('writeDataProvider')]
     public function testWrite(
         $writeBufferSize,
         $writeData,
@@ -218,18 +207,14 @@ class TBufferedTransportTest extends TestCase
         $transport
             ->expects($this->exactly($bufferedTransportCall))
             ->method('write')
-            ->with($writeData)
-            ->willReturn(null);
+            ->with($writeData);
 
         $this->assertNull($bufferedTransport->write($writeData));
 
-        $ref = new \ReflectionClass($bufferedTransport);
-        $property = $ref->getProperty('wBuf_');
-        $property->setAccessible(true);
-        $this->assertEquals($expectedWriteBufferValue, $property->getValue($bufferedTransport));
+        $this->assertEquals($expectedWriteBufferValue, $this->getPropertyValue($bufferedTransport, 'wBuf'));
     }
 
-    public function writeDataProvider()
+    public static function writeDataProvider()
     {
         yield 'store data in buffer' => [
             'writeBufferSize' => 10,
@@ -245,36 +230,29 @@ class TBufferedTransportTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider flushDataProvider
-     */
+    #[DataProvider('flushDataProvider')]
     public function testFlush(
         $writeBuffer
     ) {
         $transport = $this->createMock(TTransport::class);
         $bufferedTransport = new TBufferedTransport($transport, 512, 512);
-        $ref = new \ReflectionClass($bufferedTransport);
-        $property = $ref->getProperty('wBuf_');
-        $property->setAccessible(true);
-        $property->setValue($bufferedTransport, $writeBuffer);
+        $this->setPropertyValue($bufferedTransport, 'wBuf', $writeBuffer);
 
         $transport
             ->expects(!empty($writeBuffer) ? $this->once() : $this->never())
             ->method('write')
-            ->with($writeBuffer)
-            ->willReturn(null);
+            ->with($writeBuffer);
 
         $transport
             ->expects($this->once())
-            ->method('flush')
-            ->willReturn(null);
+            ->method('flush');
 
         $this->assertNull($bufferedTransport->flush());
 
-        $this->assertEquals('', $property->getValue($bufferedTransport));
+        $this->assertEquals('', $this->getPropertyValue($bufferedTransport, 'wBuf'));
     }
 
-    public function flushDataProvider()
+    public static function flushDataProvider()
     {
         yield 'empty buffer' => [
             'writeBuffer' => '',

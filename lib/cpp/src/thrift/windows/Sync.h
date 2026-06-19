@@ -37,7 +37,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define _THRIFT_UNDEF_WIN32_LEAN_AND_MEAN
 #endif
-#include <Windows.h>
+#include <windows.h>
 #ifdef _THRIFT_UNDEF_NOMINMAX
 #undef NOMINMAX
 #undef _THRIFT_UNDEF_NOMINMAX
@@ -76,7 +76,7 @@ struct TAutoResetEvent : apache::thrift::TNonCopyable {
   TAutoResetEvent() {
     h = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (h == nullptr) {
-      GlobalOutput.perror("TAutoResetEvent unable to create event, GLE=", GetLastError());
+      TOutput::instance().perror("TAutoResetEvent unable to create event, GLE=", GetLastError());
       throw apache::thrift::concurrency::SystemResourceException("CreateEvent failed");
     }
   }
@@ -89,7 +89,7 @@ struct TManualResetEvent : apache::thrift::TNonCopyable {
   TManualResetEvent() {
     h = CreateEvent(nullptr, TRUE, FALSE, nullptr);
     if (h == nullptr) {
-      GlobalOutput.perror("TManualResetEvent unable to create event, GLE=", GetLastError());
+      TOutput::instance().perror("TManualResetEvent unable to create event, GLE=", GetLastError());
       throw apache::thrift::concurrency::SystemResourceException("CreateEvent failed");
     }
   }

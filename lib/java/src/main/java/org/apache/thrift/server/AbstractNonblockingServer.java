@@ -20,6 +20,7 @@
 package org.apache.thrift.server;
 
 import java.io.IOException;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
@@ -31,6 +32,7 @@ import org.apache.thrift.TAsyncProcessor;
 import org.apache.thrift.TByteArrayOutputStream;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TProtocol;
+import org.apache.thrift.transport.SocketAddressProvider;
 import org.apache.thrift.transport.TIOStreamTransport;
 import org.apache.thrift.transport.TMemoryInputTransport;
 import org.apache.thrift.transport.TNonblockingServerTransport;
@@ -288,15 +290,22 @@ public abstract class AbstractNonblockingServer extends TServer {
       selectThread_ = selectThread;
       buffer_ = ByteBuffer.allocate(4);
 
-      frameTrans_ = new TMemoryInputTransport();
+      frameTrans_ = new TMemoryInputTransport(trans_.getConfiguration());
       response_ = new TByteArrayOutputStream();
       inTrans_ = inputTransportFactory_.getTransport(frameTrans_);
-      outTrans_ = outputTransportFactory_.getTransport(new TIOStreamTransport(response_));
+      outTrans_ =
+          outputTransportFactory_.getTransport(
+              new TIOStreamTransport(trans_.getConfiguration(), response_));
       inProt_ = inputProtocolFactory_.getProtocol(inTrans_);
       outProt_ = outputProtocolFactory_.getProtocol(outTrans_);
 
       if (eventHandler_ != null) {
         context_ = eventHandler_.createContext(inProt_, outProt_);
+        SocketAddress remoteAddress =
+            trans_ instanceof SocketAddressProvider
+                ? ((SocketAddressProvider) trans_).getRemoteSocketAddress()
+                : null;
+        context_.setRemoteAddress(remoteAddress);
       } else {
         context_ = null;
       }
@@ -309,6 +318,14 @@ public abstract class AbstractNonblockingServer extends TServer {
      */
     public void setSelectionKey(SelectionKey selectionKey) {
       selectionKey_ = selectionKey;
+    }
+
+    /**
+     * @return the amount of memory currently used to read data from clients. This information can
+     *     be useful for debugging, metrics, and configuring the maximum memory limit.
+     */
+    public final long getReadBufferBytesAllocated() {
+      return readBufferBytesAllocated.get();
     }
 
     /**
@@ -351,7 +368,13 @@ public abstract class AbstractNonblockingServer extends TServer {
 
           // if this frame will push us over the memory limit, then return.
           // with luck, more memory will free up the next time around.
-          if (readBufferBytesAllocated.get() + frameSize > MAX_READ_BUFFER_BYTES) {
+          long currentAllocated = getReadBufferBytesAllocated();
+          if (currentAllocated + frameSize > MAX_READ_BUFFER_BYTES) {
+            LOGGER.trace(
+                "Deferring reading frame of size {} because {} is already buffered and {} is the limit.",
+                frameSize,
+                currentAllocated,
+                MAX_READ_BUFFER_BYTES);
             return true;
           }
 
@@ -456,9 +479,12 @@ public abstract class AbstractNonblockingServer extends TServer {
           || state_ == FrameBufferState.AWAITING_CLOSE) {
         readBufferBytesAllocated.addAndGet(-buffer_.array().length);
       }
-      trans_.close();
-      if (eventHandler_ != null) {
-        eventHandler_.deleteContext(context_, inProt_, outProt_);
+      try {
+        if (eventHandler_ != null) {
+          eventHandler_.deleteContext(context_, inProt_, outProt_);
+        }
+      } finally {
+        trans_.close();
       }
     }
 

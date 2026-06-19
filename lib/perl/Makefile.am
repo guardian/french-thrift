@@ -74,6 +74,7 @@ THRIFT = @top_builddir@/compiler/cpp/thrift
 THRIFT_IF = @top_srcdir@/test/v0.16/ThriftTest.thrift
 NAME_BENCHMARKSERVICE =  @top_srcdir@/lib/rb/benchmark/Benchmark.thrift
 NAME_AGGR = @top_srcdir@/contrib/async-test/aggr.thrift
+NAME_RECURSION = @top_srcdir@/lib/perl/t/RecursionDepth.thrift
 
 THRIFTTEST_GEN = \
 	gen-perl/ThriftTest/Constants.pm \
@@ -91,12 +92,24 @@ AGGR_GEN = \
 	gen-perl2/Constants.pm \
 	gen-perl2/Types.pm
 
+RECURSION_GEN = \
+	gen-perl/RecursionDepth/Constants.pm \
+	gen-perl/RecursionDepth/Types.pm
+
 PERL_GEN = \
 	$(THRIFTTEST_GEN) \
 	$(BENCHMARK_GEN) \
-	$(AGGR_GEN)
+	$(AGGR_GEN) \
+	$(RECURSION_GEN)
+
+PERL_PRECROSS_GEN = \
+	gen-perl/ThriftTest/Constants.pm \
+	gen-perl/BenchmarkService.pm \
+	gen-perl2/Aggr.pm
 
 BUILT_SOURCES = $(PERL_GEN)
+
+precross: $(PERL_PRECROSS_GEN)
 
 check-local: $(PERL_GEN)
 	$(PERL) -Iblib/lib -I@abs_srcdir@ -I@builddir@/gen-perl2 -I@builddir@/gen-perl \
@@ -111,3 +124,6 @@ $(BENCHMARK_GEN): $(NAME_BENCHMARKSERVICE) $(THRIFT)
 $(AGGR_GEN): $(NAME_AGGR) $(THRIFT)
 	$(MKDIR_P) gen-perl2
 	$(THRIFT) -out gen-perl2 --gen perl $<
+
+$(RECURSION_GEN): $(NAME_RECURSION) $(THRIFT)
+	$(THRIFT) --gen perl $<

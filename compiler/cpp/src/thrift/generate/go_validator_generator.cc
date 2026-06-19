@@ -239,11 +239,11 @@ void go_validator_generator::generate_enum_field_validator(std::ostream& out,
       }
     } else if (key == "vt.defined_only") {
       if (values[0]->get_bool()) {
-        out << indent() << "if (" << context.tgt << ").String() == \"<UNSET>\" ";
+        out << indent() << "if (" << context.tgt << ").String() == \"<UNSET>\"";
       } else {
         continue;
       }
-      out << "{" << '\n';
+      out << " {" << '\n';
       indent_up();
       out << indent()
           << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -276,7 +276,7 @@ void go_validator_generator::generate_bool_field_validator(std::ostream& out,
         }
       }
     }
-    out << "{" << '\n';
+    out << " {" << '\n';
     indent_up();
     out << indent()
         << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -308,7 +308,7 @@ void go_validator_generator::generate_double_field_validator(std::ostream& out,
       } else {
         out << values[0]->get_double();
       }
-      out << "{" << '\n';
+      out << " {" << '\n';
       indent_up();
       out << indent()
           << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -354,7 +354,7 @@ void go_validator_generator::generate_double_field_validator(std::ostream& out,
         } else {
           out << values[0]->get_double();
         }
-        out << "{" << '\n';
+        out << " {" << '\n';
       }
 
       indent_up();
@@ -390,7 +390,7 @@ void go_validator_generator::generate_double_field_validator(std::ostream& out,
         } else {
           out << values[0]->get_double();
         }
-        out << "{" << '\n';
+        out << " {" << '\n';
       }
       indent_up();
       out << indent()
@@ -460,7 +460,7 @@ void go_validator_generator::generate_integer_field_validator(std::ostream& out,
       } else {
         out << values[0]->get_int();
       }
-      out << "{" << '\n';
+      out << " {" << '\n';
       indent_up();
       out << indent()
           << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -531,7 +531,7 @@ void go_validator_generator::generate_integer_field_validator(std::ostream& out,
         } else {
           out << values[0]->get_int();
         }
-        out << "{" << '\n';
+        out << " {" << '\n';
       }
       indent_up();
       out << indent()
@@ -608,7 +608,7 @@ void go_validator_generator::generate_integer_field_validator(std::ostream& out,
         } else {
           out << values[0]->get_int();
         }
-        out << "{" << '\n';
+        out << " {" << '\n';
       }
       indent_up();
       out << indent()
@@ -679,17 +679,31 @@ void go_validator_generator::generate_string_field_validator(std::ostream& out,
       }
       out << ")";
     } else if (key == "vt.pattern") {
-      out << indent() << "if ok, _ := regexp.MatchString(" << target << ",";
       if (values[0]->is_field_reference()) {
+        out << indent() << "if ok, _ := regexp.MatchString(";
         out << "string(";
         out << get_field_reference_name(values[0]->get_field_reference());
         out << ")";
+        out << ", " << target << "); !ok";
       } else {
-        out << "\"" << values[0]->get_string() << "\"";
+        std::string pattern = values[0]->get_string();
+        std::string var_name;
+        bool found = false;
+        for (auto& entry : pattern_cache_) {
+          if (entry.first == pattern) {
+            var_name = entry.second;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          var_name = "vtRe" + current_struct_name_ + std::to_string(pattern_cache_.size());
+          pattern_cache_.push_back({pattern, var_name});
+        }
+        out << indent() << "if !" << var_name << ".MatchString(" << target << ")";
       }
-      out << "); ok ";
     } else if (key == "vt.prefix") {
-      out << indent() << "if !strings.HasPrefix(" << target << ",";
+      out << indent() << "if !strings.HasPrefix(" << target << ", ";
       if (values[0]->is_field_reference()) {
         out << "string(";
         out << get_field_reference_name(values[0]->get_field_reference());
@@ -699,7 +713,7 @@ void go_validator_generator::generate_string_field_validator(std::ostream& out,
       }
       out << ")";
     } else if (key == "vt.suffix") {
-      out << indent() << "if !strings.HasSuffix(" << target << ",";
+      out << indent() << "if !strings.HasSuffix(" << target << ", ";
       if (values[0]->is_field_reference()) {
         out << "string(";
         out << get_field_reference_name(values[0]->get_field_reference());
@@ -709,7 +723,7 @@ void go_validator_generator::generate_string_field_validator(std::ostream& out,
       }
       out << ")";
     } else if (key == "vt.contains") {
-      out << indent() << "if !strings.Contains(" << target << ",";
+      out << indent() << "if !strings.Contains(" << target << ", ";
       if (values[0]->is_field_reference()) {
         out << "string(";
         out << get_field_reference_name(values[0]->get_field_reference());
@@ -719,7 +733,7 @@ void go_validator_generator::generate_string_field_validator(std::ostream& out,
       }
       out << ")";
     } else if (key == "vt.not_contains") {
-      out << indent() << "if strings.Contains(" << target << ",";
+      out << indent() << "if strings.Contains(" << target << ", ";
       if (values[0]->is_field_reference()) {
         out << "string(";
         out << get_field_reference_name(values[0]->get_field_reference());
@@ -729,7 +743,7 @@ void go_validator_generator::generate_string_field_validator(std::ostream& out,
       }
       out << ")";
     }
-    out << "{" << '\n';
+    out << " {" << '\n';
     indent_up();
     out << indent()
         << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -764,7 +778,7 @@ void go_validator_generator::generate_list_field_validator(std::ostream& out,
       } else {
         out << values[0]->get_int();
       }
-      out << "{" << '\n';
+      out << " {" << '\n';
       indent_up();
       out << indent()
           << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -773,7 +787,7 @@ void go_validator_generator::generate_list_field_validator(std::ostream& out,
       indent_down();
       out << indent() << "}" << '\n';
     } else if (key == "vt.elem") {
-      out << indent() << "for i := 0; i < len(" << context.tgt << ");i++ {" << '\n';
+      out << indent() << "for i := 0; i < len(" << context.tgt << "); i++ {" << '\n';
       indent_up();
       std::string src = GenID("_elem");
       out << indent() << src << " := " << context.tgt << "[i]" << '\n';
@@ -815,7 +829,7 @@ void go_validator_generator::generate_map_field_validator(std::ostream& out,
       } else {
         out << values[0]->get_int();
       }
-      out << "{" << '\n';
+      out << " {" << '\n';
       indent_up();
       out << indent()
           << "return thrift.NewValidationException(thrift.VALIDATION_FAILED, \"" + key + "\", \""
@@ -851,6 +865,25 @@ void go_validator_generator::generate_map_field_validator(std::ostream& out,
       out << indent() << "}" << '\n';
     }
   }
+}
+
+void go_validator_generator::generate_regexp_vars(std::ostream& out) {
+  if (pattern_cache_.empty()) {
+    return;
+  }
+  out << "// Precompiled regex patterns for " << current_struct_name_ << " vt.pattern validation" << '\n';
+  if (pattern_cache_.size() == 1) {
+    out << "var " << pattern_cache_[0].second << " = regexp.MustCompile(`"
+        << pattern_cache_[0].first << "`)" << '\n' << '\n';
+    return;
+  }
+  out << "var (" << '\n';
+  indent_up();
+  for (auto& entry : pattern_cache_) {
+    out << indent() << entry.second << " = regexp.MustCompile(`" << entry.first << "`)" << '\n';
+  }
+  indent_down();
+  out << ")" << '\n' << '\n';
 }
 
 void go_validator_generator::generate_struct_field_validator(std::ostream& out,
@@ -891,7 +924,7 @@ void go_validator_generator::generate_struct_field_validator(std::ostream& out,
       } else if (values[0]->is_field_reference()) {
         out << indent() << "if !";
         out << get_field_reference_name(values[0]->get_field_reference());
-        out << "{" << '\n';
+        out << " {" << '\n';
         indent_up();
         out << indent() << "if err := " << context.tgt << ".Validate(); err != nil {" << '\n';
         indent_up();

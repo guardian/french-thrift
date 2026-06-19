@@ -22,16 +22,32 @@ SUBDIRS = .
 all-local:
 	$(DOTNETCORE) build -c Release
 
-check-local:
+check-local: precompile-fuzzers
 	$(DOTNETCORE) test Tests/Thrift.Compile.Tests/Thrift.Compile.net8/Thrift.Compile.net8.csproj
-	$(DOTNETCORE) test Tests/Thrift.Compile.Tests/Thrift.Compile.net6/Thrift.Compile.net6.csproj
+	$(DOTNETCORE) test Tests/Thrift.Compile.Tests/Thrift.Compile.net9/Thrift.Compile.net9.csproj
 	$(DOTNETCORE) test Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/Thrift.Compile.netstd2.csproj
 	$(DOTNETCORE) test Tests/Thrift.Tests/Thrift.Tests.csproj
 	$(DOTNETCORE) test Tests/Thrift.IntegrationTests/Thrift.IntegrationTests.csproj
 
+# Compile-only build of the 12 fuzzer variants, without SharpFuzz
+# IL rewriting. Wired into check-local so CI catches source changes
+# that would break the fuzzer build — the actual fuzzing tooling
+# (SharpFuzz.CommandLine global tool, libfuzzer-dotnet) is a dev-only
+# dependency not present in CI.
+precompile-fuzzers:
+	./buildfuzzers.sh --no-instrument
+
+# Opt-in full build: compiles and instruments the 12 fuzzer variants
+# for actual fuzzing. Requires the SharpFuzz.CommandLine global tool
+# and libfuzzer-dotnet binary. Run manually: `make build-fuzzers`.
+build-fuzzers:
+	./buildfuzzers.sh
+
 clean-local:
 	$(RM) -r Thrift/bin
 	$(RM) -r Thrift/obj
+	$(RM) -r Thrift.AspNetCore/bin
+	$(RM) -r Thrift.AspNetCore/obj
 	$(RM) -r Benchmarks/Thrift.Benchmarks/bin
 	$(RM) -r Benchmarks/Thrift.Benchmarks/obj
 	$(RM) -r Tests/Thrift.Tests/bin
@@ -40,10 +56,13 @@ clean-local:
 	$(RM) -r Tests/Thrift.IntegrationTests/obj
 	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net8/bin
 	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net8/obj
-	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net6/bin
-	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net6/obj
+	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net9/bin
+	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.net9/obj
 	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/bin
 	$(RM) -r Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/obj
+	$(RM) -r Tests/Thrift.FuzzTests/bin
+	$(RM) -r Tests/Thrift.FuzzTests/obj
+	$(RM) -r Tests/Thrift.FuzzTests/gen-netstd
 
 distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
@@ -58,8 +77,9 @@ EXTRA_DIST = \
 	Tests/Thrift.Compile.Tests/CassandraTest.thrift \
 	Tests/Thrift.Compile.Tests/optional_required_default.thrift \
 	Tests/Thrift.Compile.Tests/Thrift.Compile.net8/Thrift.Compile.net8.csproj \
-	Tests/Thrift.Compile.Tests/Thrift.Compile.net6/Thrift.Compile.net6.csproj \
+	Tests/Thrift.Compile.Tests/Thrift.Compile.net9/Thrift.Compile.net9.csproj \
 	Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/Thrift.Compile.netstd2.csproj \
+	Tests/Thrift.FuzzTests \
 	Tests/Thrift.Tests/Collections \
 	Tests/Thrift.Tests/DataModel \
 	Tests/Thrift.Tests/Protocols \
@@ -79,8 +99,13 @@ EXTRA_DIST = \
 	Thrift/Thrift.csproj \
 	Thrift/Transport \
 	Thrift/*.snk \
-	Thrift.sln \
+	Thrift.AspNetCore/.editorconfig \
+	Thrift.AspNetCore/THttpServerTransport.cs \
+	Thrift.AspNetCore/Thrift.AspNetCore.csproj \
+	Thrift.slnx \
 	build.cmd \
 	build.sh \
+	buildfuzzers.sh \
+	runfuzzer.sh \
 	runtests.cmd \
 	runtests.sh

@@ -63,9 +63,8 @@ phpfactory_DATA = \
 	lib/Factory/TCompactProtocolFactory.php \
 	lib/Factory/TJSONProtocolFactory.php \
 	lib/Factory/TProtocolFactory.php \
-	lib/Factory/TStringFuncFactory.php \
-	lib/Factory/TTransportFactoryInterface.php
-	lib/Factory/TTransportFactory.php
+	lib/Factory/TTransportFactoryInterface.php \
+	lib/Factory/TTransportFactory.php \
 	lib/Factory/TFramedTransportFactory.php
 
 phpprotocoldir = $(phpdir)/Protocol
@@ -106,12 +105,6 @@ phpserver_DATA = \
 	lib/Server/TServerTransport.php \
 	lib/Server/TSimpleServer.php
 
-phpstringfuncdir = $(phpdir)/StringFunc
-phpstringfunc_DATA = \
-	lib/StringFunc/Mbstring.php \
-	lib/StringFunc/Core.php \
-	lib/StringFunc/TStringFunc.php
-
 phptransportdir = $(phpdir)/Transport
 phptransport_DATA = \
 	lib/Transport/TBufferedTransport.php \
@@ -139,17 +132,15 @@ distdir:
 
 EXTRA_DIST = \
 	lib \
-	src/autoload.php \
 	src/ext/thrift_protocol/config.m4 \
 	src/ext/thrift_protocol/config.w32 \
 	src/ext/thrift_protocol/php_thrift_protocol.cpp \
 	src/ext/thrift_protocol/php_thrift_protocol.h \
 	src/ext/thrift_protocol/php_thrift_protocol.stub.php \
 	src/ext/thrift_protocol/php_thrift_protocol_arginfo.h \
-	src/Thrift.php \
-	src/TStringUtils.php \
 	coding_standards.md \
 	thrift_protocol.ini \
+	phpunit.xml \
 	README.apache.md \
 	README.md \
 	test
@@ -157,4 +148,3 @@ EXTRA_DIST = \
 
 MAINTAINERCLEANFILES = \
 	Makefile.in
-

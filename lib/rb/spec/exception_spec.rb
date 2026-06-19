@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,7 +21,6 @@
 require 'spec_helper'
 
 describe 'Exception' do
-
   describe Thrift::Exception do
     it "should have an accessible message" do
       e = Thrift::Exception.new("test message")

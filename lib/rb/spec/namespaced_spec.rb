@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -63,5 +64,4 @@ describe 'namespaced generation' do
   it "extended a service" do
     require "extended/extended_service"
   end
-
 end

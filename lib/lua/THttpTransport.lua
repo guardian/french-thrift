@@ -42,6 +42,15 @@ function THttpTransport:new(obj)
   return TTransportBase.new(self, obj)
 end
 
+local function THttpHeaders()
+    local data = {}
+    return setmetatable({}, {
+        __index = function(_, key) return data[string.lower(key)] end,
+        __newindex = function(_, key, value) data[string.lower(key)] = value end,
+        __pairs = function() return pairs(data) end
+    })
+end
+
 function THttpTransport:isOpen()
   return self.trans:isOpen()
 end
@@ -112,14 +121,14 @@ function THttpTransport:getLine()
 end
 
 function THttpTransport:_parseHeaders()
-  local headers = {}
+  local headers = THttpHeaders()
 
   repeat
     local line = self:getLine()
     for key, val in string.gmatch(line, "([%w%-]+)%s*:%s*(.+)") do
       if headers[key] then
         local delimiter = ", "
-        if key == "Set-Cookie" then
+        if string.lower(key) == "set-cookie" then
           delimiter = "; "
         end
         headers[key] = headers[key] .. delimiter .. tostring(val)
@@ -160,12 +169,21 @@ function THttpTransport:writeHttpHeader(content_len)
   end
 end
 
+function THttpTransport:flushOneway()
+  self.wBuf = ''
+  self:writeHttpHeader(0)
+  self.trans:flush()
+end
+
 function THttpTransport:flush()
   -- If the write fails we still want wBuf to be clear
   local tmp = self.wBuf
   self.wBuf = ''
-  self:writeHttpHeader(string.len(tmp))
-  self.trans:write(tmp)
+  local dataLen = string.len(tmp)
+  self:writeHttpHeader(dataLen)
+  if dataLen > 0 then
+    self.trans:write(tmp)
+  end
   self.trans:flush()
 end
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -42,7 +42,7 @@ class CalculatorHandler
   end
 
   def calculate(logid, work)
-    print "calculate(", logid, ", {", work.op, ",", work.num1, ",", work.num2,"})\n"
+    print "calculate(", logid, ", {", work.op, ",", work.num1, ",", work.num2, "})\n"
     if work.op == Operation::ADD
       val = work.num1 + work.num2
     elsif work.op == Operation::SUBTRACT

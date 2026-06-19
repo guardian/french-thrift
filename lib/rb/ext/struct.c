@@ -20,6 +20,7 @@
 #include "struct.h"
 #include "constants.h"
 #include "macros.h"
+#include "protocol.h"
 #include "strlcpy.h"
 
 VALUE thrift_union_class;
@@ -33,6 +34,22 @@ static ID sorted_field_ids_method_id;
 
 #define IS_CONTAINER(ttype) ((ttype) == TTYPE_MAP || (ttype) == TTYPE_LIST || (ttype) == TTYPE_SET)
 #define STRUCT_FIELDS(obj) rb_const_get(CLASS_OF(obj), fields_const_id)
+
+static void validate_container_size(int size) {
+  if (RB_UNLIKELY(size < 0)) {
+    rb_exc_raise(
+      get_protocol_exception(
+        INT2FIX(PROTOERR_NEGATIVE_SIZE),
+        rb_str_new2("Negative container size")
+      )
+    );
+  }
+}
+
+static VALUE new_container_array(int size) {
+  validate_container_size(size);
+  return rb_ary_new2(size > 1024 ? 1024 : size);
+}
 
 //-------------------------------------------
 // Writing section
@@ -72,6 +89,11 @@ VALUE default_write_double(VALUE protocol, VALUE value) {
 
 VALUE default_write_string(VALUE protocol, VALUE value) {
   rb_funcall(protocol, write_string_method_id, 1, value);
+  return Qnil;
+}
+
+VALUE default_write_uuid(VALUE protocol, VALUE value) {
+  rb_funcall(protocol, write_uuid_method_id, 1, value);
   return Qnil;
 }
 
@@ -195,6 +217,10 @@ VALUE default_read_string(VALUE protocol) {
   return rb_funcall(protocol, read_string_method_id, 0);
 }
 
+VALUE default_read_uuid(VALUE protocol) {
+  return rb_funcall(protocol, read_uuid_method_id, 0);
+}
+
 VALUE default_read_binary(VALUE protocol) {
   return rb_funcall(protocol, read_binary_method_id, 0);
 }
@@ -225,12 +251,10 @@ VALUE get_field_value(VALUE obj, VALUE field_name) {
 }
 
 static void write_container(int ttype, VALUE field_info, VALUE value, VALUE protocol) {
-  int sz, i;
+  long sz, i;
 
   if (ttype == TTYPE_MAP) {
     VALUE keys;
-    VALUE key;
-    VALUE val;
 
     Check_Type(value, T_HASH);
 
@@ -249,8 +273,8 @@ static void write_container(int ttype, VALUE field_info, VALUE value, VALUE prot
     default_write_map_begin(protocol, keytype_value, valuetype_value, INT2FIX(sz));
 
     for (i = 0; i < sz; i++) {
-      key = rb_ary_entry(keys, i);
-      val = rb_hash_aref(value, key);
+      VALUE key = rb_ary_entry(keys, i);
+      VALUE val = rb_hash_aref(value, key);
 
       if (IS_CONTAINER(keytype)) {
         write_container(keytype, key_info, key, protocol);
@@ -342,6 +366,8 @@ static void write_anything(int ttype, VALUE value, VALUE protocol, VALUE field_i
     } else {
       default_write_binary(protocol, value);
     }
+  } else if (ttype == TTYPE_UUID) {
+    default_write_uuid(protocol, value);
   } else if (IS_CONTAINER(ttype)) {
     write_container(ttype, field_info, value, protocol);
   } else if (ttype == TTYPE_STRUCT) {
@@ -452,6 +478,8 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
     }
   } else if (ttype == TTYPE_DOUBLE) {
     result = default_read_double(protocol);
+  } else if (ttype == TTYPE_UUID) {
+    result = default_read_uuid(protocol);
   } else if (ttype == TTYPE_STRUCT) {
     VALUE klass = rb_hash_aref(field_info, class_sym);
     result = rb_class_new_instance(0, NULL, klass);
@@ -462,12 +490,14 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
       rb_thrift_struct_read(result, protocol);
     }
   } else if (ttype == TTYPE_MAP) {
-    int i;
-
     VALUE map_header = default_read_map_begin(protocol);
     int key_ttype = FIX2INT(rb_ary_entry(map_header, 0));
     int value_ttype = FIX2INT(rb_ary_entry(map_header, 1));
     int num_entries = FIX2INT(rb_ary_entry(map_header, 2));
+
+    if (num_entries < 0) {
+      rb_exc_raise(get_protocol_exception(INT2FIX(PROTOERR_NEGATIVE_SIZE), rb_str_new2("Negative container size")));
+    }
 
     // Check the declared key and value types against the expected ones and skip the map contents
     // if the types don't match.
@@ -480,7 +510,7 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
       if (num_entries == 0 || (specified_key_type == key_ttype && specified_value_type == value_ttype)) {
         result = rb_hash_new();
 
-        for (i = 0; i < num_entries; ++i) {
+        for (int i = 0; i < num_entries; ++i) {
           VALUE key, val;
 
           key = read_anything(protocol, key_ttype, key_info);
@@ -497,8 +527,6 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
 
     default_read_map_end(protocol);
   } else if (ttype == TTYPE_LIST) {
-    int i;
-
     VALUE list_header = default_read_list_begin(protocol);
     int element_ttype = FIX2INT(rb_ary_entry(list_header, 0));
     int num_elements = FIX2INT(rb_ary_entry(list_header, 1));
@@ -509,22 +537,23 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
     if (!NIL_P(element_info)) {
       int specified_element_type = FIX2INT(rb_hash_aref(element_info, type_sym));
       if (specified_element_type == element_ttype) {
-        result = rb_ary_new2(num_elements);
+        result = new_container_array(num_elements);
 
-        for (i = 0; i < num_elements; ++i) {
+        for (int i = 0; i < num_elements; ++i) {
           rb_ary_push(result, read_anything(protocol, element_ttype, rb_hash_aref(field_info, element_sym)));
         }
       } else {
+        validate_container_size(num_elements);
         skip_list_or_set_contents(protocol, INT2FIX(element_ttype), num_elements);
       }
     } else {
+      validate_container_size(num_elements);
       skip_list_or_set_contents(protocol, INT2FIX(element_ttype), num_elements);
     }
 
     default_read_list_end(protocol);
   } else if (ttype == TTYPE_SET) {
     VALUE items;
-    int i;
 
     VALUE set_header = default_read_set_begin(protocol);
     int element_ttype = FIX2INT(rb_ary_entry(set_header, 0));
@@ -536,17 +565,19 @@ static VALUE read_anything(VALUE protocol, int ttype, VALUE field_info) {
     if (!NIL_P(element_info)) {
       int specified_element_type = FIX2INT(rb_hash_aref(element_info, type_sym));
       if (specified_element_type == element_ttype) {
-        items = rb_ary_new2(num_elements);
+        items = new_container_array(num_elements);
 
-        for (i = 0; i < num_elements; ++i) {
+        for (int i = 0; i < num_elements; ++i) {
           rb_ary_push(items, read_anything(protocol, element_ttype, rb_hash_aref(field_info, element_sym)));
         }
 
         result = rb_class_new_instance(1, &items, rb_cSet);
       } else {
+        validate_container_size(num_elements);
         skip_list_or_set_contents(protocol, INT2FIX(element_ttype), num_elements);
       }
     } else {
+      validate_container_size(num_elements);
       skip_list_or_set_contents(protocol, INT2FIX(element_ttype), num_elements);
     }
 
@@ -643,7 +674,7 @@ static VALUE rb_thrift_union_read(VALUE self, VALUE protocol) {
   field_type = FIX2INT(field_type_value);
 
   if (field_type != TTYPE_STOP) {
-    rb_raise(rb_eRuntimeError, "too many fields in union!");
+    rb_exc_raise(get_protocol_exception(INT2FIX(PROTOERR_INVALID_DATA), rb_str_new2("too many fields in union!")));
   }
 
   // read struct end
@@ -671,7 +702,7 @@ static VALUE rb_thrift_union_write(VALUE self, VALUE protocol) {
   VALUE field_info = rb_hash_aref(struct_fields, field_id);
 
   if(NIL_P(field_info)) {
-    rb_raise(rb_eRuntimeError, "set_field is not valid for this union!");
+    rb_exc_raise(get_protocol_exception(INT2FIX(PROTOERR_INVALID_DATA), rb_str_new2("set_field is not valid for this union!")));
   }
 
   VALUE ttype_value = rb_hash_aref(field_info, type_sym);
@@ -691,7 +722,7 @@ static VALUE rb_thrift_union_write(VALUE self, VALUE protocol) {
   return Qnil;
 }
 
-void Init_struct() {
+void Init_struct(void) {
   VALUE struct_module = rb_const_get(thrift_module, rb_intern("Struct"));
 
   rb_define_method(struct_module, "write", rb_thrift_struct_write, 1);

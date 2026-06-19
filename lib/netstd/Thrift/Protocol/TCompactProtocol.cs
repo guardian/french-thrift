@@ -42,6 +42,8 @@ namespace Thrift.Protocol
         private const byte TypeMask = 0xE0; // 1110 0000
         private const byte TypeBits = 0x07; // 0000 0111
         private const int TypeShiftAmount = 5;
+        private const int MaxVarint32Bytes = 5;   // ceil(32/7); matches protobuf wire format
+        private const int MaxVarint64Bytes = 10;  // ceil(64/7); matches protobuf wire format
 
         private const byte NoTypeOverride = 0xFF;
 
@@ -461,7 +463,7 @@ namespace Thrift.Protocol
         public override Task ReadMessageEndAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Transport.ResetConsumedMessageSize();
+            Transport.ResetMessageSizeAndConsumedBytes();
             return Task.CompletedTask;
         }
 
@@ -744,18 +746,18 @@ namespace Thrift.Protocol
             uint result = 0;
             var shift = 0;
 
-            while (true)
+            for (var idx = 0; idx < MaxVarint32Bytes; idx++)
             {
                 var b = (byte) await ReadByteAsync(cancellationToken);
                 result |= (uint) (b & 0x7f) << shift;
                 if ((b & 0x80) != 0x80)
                 {
-                    break;
+                    return result;
                 }
                 shift += 7;
             }
 
-            return result;
+            throw new TProtocolException(TProtocolException.INVALID_DATA, "Variable-length int over 5 bytes.");
         }
 
         private async ValueTask<ulong> ReadVarInt64Async(CancellationToken cancellationToken)
@@ -769,18 +771,19 @@ namespace Thrift.Protocol
 
             var shift = 0;
             ulong result = 0;
-            while (true)
+
+            for (var idx = 0; idx < MaxVarint64Bytes; idx++)
             {
                 var b = (byte) await ReadByteAsync(cancellationToken);
                 result |= (ulong) (b & 0x7f) << shift;
                 if ((b & 0x80) != 0x80)
                 {
-                    break;
+                    return result;
                 }
                 shift += 7;
             }
 
-            return result;
+            throw new TProtocolException(TProtocolException.INVALID_DATA, "Variable-length int over 10 bytes.");
         }
 
         private static int ZigzagToInt(uint n)
@@ -796,7 +799,11 @@ namespace Thrift.Protocol
         private static TType GetTType(byte type)
         {
             // Given a TCompactProtocol.Types constant, convert it to its corresponding TType value.
-            return CompactTypeToTType[type & 0x0f];
+            var index = type & 0x0f;
+            if (index < CompactTypeToTType.Length)
+                return CompactTypeToTType[index];
+
+            throw new TProtocolException(TProtocolException.INVALID_DATA, $"Unknown compact protocol type {index}");
         }
 
         private static ulong LongToZigzag(long n)
@@ -816,8 +823,8 @@ namespace Thrift.Protocol
         {
             switch (type)
             {
-                case TType.Stop: return 0;
-                case TType.Void: return 0;
+                case TType.Stop: return 1;  // T_STOP needs to count itself
+                case TType.Void: return 1;  // T_VOID needs to count itself
                 case TType.Bool: return sizeof(byte);
                 case TType.Double: return 8;  // uses fixedLongToBytes() which always writes 8 bytes
                 case TType.Byte: return sizeof(byte);
@@ -825,7 +832,7 @@ namespace Thrift.Protocol
                 case TType.I32: return sizeof(byte);  // zigzag
                 case TType.I64: return sizeof(byte);  // zigzag
                 case TType.String: return sizeof(byte);  // string length
-                case TType.Struct: return 0;             // empty struct
+                case TType.Struct: return 1;             // empty struct needs at least 1 byte for the T_STOP
                 case TType.Map: return sizeof(byte);  // element count
                 case TType.Set: return sizeof(byte);  // element count
                 case TType.List: return sizeof(byte);  // element count

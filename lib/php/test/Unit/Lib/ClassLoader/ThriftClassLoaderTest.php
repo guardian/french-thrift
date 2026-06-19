@@ -19,19 +19,20 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\ClassLoader;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\ClassLoader\ThriftClassLoader;
 
 class ThriftClassLoaderTest extends TestCase
 {
     use PHPMock;
 
-    /**
-     * @dataProvider registerNamespaceDataProvider
-     */
+    #[DataProvider('registerNamespaceDataProvider')]
     public function testRegisterNamespace(
         $namespaces,
         $class,
@@ -62,7 +63,7 @@ class ThriftClassLoaderTest extends TestCase
         }
     }
 
-    public function registerNamespaceDataProvider()
+    public static function registerNamespaceDataProvider()
     {
         yield 'default' => [
             'namespaces' => [
@@ -106,5 +107,11 @@ class ThriftClassLoaderTest extends TestCase
             'useApcu' => true,
             'apcuPrefix' => 'APCU_PREFIX',
         ];
+    }
+
+    public function testFindFileReturnsNullWhenClassHasNoBackslash(): void
+    {
+        $loader = new ThriftClassLoader();
+        $this->assertNull($loader->findFile('UnnamespacedClassName'));
     }
 }

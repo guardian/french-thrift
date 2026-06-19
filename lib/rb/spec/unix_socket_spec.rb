@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -21,7 +22,6 @@ require 'spec_helper'
 require File.expand_path("#{File.dirname(__FILE__)}/socket_spec_shared")
 
 describe 'UNIXSocket' do
-
   describe Thrift::UNIXSocket do
     before(:each) do
       @path = '/tmp/thrift_spec_socket'
@@ -42,7 +42,7 @@ describe 'UNIXSocket' do
       allow(::UNIXSocket).to receive(:new)
       expect(Thrift::UNIXSocket.new(@path, 5).timeout).to eq(5)
     end
-    
+
     it "should provide a reasonable to_s" do
       allow(::UNIXSocket).to receive(:new)
       expect(Thrift::UNIXSocket.new(@path).to_s).to eq("domain(#{@path})")
@@ -68,8 +68,23 @@ describe 'UNIXSocket' do
       expect(handle).to receive(:accept).and_return(sock)
       trans = double("UNIXSocket")
       expect(Thrift::UNIXSocket).to receive(:new).and_return(trans)
+      expect(trans).to receive(:timeout=).with(Thrift::BaseServerTransport::DEFAULT_CLIENT_TIMEOUT)
       expect(trans).to receive(:handle=).with(sock)
       expect(@socket.accept).to eq(trans)
+    end
+
+    it "should default accepted sockets to a finite client timeout" do
+      expect(@socket.client_timeout).to eq(5)
+    end
+
+    it "should accept a custom client timeout" do
+      @socket = Thrift::UNIXServerSocket.new(@path, client_timeout: 2.5)
+      expect(@socket.client_timeout).to eq(2.5)
+    end
+
+    it "should allow blocking accepted sockets with nil or zero client timeout" do
+      expect(Thrift::UNIXServerSocket.new(@path, client_timeout: nil).client_timeout).to be_nil
+      expect(Thrift::UNIXServerSocket.new(@path, client_timeout: 0).client_timeout).to eq(0)
     end
 
     it "should close the handle when closed" do

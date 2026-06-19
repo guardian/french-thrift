@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol;
 
 use Thrift\Exception\TException;
@@ -32,321 +35,283 @@ use Thrift\Exception\TProtocolException;
  */
 abstract class TProtocol
 {
-    /**
-     * Underlying transport
-     *
-     * @var TTransport
-     */
-    protected $trans_;
+    public const DEFAULT_RECURSION_DEPTH = 64;
 
-    /**
-     * @param TTransport $trans
-     */
-    protected function __construct($trans)
+    private int $recursionDepth = 0;
+
+    protected function __construct(protected TTransport $trans)
     {
-        $this->trans_ = $trans;
     }
 
-    /**
-     * Accessor for transport
-     *
-     * @return TTransport
-     */
-    public function getTransport()
+    public function getTransport(): TTransport
     {
-        return $this->trans_;
+        return $this->trans;
     }
 
-    /**
-     * Writes the message header
-     *
-     * @param string $name Function name
-     * @param int $type message type TMessageType::CALL or TMessageType::REPLY
-     * @param int $seqid The sequence id of this message
-     */
-    abstract public function writeMessageBegin($name, $type, $seqid);
-
-    /**
-     * Close the message
-     */
-    abstract public function writeMessageEnd();
-
-    /**
-     * Writes a struct header.
-     *
-     * @param string $name Struct name
-     * @throws TException on write error
-     * @return int How many bytes written
-     */
-    abstract public function writeStructBegin($name);
-
-    /**
-     * Close a struct.
-     *
-     * @throws TException on write error
-     * @return int How many bytes written
-     */
-    abstract public function writeStructEnd();
-
-    /*
-     * Starts a field.
-     *
-     * @param string     $name Field name
-     * @param int        $type Field type
-     * @param int        $fid  Field id
-     * @throws TException on write error
-     * @return int How many bytes written
-     */
-    abstract public function writeFieldBegin($fieldName, $fieldType, $fieldId);
-
-    abstract public function writeFieldEnd();
-
-    abstract public function writeFieldStop();
-
-    abstract public function writeMapBegin($keyType, $valType, $size);
-
-    abstract public function writeMapEnd();
-
-    abstract public function writeListBegin($elemType, $size);
-
-    abstract public function writeListEnd();
-
-    abstract public function writeSetBegin($elemType, $size);
-
-    abstract public function writeSetEnd();
-
-    abstract public function writeBool($bool);
-
-    abstract public function writeByte($byte);
-
-    abstract public function writeI16($i16);
-
-    abstract public function writeI32($i32);
-
-    abstract public function writeI64($i64);
-
-    abstract public function writeDouble($dub);
-
-    abstract public function writeString($str);
-
-    /**
-     * Reads the message header
-     *
-     * @param string $name Function name
-     * @param int $type message type TMessageType::CALL or TMessageType::REPLY
-     * @parem int $seqid The sequence id of this message
-     */
-    abstract public function readMessageBegin(&$name, &$type, &$seqid);
-
-    /**
-     * Read the close of message
-     */
-    abstract public function readMessageEnd();
-
-    abstract public function readStructBegin(&$name);
-
-    abstract public function readStructEnd();
-
-    abstract public function readFieldBegin(&$name, &$fieldType, &$fieldId);
-
-    abstract public function readFieldEnd();
-
-    abstract public function readMapBegin(&$keyType, &$valType, &$size);
-
-    abstract public function readMapEnd();
-
-    abstract public function readListBegin(&$elemType, &$size);
-
-    abstract public function readListEnd();
-
-    abstract public function readSetBegin(&$elemType, &$size);
-
-    abstract public function readSetEnd();
-
-    abstract public function readBool(&$bool);
-
-    abstract public function readByte(&$byte);
-
-    abstract public function readI16(&$i16);
-
-    abstract public function readI32(&$i32);
-
-    abstract public function readI64(&$i64);
-
-    abstract public function readDouble(&$dub);
-
-    abstract public function readString(&$str);
-
-    /**
-     * The skip function is a utility to parse over unrecognized date without
-     * causing corruption.
-     *
-     * @param int $type What type is it (defined in TType::class)
-     */
-    public function skip($type)
+    public function incrementRecursionDepth(): void
     {
-        switch ($type) {
-            case TType::BOOL:
-                return $this->readBool($bool);
-            case TType::BYTE:
-                return $this->readByte($byte);
-            case TType::I16:
-                return $this->readI16($i16);
-            case TType::I32:
-                return $this->readI32($i32);
-            case TType::I64:
-                return $this->readI64($i64);
-            case TType::DOUBLE:
-                return $this->readDouble($dub);
-            case TType::STRING:
-                return $this->readString($str);
-            case TType::STRUCT:
-                $result = $this->readStructBegin($name);
-                while (true) {
-                    $result += $this->readFieldBegin($name, $ftype, $fid);
-                    if ($ftype == TType::STOP) {
-                        break;
-                    }
-                    $result += $this->skip($ftype);
-                    $result += $this->readFieldEnd();
-                }
-                $result += $this->readStructEnd();
-
-                return $result;
-
-            case TType::MAP:
-                $result = $this->readMapBegin($keyType, $valType, $size);
-                for ($i = 0; $i < $size; $i++) {
-                    $result += $this->skip($keyType);
-                    $result += $this->skip($valType);
-                }
-                $result += $this->readMapEnd();
-
-                return $result;
-
-            case TType::SET:
-                $result = $this->readSetBegin($elemType, $size);
-                for ($i = 0; $i < $size; $i++) {
-                    $result += $this->skip($elemType);
-                }
-                $result += $this->readSetEnd();
-
-                return $result;
-
-            case TType::LST:
-                $result = $this->readListBegin($elemType, $size);
-                for ($i = 0; $i < $size; $i++) {
-                    $result += $this->skip($elemType);
-                }
-                $result += $this->readListEnd();
-
-                return $result;
-
-            default:
-                throw new TProtocolException(
-                    'Unknown field type: ' . $type,
-                    TProtocolException::INVALID_DATA
-                );
+        ++$this->recursionDepth;
+        if ($this->recursionDepth > self::DEFAULT_RECURSION_DEPTH) {
+            --$this->recursionDepth;
+            throw new TProtocolException('Maximum recursion depth exceeded', TProtocolException::DEPTH_LIMIT);
         }
     }
 
-    /**
-     * Utility for skipping binary data
-     *
-     * @param TTransport $itrans TTransport object
-     * @param int $type Field type
-     */
-    public static function skipBinary($itrans, $type)
+    public function decrementRecursionDepth(): void
     {
-        switch ($type) {
-            case TType::BOOL:
-                return $itrans->readAll(1);
-            case TType::BYTE:
-                return $itrans->readAll(1);
-            case TType::I16:
-                return $itrans->readAll(2);
-            case TType::I32:
-                return $itrans->readAll(4);
-            case TType::I64:
-                return $itrans->readAll(8);
-            case TType::DOUBLE:
-                return $itrans->readAll(8);
-            case TType::STRING:
-                $len = unpack('N', $itrans->readAll(4));
-                $len = $len[1];
-                if ($len > 0x7fffffff) {
-                    $len = 0 - (($len - 1) ^ 0xffffffff);
-                }
+        --$this->recursionDepth;
+    }
 
-                return 4 + $itrans->readAll($len);
+    abstract public function writeMessageBegin(string $name, int $type, int $seqid): int;
 
-            case TType::STRUCT:
-                $result = 0;
-                while (true) {
-                    $ftype = 0;
-                    $fid = 0;
-                    $data = $itrans->readAll(1);
-                    $arr = unpack('c', $data);
-                    $ftype = $arr[1];
-                    if ($ftype == TType::STOP) {
-                        break;
-                    }
-                    // I16 field id
-                    $result += $itrans->readAll(2);
-                    $result += self::skipBinary($itrans, $ftype);
-                }
+    abstract public function writeMessageEnd(): int;
 
-                return $result;
+    /**
+     * @throws TException on write error
+     */
+    abstract public function writeStructBegin(string $name): int;
 
-            case TType::MAP:
-                // Ktype
-                $data = $itrans->readAll(1);
-                $arr = unpack('c', $data);
-                $ktype = $arr[1];
-                // Vtype
-                $data = $itrans->readAll(1);
-                $arr = unpack('c', $data);
-                $vtype = $arr[1];
-                // Size
-                $data = $itrans->readAll(4);
-                $arr = unpack('N', $data);
-                $size = $arr[1];
-                if ($size > 0x7fffffff) {
-                    $size = 0 - (($size - 1) ^ 0xffffffff);
-                }
-                $result = 6;
-                for ($i = 0; $i < $size; $i++) {
-                    $result += self::skipBinary($itrans, $ktype);
-                    $result += self::skipBinary($itrans, $vtype);
-                }
+    /**
+     * @throws TException on write error
+     */
+    abstract public function writeStructEnd(): int;
 
-                return $result;
+    /**
+     * @throws TException on write error
+     */
+    abstract public function writeFieldBegin(string $fieldName, int $fieldType, int $fieldId): int;
 
-            case TType::SET:
-            case TType::LST:
-                // Vtype
-                $data = $itrans->readAll(1);
-                $arr = unpack('c', $data);
-                $vtype = $arr[1];
-                // Size
-                $data = $itrans->readAll(4);
-                $arr = unpack('N', $data);
-                $size = $arr[1];
-                if ($size > 0x7fffffff) {
-                    $size = 0 - (($size - 1) ^ 0xffffffff);
-                }
-                $result = 5;
-                for ($i = 0; $i < $size; $i++) {
-                    $result += self::skipBinary($itrans, $vtype);
-                }
+    abstract public function writeFieldEnd(): int;
 
-                return $result;
+    abstract public function writeFieldStop(): int;
 
-            default:
-                throw new TProtocolException(
-                    'Unknown field type: ' . $type,
-                    TProtocolException::INVALID_DATA
-                );
+    abstract public function writeMapBegin(int $keyType, int $valType, int $size): int;
+
+    abstract public function writeMapEnd(): int;
+
+    abstract public function writeListBegin(int $elemType, int $size): int;
+
+    abstract public function writeListEnd(): int;
+
+    abstract public function writeSetBegin(int $elemType, int $size): int;
+
+    abstract public function writeSetEnd(): int;
+
+    abstract public function writeBool(bool $bool): int;
+
+    abstract public function writeByte(int $byte): int;
+
+    abstract public function writeI16(int $i16): int;
+
+    abstract public function writeI32(int $i32): int;
+
+    abstract public function writeI64(int $i64): int;
+
+    abstract public function writeDouble(float $dub): int;
+
+    abstract public function writeString(string $str): int;
+
+    abstract public function writeUuid(string $uuid): int;
+
+    abstract public function readMessageBegin(?string &$name, ?int &$type, ?int &$seqid): int;
+
+    abstract public function readMessageEnd(): int;
+
+    abstract public function readStructBegin(?string &$name): int;
+
+    abstract public function readStructEnd(): int;
+
+    abstract public function readFieldBegin(?string &$name, ?int &$fieldType, ?int &$fieldId): int;
+
+    abstract public function readFieldEnd(): int;
+
+    abstract public function readMapBegin(?int &$keyType, ?int &$valType, ?int &$size): int;
+
+    abstract public function readMapEnd(): int;
+
+    abstract public function readListBegin(?int &$elemType, ?int &$size): int;
+
+    abstract public function readListEnd(): int;
+
+    abstract public function readSetBegin(?int &$elemType, ?int &$size): int;
+
+    abstract public function readSetEnd(): int;
+
+    abstract public function readBool(?bool &$bool): int;
+
+    abstract public function readByte(?int &$byte): int;
+
+    abstract public function readI16(?int &$i16): int;
+
+    abstract public function readI32(?int &$i32): int;
+
+    abstract public function readI64(?int &$i64): int;
+
+    abstract public function readDouble(?float &$dub): int;
+
+    abstract public function readString(?string &$str): int;
+
+    abstract public function readUuid(?string &$uuid): int;
+
+    /**
+     * Parses past unrecognized data without causing corruption.
+     */
+    public function skip(int $type): int
+    {
+        return match ($type) {
+            TType::BOOL => $this->readBool($bool),
+            TType::BYTE => $this->readByte($byte),
+            TType::I16 => $this->readI16($i16),
+            TType::I32 => $this->readI32($i32),
+            TType::I64 => $this->readI64($i64),
+            TType::DOUBLE => $this->readDouble($dub),
+            TType::STRING => $this->readString($str),
+            TType::UUID => $this->readUuid($uuid),
+            TType::STRUCT => $this->skipStruct(),
+            TType::MAP => $this->skipMap(),
+            TType::SET => $this->skipSet(),
+            TType::LST => $this->skipList(),
+            default => throw new TProtocolException(
+                'Unknown field type: ' . $type,
+                TProtocolException::INVALID_DATA
+            ),
+        };
+    }
+
+    private function skipStruct(): int
+    {
+        $result = $this->readStructBegin($name);
+        while (true) {
+            $result += $this->readFieldBegin($name, $ftype, $fid);
+            if ($ftype == TType::STOP) {
+                break;
+            }
+            $result += $this->skip($ftype);
+            $result += $this->readFieldEnd();
         }
+        $result += $this->readStructEnd();
+
+        return $result;
+    }
+
+    private function skipMap(): int
+    {
+        $result = $this->readMapBegin($keyType, $valType, $size);
+        for ($i = 0; $i < $size; $i++) {
+            $result += $this->skip($keyType);
+            $result += $this->skip($valType);
+        }
+        $result += $this->readMapEnd();
+
+        return $result;
+    }
+
+    private function skipSet(): int
+    {
+        $result = $this->readSetBegin($elemType, $size);
+        for ($i = 0; $i < $size; $i++) {
+            $result += $this->skip($elemType);
+        }
+        $result += $this->readSetEnd();
+
+        return $result;
+    }
+
+    private function skipList(): int
+    {
+        $result = $this->readListBegin($elemType, $size);
+        for ($i = 0; $i < $size; $i++) {
+            $result += $this->skip($elemType);
+        }
+        $result += $this->readListEnd();
+
+        return $result;
+    }
+
+    /**
+     * Utility for skipping binary data without parsing it.
+     */
+    public static function skipBinary(TTransport $itrans, int $type): int
+    {
+        return match ($type) {
+            TType::BOOL, TType::BYTE => self::skipBinaryFixed($itrans, 1),
+            TType::I16 => self::skipBinaryFixed($itrans, 2),
+            TType::I32 => self::skipBinaryFixed($itrans, 4),
+            TType::I64, TType::DOUBLE => self::skipBinaryFixed($itrans, 8),
+            TType::UUID => self::skipBinaryFixed($itrans, 16),
+            TType::STRING => self::skipBinaryString($itrans),
+            TType::STRUCT => self::skipBinaryStruct($itrans),
+            TType::MAP => self::skipBinaryMap($itrans),
+            TType::SET, TType::LST => self::skipBinaryCollection($itrans),
+            default => throw new TProtocolException(
+                'Unknown field type: ' . $type,
+                TProtocolException::INVALID_DATA
+            ),
+        };
+    }
+
+    private static function skipBinaryFixed(TTransport $itrans, int $bytes): int
+    {
+        $itrans->readAll($bytes);
+
+        return $bytes;
+    }
+
+    private static function skipBinaryString(TTransport $itrans): int
+    {
+        $len = self::readI32Signed($itrans);
+        $itrans->readAll($len);
+
+        return 4 + $len;
+    }
+
+    private static function skipBinaryStruct(TTransport $itrans): int
+    {
+        $result = 0;
+        while (true) {
+            $ftype = unpack('c', $itrans->readAll(1))[1];
+            $result += 1;
+            if ($ftype == TType::STOP) {
+                break;
+            }
+            $itrans->readAll(2);
+            $result += 2;
+            $result += self::skipBinary($itrans, $ftype);
+        }
+
+        return $result;
+    }
+
+    private static function skipBinaryMap(TTransport $itrans): int
+    {
+        $ktype = unpack('c', $itrans->readAll(1))[1];
+        $vtype = unpack('c', $itrans->readAll(1))[1];
+        $size = self::readI32Signed($itrans);
+        $result = 1 + 1 + 4;
+        for ($i = 0; $i < $size; $i++) {
+            $result += self::skipBinary($itrans, $ktype);
+            $result += self::skipBinary($itrans, $vtype);
+        }
+
+        return $result;
+    }
+
+    private static function skipBinaryCollection(TTransport $itrans): int
+    {
+        $vtype = unpack('c', $itrans->readAll(1))[1];
+        $size = self::readI32Signed($itrans);
+        $result = 1 + 4;
+        for ($i = 0; $i < $size; $i++) {
+            $result += self::skipBinary($itrans, $vtype);
+        }
+
+        return $result;
+    }
+
+    private static function readI32Signed(TTransport $itrans): int
+    {
+        $n = unpack('N', $itrans->readAll(4))[1];
+
+        return $n > 0x7fffffff ? 0 - (($n - 1) ^ 0xffffffff) : $n;
     }
 }

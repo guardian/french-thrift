@@ -31,7 +31,6 @@ env:
     --without-nodets
     --without-lua
     --without-rs
-    --without-swift
 
 permissions:
   contents: read
@@ -41,11 +40,15 @@ jobs:
   compiler:
     strategy:
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
@@ -67,34 +70,110 @@ jobs:
       - name: Run thrift version
         run: /usr/local/bin/thrift -version
 
-      # only upload while building ubuntu-22.04
+      - name: Test Delphi UUIDv8 GUID determinism
+        run: |
+          # Run the Delphi generator twice on the same input and verify identical output.
+          # Tests: cross-platform determinism, service inheritance, struct field-order.
+          THRIFT=/usr/local/bin/thrift
+          INPUT=test/delphi/UuidV8Test.thrift
+
+          mkdir -p /tmp/delphi-guid-run1 /tmp/delphi-guid-run2
+          $THRIFT --gen delphi --out /tmp/delphi-guid-run1 $INPUT
+          $THRIFT --gen delphi --out /tmp/delphi-guid-run2 $INPUT
+          diff -r /tmp/delphi-guid-run1 /tmp/delphi-guid-run2
+
+          # Also verify GUIDs are non-empty (grep for the GUID attribute pattern)
+          grep -qP "^\s+\['\{[0-9A-F]{8}-[0-9A-F]{4}-8[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}\}'\]" \
+            /tmp/delphi-guid-run1/UuidV8Test.pas \
+            && echo "UUIDv8 GUIDs found in output" \
+            || { echo "ERROR: No UUIDv8 GUIDs found in Delphi output"; exit 1; }
+
+          # Verify that Point and PointReversed have DIFFERENT GUIDs (field-order sensitivity)
+          POINT_GUID=$(grep -A1 "IPoint = interface" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | tr -d ' ')
+          POINTREV_GUID=$(grep -A1 "IPointReversed = interface" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | tr -d ' ')
+          [ "$POINT_GUID" != "$POINTREV_GUID" ] \
+            && echo "Field-order sensitivity OK (Point vs PointReversed GUIDs differ)" \
+            || { echo "ERROR: Point and PointReversed have the same GUID — field order not hashed"; exit 1; }
+
+          # Verify that BaseService and ExtendedService have DIFFERENT GUIDs (parent hash included)
+          BASE_GUID=$(grep -A1 "Iface = interface$" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | head -1 | tr -d ' ')
+          EXT_GUID=$(grep -A1 "Iface = interface(.*Base" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | head -1 | tr -d ' ')
+          [ "$BASE_GUID" != "$EXT_GUID" ] \
+            && echo "Parent-hash inclusion OK (BaseService vs ExtendedService GUIDs differ)" \
+            || { echo "ERROR: BaseService and ExtendedService have the same GUID — parent not hashed"; exit 1; }
+
+          echo "All Delphi UUIDv8 GUID determinism tests passed."
+
+      # only upload while building ubuntu-24.04
       - name: Archive built thrift compiler
-        if: matrix.os == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp/thrift
           retention-days: 3
 
-  lib-php:
-    needs: compiler
-    runs-on: ubuntu-22.04
+  compiler-macos:
     strategy:
       matrix:
-        php-version: [7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3]
+        os: &macos_versions [macos-15-intel, macos-14, macos-15, macos-26]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          brew install automake bison flex boost libevent openssl libtool pkg-config
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: ./configure --disable-debug --disable-tests --disable-libs
+
+      - name: Run make
+        run: make -j$(sysctl -n hw.ncpu)
+
+      - name: Run install
+        run: sudo make install
+
+      - name: Run thrift version
+        run: /usr/local/bin/thrift -version
+
+      - name: Archive built thrift compiler (macOS)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thrift-compiler-${{ matrix.os }}
+          path: compiler/cpp/thrift
+          retention-days: 3
+
+  lib-php:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        php-version: [8.1, 8.2, 8.3, 8.4, 8.5]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@7c071dfe9dc99bdf297fa79cb49ea005b9fcadbc # master
         with:
           php-version: ${{ matrix.php-version }}
-          extensions: mbstring, intl, xml, curl
+          extensions: intl, xml, curl
           ini-values: "error_reporting=E_ALL"
 
       - name: Install Dependencies
-        run: composer install
+        run: |
+          rm -f ~/.composer/auth.json ~/.config/composer/auth.json
+          composer install
 
       - name: Run bootstrap
         run: ./bootstrap.sh
@@ -103,7 +182,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-php/with-php/' | sed 's/without-php_extension/with-php_extension/' )
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -116,32 +195,60 @@ jobs:
       - name: Build Thrift Classes
         run: |
           mkdir -p ./lib/php/test/Resources/packages/php
+          mkdir -p ./lib/php/test/Resources/packages/phpi
           mkdir -p ./lib/php/test/Resources/packages/phpv
           mkdir -p ./lib/php/test/Resources/packages/phpvo
           mkdir -p ./lib/php/test/Resources/packages/phpjs
           mkdir -p ./lib/php/test/Resources/packages/phpcm
+          mkdir -p ./lib/php/test/Resources/packages/phprec
+          mkdir -p ./lib/php/test/Resources/packages/phprecoop
           compiler/cpp/thrift --gen php:nsglobal="Basic" -r --out ./lib/php/test/Resources/packages/php lib/php/test/Resources/ThriftTest.thrift
+          compiler/cpp/thrift --gen php:inlined,nsglobal="BasicInline" -r --out ./lib/php/test/Resources/packages/phpi lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:validate,nsglobal="Validate" -r --out ./lib/php/test/Resources/packages/phpv lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:validate,oop,nsglobal="ValidateOop" -r --out ./lib/php/test/Resources/packages/phpvo lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:json,nsglobal="Json" -r --out ./lib/php/test/Resources/packages/phpjs lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:classmap,server,rest,nsglobal="Classmap" -r --out ./lib/php/test/Resources/packages/phpcm lib/php/test/Resources/ThriftTest.thrift
+          compiler/cpp/thrift --gen php:nsglobal="PhpRec" -r --out ./lib/php/test/Resources/packages/phprec lib/php/test/Resources/RecursionDepth.thrift
+          compiler/cpp/thrift --gen php:oop,nsglobal="PhpRecOop" -r --out ./lib/php/test/Resources/packages/phprecoop lib/php/test/Resources/RecursionDepth.thrift
 
       - name: Run Tests
         run: vendor/bin/phpunit -c lib/php/phpunit.xml
 
+      - name: Build PHP cross test extension
+        if: matrix.php-version == '8.3'
+        run: make -C lib/php src/ext/thrift_protocol/modules/thrift_protocol.so
+
+      - name: Run make precross for php test
+        if: matrix.php-version == '8.3'
+        run: make -C test/php precross
+
+      - name: Upload php precross artifacts
+        if: matrix.php-version == '8.3'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: php-precross
+          if-no-files-found: error
+          path: |
+            lib/php/src/ext/thrift_protocol/modules/thrift_protocol.so
+            test/php/gen-php/
+            test/php/gen-php-classmap/
+          retention-days: 3
+
   lib-go:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         go:
-          - '1.22'
-          - '1.23'
+          - "1.25"
+          - "1.26"
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: ${{ matrix.go }}
 
@@ -157,7 +264,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-go/with-go/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -180,8 +287,8 @@ jobs:
         run: make -C test/go precross
 
       - name: Upload go precross artifacts
-        if: matrix.go == '1.23'
-        uses: actions/upload-artifact@v4
+        if: matrix.go == '1.26'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-precross
           if-no-files-found: error
@@ -191,13 +298,15 @@ jobs:
 
   lib-java-kotlin:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       GRADLE_VERSION: "8.4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: 17
@@ -235,7 +344,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-java/with-java/' | sed 's/without-kotlin/with-kotlin/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -253,7 +362,7 @@ jobs:
         run: make -C lib/java install
 
       - name: Upload java libthrift artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: libthrift
           if-no-files-found: error
@@ -266,12 +375,13 @@ jobs:
         run: make -C lib/java precross
 
       - name: Upload java precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: java-precross
           if-no-files-found: error
           path: |
             lib/java/build/functionalTestJar/
+            lib/java/build/runnonblockingclient
             lib/java/build/runclient
             lib/java/build/runnonblockingserver
             lib/java/build/runserver
@@ -288,7 +398,7 @@ jobs:
         run: make -C lib/kotlin precross
 
       - name: Upload kotlin precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kotlin-precross
           if-no-files-found: error
@@ -299,11 +409,16 @@ jobs:
 
   lib-netstd:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+    defaults:
+      run:
+        shell: bash # required by net install script
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
@@ -311,10 +426,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends $BUILD_DEPS
           sudo apt-get install -y --no-install-recommends curl openssl ca-certificates
 
-#      the sdk is installed by default, but keep this step for reference
-#      - name: Set up .NET SDK
-#        run: |
-#          sudo apt-get install -y --no-install-recommends dotnet-sdk-8.0
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show .NET SDKs
+        run: dotnet --list-sdks
 
       - name: Run bootstrap
         run: ./bootstrap.sh
@@ -323,7 +441,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-netstd/with-netstd/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -349,7 +467,7 @@ jobs:
         run: make -C test/netstd precross
 
       - name: Upload netstd precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: netstd-precross
           if-no-files-found: error
@@ -358,20 +476,24 @@ jobs:
             test/netstd/Server/bin/Release/
           retention-days: 3
 
-  lib-swift:
-    needs: compiler
-    runs-on: ubuntu-22.04
+  lib-netstd-codegen:
+    needs: [compiler]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        dotnet-version: [8, 9, 10]
+      fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - name: Run bootstrap
-        run: ./bootstrap.sh
+      - name: Set up .NET SDK ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: "${{ matrix.dotnet-version }}.0.x"
 
-      - name: Run configure
-        run: |
-          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-swift/with-swift/')
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -379,28 +501,85 @@ jobs:
       - name: Run thrift-compiler
         run: |
           chmod a+x compiler/cpp/thrift
+          echo "$GITHUB_WORKSPACE/compiler/cpp" >> "$GITHUB_PATH"
           compiler/cpp/thrift -version
 
-      - name: Run make precross for swift
-        run: make -C test/swift precross
+      - name: Run netstd codegen tests
+        shell: pwsh
+        run: |
+          lib/netstd/Tests/codegen/run-NetStd-Codegen-Tests.ps1 `
+            -TargetVersions @("net${{ matrix.dotnet-version }}")
 
-      - name: Upload swift precross artifacts
-        uses: actions/upload-artifact@v4
+  lib-haxe-codegen:
+    needs: [compiler]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          name: swift-precross
-          if-no-files-found: error
-          path: |
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestServer
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestClient
-          retention-days: 3
+          persist-credentials: false
+
+      - name: Set up Haxe
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y haxe
+          haxelib setup ~/haxelib
+          haxe --version
+
+      - name: Install Haxe dependencies
+        run: |
+          haxelib install uuid --quiet
+          haxelib install crypto --quiet
+          haxelib dev thrift ${{ github.workspace }}/lib/haxe
+          haxelib path thrift
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          echo "$GITHUB_WORKSPACE/compiler/cpp" >> "$GITHUB_PATH"
+          compiler/cpp/thrift -version
+
+      - name: Run Haxe codegen tests
+        shell: pwsh
+        run: |
+          lib/haxe/codegen/run-Haxe-Codegen-Tests.ps1
+
+      # The autotools `make check` path for the Haxe library is disabled
+      # (--without-haxe) because it drives the cpp/php hxml targets; run the
+      # library unit tests directly on the lightweight neko target instead,
+      # reusing the toolchain (Haxe+neko, uuid, thrift compiler) set up above.
+      # The harness throws and Sys.exit(1)s on a failed assertion, so a failing
+      # test fails this step.
+      #
+      # Only the standalone "Normal" mode (StreamTest + RecursionLimitTest) is
+      # run. Multiplex needs a client+server; "constants" (ConstantsTest) is
+      # omitted for now because it constructs a TMemoryStream, which currently
+      # fails on the neko target -- run it here once that is fixed.
+      - name: Run Haxe library unit tests (neko)
+        run: |
+          cd lib/haxe/test
+          rm -rf gen-haxe bin
+          thrift --gen haxe -r ../../../test/ThriftTest.thrift
+          thrift --gen haxe -r ../../../contrib/async-test/aggr.thrift
+          thrift --gen haxe -r ../../../lib/rb/benchmark/Benchmark.thrift
+          thrift --gen haxe -r ../../../test/Recursive.thrift
+          thrift --gen haxe -r ../../../test/ConstantsDemo.thrift
+          haxe --cwd . neko.hxml
+          neko bin/Test.n
 
   lib-rust:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
-      TOOLCHAIN_VERSION: 1.65.0
+      TOOLCHAIN_VERSION: 1.85.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
@@ -424,7 +603,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-rs/with-rs/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -447,7 +626,7 @@ jobs:
         run: make -C test/rs precross
 
       - name: Upload rust precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rs-precross
           if-no-files-found: error
@@ -461,14 +640,16 @@ jobs:
 
   lib-python:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version:
-          - "3.x"
+          &python_versions ["3.10", "3.11", "3.12", "3.13", "3.14"]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
@@ -477,25 +658,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends curl openssl ca-certificates
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Python setup
         run: |
-          python -m pip install --upgrade pip setuptools wheel flake8 six tornado twisted zope.interface
+          python -m pip install --upgrade pip setuptools wheel flake8 "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
           python --version
           pip --version
 
       - name: Run bootstrap
         run: ./bootstrap.sh
 
-      - name: Run configure 3.x
-        if: matrix.python-version == '3.x'
+      - name: Run configure
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-py3/with-py3/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -511,84 +691,426 @@ jobs:
       - name: Run make install for python
         run: sudo make -C lib/py install
 
-      # - name: Run make install-exec-hook for python
-      #   run: sudo make -C lib/py install-exec-hook
-
-      - name: Run make check for python
+      - name: Run make check for python libs
         run: make -C lib/py check
+
+      - name: Run make check for python code
+        run: make -C test/py check
+
+      - name: Run make precross for python
+        if: matrix.python-version == '3.12'
+        run: make -C test/py precross
+
+      - name: Upload python precross artifacts
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: py-precross
+          if-no-files-found: error
+          path: |
+            lib/py/build/lib.*
+            test/py/gen-py
+            test/py/TestClient.py
+            test/py/TestServer.py
+            test/py/util.py
+          retention-days: 3
+
+  lib-python-macos:
+    needs: compiler-macos
+    strategy:
+      matrix:
+        os: *macos_versions
+        python-version: *python_versions
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          brew install automake bison flex boost libevent openssl libtool pkg-config
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Python setup
+        run: |
+          python -m pip install --upgrade pip setuptools wheel flake8 "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
+          python --version
+          pip --version
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-py3/with-py3/')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler-${{ matrix.os }}
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for python
+        run: make -C lib/py
+
+      - name: Run make install for python
+        run: |
+          sudo make -C lib/py install PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+
+      - name: Run make for python libs
+        run: make -C lib/py
+
+      - name: Run make check for python libs
+        run: make -C lib/py check
+
+      - name: Run make check for python code
+        run: make -C test/py check
+
+  lib-nodejs:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed -E 's/without-node([tj])s/with-node\1s/g')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run js tests
+        run: make -C lib/nodejs check
+
+      - name: Run ts tests
+        run: make -C lib/nodets check
+
+      - name: Run js precross
+        run: make -C lib/nodejs precross
+
+      - name: Run ts precross
+        run: make -C lib/nodets precross
+
+      - name: Upload nodejs precross artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nodejs-precross
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            lib/nodejs/test/gen-nodejs
+            lib/nodets/test/gen-nodejs
+            lib/nodets/test-compiled
+          retention-days: 3
+
+  lib-cpp:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends g++ $BUILD_DEPS locales
+          sudo locale-gen en_US.UTF-8
+          sudo locale-gen de_DE.UTF-8
+          sudo update-locale
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed -E 's/without-cpp/with-cpp/g')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for cpp
+        run: make -j$(nproc) -C lib/cpp
+
+      - name: Run make check for lib/cpp
+        run: make -j$(nproc) -C lib/cpp check
+
+      - name: Run make check for test/cpp
+        run: make -j$(nproc) -C test/cpp check
+
+      - name: Run make precross for cpp test
+        run: make -j$(nproc) -C test/cpp precross
+
+      - name: Upload cpp precross artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpp-precross
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            test/cpp/TestClient
+            test/cpp/TestServer
+            test/cpp/.libs/TestClient
+            test/cpp/.libs/TestServer
+            lib/cpp/.libs/*.so
+          retention-days: 3
+
+      - name: Upload log files from failed test runs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: lib-cpp-test-log
+          path: lib/cpp/test/*.xml
+          retention-days: 3
+
+  lib-ruby:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.ruby-version == 'head' }}
+    name: lib-ruby (${{ matrix.ruby-version }}) ${{ matrix.skip-build-ext && 'noext' || '' }}
+    strategy:
+      matrix:
+        ruby-version: ["2.7", "3.0", "3.1", "3.2", "3.3", "3.4", "4.0", "head"]
+        skip-build-ext: [false]
+        include:
+          - ruby-version: "2.7"
+            skip-build-ext: true
+      fail-fast: false
+    env:
+      SKIP_BUILD_EXT: ${{ matrix.skip-build-ext && '1' || '' }}
+      BUNDLER_VERSION: ${{ case(matrix.ruby-version == 'head', '0', '2.2.34') }} # Bundler version is managed via setup-ruby action, not Bundler itself
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1.310.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          # Old bundler used the internal constant of Pathname, that was not private due to a typo.
+          # https://github.com/ruby/rubygems/pull/9529
+          bundler: ${{ case(matrix.ruby-version == 'head', 'default', 'Gemfile.lock') }}
+          bundler-cache: true
+          working-directory: lib/rb
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-ruby/with-ruby/')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for ruby
+        run: make -C lib/rb
+
+      - name: Run make check for lib/rb
+        run: make -C lib/rb check
+
+      - name: Run make check for test/rb
+        run: make -C test/rb check
+
+      - name: Run make precross for ruby test
+        run: make -C test/rb precross
+
+      - name: Upload ruby precross artifacts
+        # has to match the version used in cross-test
+        if: matrix.ruby-version == '2.7' && matrix.skip-build-ext == false
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rb-precross
+          if-no-files-found: error
+          path: |
+            test/rb/gen-rb/*
+            lib/rb/ext/*.so
+          retention-days: 3
 
   cross-test:
     needs:
+      - lib-php
       - lib-java-kotlin
-      - lib-swift
       - lib-rust
       - lib-go
       - lib-python
-    runs-on: ubuntu-22.04
+      - lib-cpp
+      - lib-ruby
+      - lib-nodejs
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        server_lang: ['java', 'kotlin', 'go', 'rs', 'swift']
+        # kotlin cross test are failing -> see THRIFT-5879
+        server_lang:
+          ["java", "go", "rs", "cpp", "py", "rb", "php", "nodejs", "nodets"]
         # we always use comma join as many client langs as possible, to reduce the number of jobs
-        client_lang: ['java,kotlin', 'go,rs', 'swift']
+        client_lang: ["java,kotlin", "go,rs,cpp,py,php,nodejs,nodets,rb"]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          python-version: "3.x"
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@7c071dfe9dc99bdf297fa79cb49ea005b9fcadbc # master
+        with:
+          php-version: "8.3"
+          extensions: intl, xml, curl, sockets
+          ini-values: "error_reporting=E_ALL"
+
+      - name: Install PHP dependencies
+        run: |
+          rm -f ~/.composer/auth.json ~/.config/composer/auth.json
+          composer install --no-progress --prefer-dist
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           # here we intentionally use an older version so that we also verify Java 17 compiles to it
           java-version: 8
           cache: "gradle"
 
+      - uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1.310.0
+        with:
+          ruby-version: "2.7"
+          bundler-cache: true
+          working-directory: test/rb
+
       - name: Install openssl and certificates (for SSL tests)
         run: |
           sudo apt-get update -yq
-          sudo apt-get install -y --no-install-recommends openssl ca-certificates
+          sudo apt-get install -y --no-install-recommends \
+            openssl \
+            ca-certificates \
+            libboost-all-dev \
+            libevent-dev
 
       - name: Download java precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: java-precross
           path: lib/java/build
 
       - name: Download kotlin precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kotlin-precross
           path: lib/kotlin
 
-      - name: Download swift precross artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: swift-precross
-          path: test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug
-
       - name: Download rust precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rs-precross
           path: test/rs/bin
 
       - name: Download go precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: go-precross
           path: test/go/bin
 
+      - name: Download cpp precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cpp-precross
+          path: .
+
+      - name: Download python precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: py-precross
+          path: .
+
+      - name: Download ruby precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rb-precross
+          path: .
+
+      - name: Download php precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: php-precross
+          path: .
+
+      - name: Prepare PHP cross test extensions
+        run: |
+          mkdir -p test/php/php_ext_dir
+          ln -sf ../../../lib/php/src/ext/thrift_protocol/modules/thrift_protocol.so test/php/php_ext_dir/
+          ln -sf "$(php-config --extension-dir)/sockets.so" test/php/php_ext_dir/
+
+      - name: Download nodejs and nodets precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nodejs-precross
+          path: lib
+
       - name: Set back executable flags
         run: |
-          chmod a+x \
-            lib/java/build/run* \
-            lib/kotlin/cross-test-client/build/install/TestClient/bin/* \
-            lib/kotlin/cross-test-server/build/install/TestServer/bin/* \
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/* \
-            test/rs/bin/* \
-            test/go/bin/*
+          chmod a+x lib/java/build/run*
+          chmod a+x lib/kotlin/cross-test-client/build/install/TestClient/bin/*
+          chmod a+x lib/kotlin/cross-test-server/build/install/TestServer/bin/*
+          chmod a+x test/rs/bin/*
+          chmod a+x test/go/bin/*
+          chmod a+x test/cpp/*
+          chmod a+x test/cpp/.libs/*
+          chmod a+x lib/cpp/.libs/*.so
+          chmod a+x test/py/*.py
+          chmod a+x lib/rb/ext/*.so
+
+      - name: Installs for nodets and nodejs
+        run: |
+          npm install .
+          cd lib/nodejs/test/ && npm install .
+
+      - name: Create tmp domain socket folder
+        run: mkdir /tmp/v0.16
 
       - name: Run cross test
         env:
@@ -601,10 +1123,9 @@ jobs:
             --client ${{ matrix.client_lang }}
 
       - name: Upload log files from failed cross test runs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: cross-test-log_${{ matrix.server_lang }}-${{ matrix.client_lang }}
           path: test/log/
           retention-days: 3
-

@@ -20,7 +20,7 @@
 AC_PREREQ(2.65)
 AC_CONFIG_MACRO_DIR([./aclocal])
 
-AC_INIT([thrift], [0.21.0])
+AC_INIT([thrift], [0.24.0])
 
 AC_CONFIG_AUX_DIR([.])
 
@@ -95,6 +95,18 @@ AC_PROG_MKDIR_P
 AC_PROG_AWK
 AC_PROG_RANLIB
 
+# Check if we're using Clang
+AC_MSG_CHECKING([whether we are using Clang])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([], [[
+    #ifndef __clang__
+      not clang
+    #endif
+  ]])],
+  [CLANG=yes], [CLANG=no])
+AC_MSG_RESULT([$CLANG])
+AM_CONDITIONAL([USING_CLANG], [test "x$CLANG" = "xyes"])
+
 AC_LANG([C++])
 AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
 
@@ -131,7 +143,6 @@ if test "$enable_libs" = "no"; then
   with_nodets="no"
   with_lua="no"
   with_rs="no"
-  with_swift="no"
 fi
 
 AX_THRIFT_LIB(cpp, [C++], yes)
@@ -410,16 +421,6 @@ fi
 AM_CONDITIONAL(WITH_GO, [test "$have_go" = "yes"])
 AM_CONDITIONAL([GOVERSION_LT_17], [test "$go_version_lt_17" = "yes"])
 AM_CONDITIONAL([GOVERSION_GE_118], [test "$go_version_ge_118" = "yes"])
-
-AX_THRIFT_LIB(swift, [Swift], yes)
-have_swift="no"
-if test "$with_swift" = "yes"; then
-  AC_PATH_PROG([SWIFT], [swift])
-  if test "x$SWIFT" != "x" -a "x$SWIFT" != "x"; then
-    have_swift="yes"
-  fi
-fi
-AM_CONDITIONAL([WITH_SWIFT], [test "$have_swift" = "yes"])
 
 AX_THRIFT_LIB(rs, [Rust], yes)
 have_rs="no"
@@ -761,6 +762,7 @@ AC_CONFIG_FILES([
   lib/cl/Makefile
   lib/cpp/Makefile
   lib/cpp/test/Makefile
+  lib/cpp/test/fuzz/Makefile
   lib/cpp/thrift-nb.pc
   lib/cpp/thrift-z.pc
   lib/cpp/thrift-qt5.pc
@@ -768,6 +770,7 @@ AC_CONFIG_FILES([
   lib/c_glib/Makefile
   lib/c_glib/thrift_c_glib.pc
   lib/c_glib/test/Makefile
+  lib/c_glib/test/fuzz/Makefile
   lib/d/Makefile
   lib/d/test/Makefile
   lib/erl/Makefile
@@ -791,8 +794,10 @@ AC_CONFIG_FILES([
   lib/dart/Makefile
   lib/py/Makefile
   lib/rb/Makefile
+  lib/rb/test/fuzz/Makefile
   lib/rs/Makefile
   lib/rs/test/Makefile
+  lib/rs/test/fuzz/Makefile
   lib/rs/test_recursive/Makefile
   lib/rs/test_recursive/src/Makefile
   lib/rs/test_recursive/src/maintenance/Makefile
@@ -800,7 +805,6 @@ AC_CONFIG_FILES([
   lib/rs/test_recursive/src/transit/light/Makefile
   lib/rs/test_recursive/src/transit/services/Makefile
   lib/lua/Makefile
-  lib/swift/Makefile
   lib/ts/Makefile
   lib/xml/Makefile
   lib/xml/test/Makefile
@@ -822,8 +826,6 @@ AC_CONFIG_FILES([
   test/py.tornado/Makefile
   test/rb/Makefile
   test/rs/Makefile
-  test/swift/Makefile
-  test/swift/CrossTests/Makefile
   tutorial/Makefile
   tutorial/c_glib/Makefile
   tutorial/cl/Makefile
@@ -843,7 +845,6 @@ AC_CONFIG_FILES([
   tutorial/py.tornado/Makefile
   tutorial/rb/Makefile
   tutorial/rs/Makefile
-  tutorial/swift/Makefile
 ])
 
 if test "$have_cpp" = "yes" ; then MAYBE_CPP="cpp" ; else MAYBE_CPP="" ; fi
@@ -880,8 +881,6 @@ if test "$have_lua" = "yes" ; then MAYBE_LUA="lua" ; else MAYBE_LUA="" ; fi
 AC_SUBST([MAYBE_LUA])
 if test "$have_rs" = "yes" ; then MAYBE_RS="rs" ; else MAYBE_RS="" ; fi
 AC_SUBST([MAYBE_RS])
-if test "$have_swift" = "yes" ; then MAYBE_SWIFT="swift" ; else MAYBE_SWIFT="" ; fi
-AC_SUBST([MAYBE_SWIFT])
 if test "$have_netstd" = "yes" ; then MAYBE_NETSTD="netstd" ; else MAYBE_NETSTD="" ; fi
 AC_SUBST([MAYBE_NETSTD])
 if test "$have_cl" = "yes" ; then MAYBE_CL="cl" ; else MAYBE_CL="" ; fi
@@ -912,7 +911,6 @@ echo "Building Python Library ...... : $have_python"
 echo "Building Py3 Library ......... : $have_py3"
 echo "Building Ruby Library ........ : $have_ruby"
 echo "Building Rust Library ........ : $have_rs"
-echo "Building Swift Library ....... : $have_swift"
 
 if test "$have_c_glib" = "yes" ; then
   echo
@@ -1041,12 +1039,6 @@ if test "$have_rs" = "yes" ; then
   echo "   Using Cargo................ : $CARGO"
   echo "   Using rustc................ : $RUSTC"
   echo "   Using Rust version......... : $($RUSTC --version)"
-fi
-if test "$have_swift" = "yes" ; then
-  echo
-  echo "Swift Library:"
-  echo "   Using Swift ............... : $SWIFT"
-  echo "   Using Swift version ....... : $($SWIFT --version | head -1)"
 fi
 echo
 echo "If something is missing that you think should be present,"

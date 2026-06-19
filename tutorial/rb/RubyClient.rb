@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -38,10 +38,10 @@ begin
   client.ping()
   print "ping()\n"
 
-  sum = client.add(1,1)
+  sum = client.add(1, 1)
   print "1+1=", sum, "\n"
 
-  sum = client.add(1,4)
+  sum = client.add(1, 4)
   print "1+4=", sum, "\n"
 
   work = Work.new()

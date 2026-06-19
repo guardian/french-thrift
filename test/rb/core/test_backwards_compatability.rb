@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -27,4 +28,3 @@ class TestThriftException < Test::Unit::TestCase
     assert_equal msg, Thrift::Exception.new(msg).message
   end
 end
-

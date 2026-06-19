@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,7 +21,6 @@
 require 'spec_helper'
 
 describe 'BaseTransport' do
-
   describe Thrift::TransportException do
     it "should make type accessible" do
       exc = Thrift::TransportException.new(Thrift::TransportException::ALREADY_OPEN, "msg")
@@ -38,6 +38,25 @@ describe 'BaseTransport' do
       expect(transport.read_all(40)).to eq("10 lettersfifteen lettersmore characters")
     end
 
+    it "should coerce reads to binary encoding" do
+      transport = Thrift::BaseTransport.new
+      expect(transport).to receive(:read).with(3).and_return(+'abc')
+
+      buf = transport.read_all(3)
+
+      expect(buf).to eq('abc')
+      expect(buf.encoding).to eq(Encoding::BINARY)
+    end
+
+    it "should reject negative read sizes" do
+      transport = Thrift::BaseTransport.new
+      expect(transport).not_to receive(:read)
+
+      expect { transport.read_all(-1) }.to raise_error(Thrift::TransportException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::TransportException::NEGATIVE_SIZE)
+      end
+    end
+
     it "should stub out the rest of the methods" do
       # can't test for stubbiness, so just make sure they're defined
       [:open?, :open, :close, :read, :write, :flush].each do |sym|
@@ -48,7 +67,7 @@ describe 'BaseTransport' do
     it "should alias << to write" do
       expect(Thrift::BaseTransport.instance_method(:<<)).to eq(Thrift::BaseTransport.instance_method(:write))
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(Thrift::BaseTransport.new.to_s).to eq("base")
     end
@@ -67,7 +86,7 @@ describe 'BaseTransport' do
       transport = double("Transport")
       expect(Thrift::BaseTransportFactory.new.get_transport(transport)).to eql(transport)
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(Thrift::BaseTransportFactory.new.to_s).to eq("base")
     end
@@ -149,7 +168,7 @@ describe 'BaseTransport' do
       expect(Thrift::BufferedTransport).to receive(:new).with(trans).and_return(btrans)
       expect(Thrift::BufferedTransportFactory.new.get_transport(trans)).to eq(btrans)
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(Thrift::BufferedTransportFactory.new.to_s).to eq("buffered")
     end
@@ -271,7 +290,7 @@ describe 'BaseTransport' do
       expect(Thrift::FramedTransport).to receive(:new).with(trans)
       Thrift::FramedTransportFactory.new.get_transport(trans)
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(Thrift::FramedTransportFactory.new.to_s).to eq("framed")
     end
@@ -287,7 +306,7 @@ describe 'BaseTransport' do
     end
 
     it "should accept a buffer on input and use it directly" do
-      s = "this is a test"
+      s = +"this is a test"
       @buffer = Thrift::MemoryBufferTransport.new(s)
       expect(@buffer.read(4)).to eq("this")
       s.slice!(-4..-1)
@@ -339,12 +358,33 @@ describe 'BaseTransport' do
       expect(@buffer.read(@buffer.available)).to eq("foo bar")
     end
 
+    it "should force mutable write buffers into binary in place" do
+      s = "abc \u20AC".encode("UTF-8")
+      @buffer.write(s)
+      expect(s.encoding).to eq(Encoding::BINARY)
+      expect(@buffer.read(@buffer.available)).to eq("abc \u20AC".encode("UTF-8").b)
+    end
+
+    it "should not mutate frozen write buffers while forcing binary encoding" do
+      s = "abc \u20AC".encode("UTF-8").freeze
+      @buffer.write(s)
+      expect(s.encoding).to eq(Encoding::UTF_8)
+      expect(s).to be_frozen
+      expect(@buffer.read(@buffer.available)).to eq("abc \u20AC".encode("UTF-8").b)
+    end
+
     it "should throw an EOFError when there isn't enough data in the buffer" do
       @buffer.reset_buffer("")
-      expect{@buffer.read(1)}.to raise_error(EOFError)
+      expect{ @buffer.read(1) }.to raise_error(EOFError)
 
       @buffer.reset_buffer("1234")
-      expect{@buffer.read(5)}.to raise_error(EOFError)
+      expect{ @buffer.read(5) }.to raise_error(EOFError)
+    end
+
+    it "should reject negative read_all sizes" do
+      expect { @buffer.read_all(-1) }.to raise_error(Thrift::TransportException, "Negative size") do |e|
+        expect(e.type).to eq(Thrift::TransportException::NEGATIVE_SIZE)
+      end
     end
   end
 

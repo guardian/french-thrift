@@ -19,15 +19,13 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Transport\TTransport;
 
 interface TTransportFactoryInterface
 {
-    /**
-     * @param TTransport $transport
-     * @return TTransport
-     */
-    public function getTransport(TTransport $transport);
+    public function getTransport(TTransport $transport): TTransport;
 }

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol;
 
 use Thrift\Type\TMessageType;
@@ -39,14 +42,7 @@ class TMultiplexedProtocol extends TProtocolDecorator
      *
      * @var string
      */
-    const SEPARATOR = ":";
-
-    /**
-     * The name of service.
-     *
-     * @var string
-     */
-    private $serviceName_;
+    public const SEPARATOR = ":";
 
     /**
      * Constructor of <code>TMultiplexedProtocol</code> class.
@@ -55,31 +51,23 @@ class TMultiplexedProtocol extends TProtocolDecorator
      * multiplexing server.  The <code>$serviceName</code> is required as it is
      * prepended to the message header so that the multiplexing server can broker
      * the function call to the proper service.
-     *
-     * @param TProtocol $protocol
-     * @param string    $serviceName The name of service.
      */
-    public function __construct(TProtocol $protocol, $serviceName)
+    public function __construct(TProtocol $protocol, private string $serviceName)
     {
         parent::__construct($protocol);
-        $this->serviceName_ = $serviceName;
     }
 
     /**
      * Writes the message header.
      * Prepends the service name to the function name, separated by <code>TMultiplexedProtocol::SEPARATOR</code>.
-     *
-     * @param string $name  Function name.
-     * @param int    $type  Message type.
-     * @param int    $seqid The sequence id of this message.
      */
-    public function writeMessageBegin($name, $type, $seqid)
+    public function writeMessageBegin(string $name, int $type, int $seqid): int
     {
         if ($type == TMessageType::CALL || $type == TMessageType::ONEWAY) {
-            $nameWithService = $this->serviceName_ . self::SEPARATOR . $name;
-            parent::writeMessageBegin($nameWithService, $type, $seqid);
-        } else {
-            parent::writeMessageBegin($name, $type, $seqid);
+            $nameWithService = $this->serviceName . self::SEPARATOR . $name;
+            return parent::writeMessageBegin($nameWithService, $type, $seqid);
         }
+
+        return parent::writeMessageBegin($name, $type, $seqid);
     }
 }

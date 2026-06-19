@@ -31,6 +31,7 @@
 #include <memory>
 #include <thrift/transport/TTransportUtils.h>
 #include <thrift/transport/TBufferTransports.h>
+#include <thrift/transport/THeaderTransport.h>
 #include <thrift/transport/TSimpleFileTransport.h>
 #include <thrift/transport/TFileTransport.h>
 #include <thrift/protocol/TEnum.h>
@@ -168,30 +169,126 @@ BOOST_AUTO_TEST_CASE(test_tthriftbinaryprotocol_read_check_exception) {
 }
 
 BOOST_AUTO_TEST_CASE(test_tthriftcompactprotocol_read_check_exception) {
-  std::shared_ptr<TConfiguration> config (new TConfiguration(MAX_MESSAGE_SIZE));
+  // Set Max Message Size to 11 since all structs are 12B long
+  std::shared_ptr<TConfiguration> config (new TConfiguration(11));
   std::shared_ptr<TMemoryBuffer> transport(new TMemoryBuffer(config));
   std::shared_ptr<TCompactProtocol> protocol(new TCompactProtocol(transport));
 
   uint32_t val = 0;
   TType elemType = apache::thrift::protocol::T_STOP;
   TType elemType1 = apache::thrift::protocol::T_STOP;
-  TList list(T_I32, 8);
+
+  // This list needs 12B
+  TList list(T_I32, 12);
   protocol->writeListBegin(list.elemType_, list.size_);
   protocol->writeListEnd();
   BOOST_CHECK_THROW(protocol->readListBegin(elemType, val), TTransportException);
   protocol->readListEnd();
 
-  TSet set(T_I32, 8);
+  // This set needs 12B
+  TSet set(T_I32, 12);
   protocol->writeSetBegin(set.elemType_, set.size_);
   protocol->writeSetEnd();
   BOOST_CHECK_THROW(protocol->readSetBegin(elemType, val), TTransportException);
   protocol->readSetEnd();
 
-  TMap map(T_I32, T_I32, 8);
+
+  // This map needs 12B (2x elem)
+  TMap map(T_I32, T_I32, 6);
   protocol->writeMapBegin(map.keyType_, map.valueType_, map.size_);
   protocol->writeMapEnd();
   BOOST_CHECK_THROW(protocol->readMapBegin(elemType, elemType1, val), TTransportException);
   protocol->readMapEnd();
+
+  // This string needs 12B (1 for size + str)
+  string eleven = "1234567890A";
+  protocol->writeString(eleven);
+  BOOST_CHECK_THROW(protocol->readString(eleven), TTransportException);
+}
+
+BOOST_AUTO_TEST_CASE(test_tthriftcompactprotocol_read_check_pass) {
+  // Set Max Message Size to 12 to check the edge case
+  std::shared_ptr<TConfiguration> config (new TConfiguration(12));
+  std::shared_ptr<TMemoryBuffer> transport(new TMemoryBuffer(config));
+  std::shared_ptr<TCompactProtocol> protocol(new TCompactProtocol(transport));
+
+  uint32_t val = 0;
+  TType elemType = apache::thrift::protocol::T_STOP;
+  TType elemType1 = apache::thrift::protocol::T_STOP;
+
+  // This list needs 12B
+  TList list(T_I32, 12);
+  protocol->writeListBegin(list.elemType_, list.size_);
+  protocol->writeListEnd();
+  BOOST_CHECK_NO_THROW(protocol->readListBegin(elemType, val));
+  protocol->readListEnd();
+
+  // This set needs 12B
+  TSet set(T_I32, 12);
+  protocol->writeSetBegin(set.elemType_, set.size_);
+  protocol->writeSetEnd();
+  BOOST_CHECK_NO_THROW(protocol->readSetBegin(elemType, val));
+  protocol->readSetEnd();
+
+  // This map needs 12B (2x elem)
+  TMap map(T_I32, T_I32, 6);
+  protocol->writeMapBegin(map.keyType_, map.valueType_, map.size_);
+  protocol->writeMapEnd();
+  BOOST_CHECK_NO_THROW(protocol->readMapBegin(elemType, elemType1, val));
+  protocol->readMapEnd();
+
+  // This string needs 12B (1 for size + str)
+  string eleven = "1234567890A";
+  protocol->writeString(eleven);
+  BOOST_CHECK_NO_THROW(protocol->readString(eleven));
+}
+
+BOOST_AUTO_TEST_CASE(test_tthriftbinaryprotocol_container_size_overflow) {
+  std::shared_ptr<TConfiguration> config (new TConfiguration(1024));
+  std::shared_ptr<TMemoryBuffer> transport(new TMemoryBuffer(config));
+  std::shared_ptr<TBinaryProtocol> protocol(new TBinaryProtocol(transport));
+
+  uint32_t val = 0;
+  TType elemType = apache::thrift::protocol::T_STOP;
+  // 0x40000000 elements of min size 4 require 4 GiB; the product wraps to 0 in
+  // 32-bit math and used to slip past the MaxMessageSize check.
+  TList list(T_I32, 0x40000000);
+  protocol->writeListBegin(list.elemType_, list.size_);
+  protocol->writeListEnd();
+  BOOST_CHECK_THROW(protocol->readListBegin(elemType, val), TTransportException);
+  protocol->readListEnd();
+}
+
+BOOST_AUTO_TEST_CASE(test_tthriftcompactprotocol_container_size_overflow) {
+  std::shared_ptr<TConfiguration> config (new TConfiguration(1024));
+  std::shared_ptr<TMemoryBuffer> transport(new TMemoryBuffer(config));
+  std::shared_ptr<TCompactProtocol> protocol(new TCompactProtocol(transport));
+
+  uint32_t val = 0;
+  TType elemType = apache::thrift::protocol::T_STOP;
+  // 0x10000000 elements of min size 16 (UUID) require 4 GiB; the product wraps
+  // to 0 in 32-bit math and used to slip past the MaxMessageSize check.
+  TList list(T_UUID, 0x10000000);
+  protocol->writeListBegin(list.elemType_, list.size_);
+  protocol->writeListEnd();
+  BOOST_CHECK_THROW(protocol->readListBegin(elemType, val), TTransportException);
+  protocol->readListEnd();
+}
+
+BOOST_AUTO_TEST_CASE(test_tthriftjsonprotocol_container_size_overflow) {
+  std::shared_ptr<TConfiguration> config (new TConfiguration(1024));
+  std::shared_ptr<TMemoryBuffer> transport(new TMemoryBuffer(config));
+  std::shared_ptr<TJSONProtocol> protocol(new TJSONProtocol(transport));
+
+  uint32_t val = 0;
+  TType elemType = apache::thrift::protocol::T_STOP;
+  // 0x10000000 elements of min size 16 (UUID) require 4 GiB; the product wraps
+  // to 0 in 32-bit math and used to slip past the MaxMessageSize check.
+  TList list(T_UUID, 0x10000000);
+  protocol->writeListBegin(list.elemType_, list.size_);
+  protocol->writeListEnd();
+  BOOST_CHECK_THROW(protocol->readListBegin(elemType, val), TTransportException);
+  protocol->readListEnd();
 }
 
 BOOST_AUTO_TEST_CASE(test_tthriftjsonprotocol_read_check_exception) {
@@ -219,6 +316,51 @@ BOOST_AUTO_TEST_CASE(test_tthriftjsonprotocol_read_check_exception) {
   protocol->writeMapEnd();
   BOOST_CHECK_THROW(protocol->readMapBegin(elemType, elemType1, val), TTransportException);
   protocol->readMapEnd();
+}
+
+BOOST_AUTO_TEST_CASE(test_theadertransport_header_size_exceeds_frame) {
+  using apache::thrift::transport::THeaderTransport;
+  // Header-format frame whose declared header size (3 * 4 = 12) leaves fewer
+  // than the 10 common-header bytes inside the 14-byte frame. The trailing
+  // varint bytes are all continuation bytes, so the reader used to run off the
+  // end of the receive buffer.
+  uint8_t frame[] = {
+      0x00, 0x00, 0x00, 0x0E, // frame length = 14
+      0x0F, 0xFF, 0x00, 0x00, // header magic
+      0x00, 0x00, 0x00, 0x00, // seqId
+      0x00, 0x03,             // header size field (3 -> 12 bytes)
+      0x02,                   // protocol id varint
+      0x00,                   // num transforms = 0
+      0x80, 0x80              // info-header varint, all continuation
+  };
+  std::shared_ptr<TMemoryBuffer> buffer(new TMemoryBuffer(frame, sizeof(frame)));
+  std::shared_ptr<THeaderTransport> trans(new THeaderTransport(buffer));
+
+  uint8_t out[1];
+  BOOST_CHECK_THROW(trans->read(out, sizeof(out)), TTransportException);
+}
+
+BOOST_AUTO_TEST_CASE(test_theadertransport_zlib_roundtrip) {
+  using apache::thrift::transport::THeaderTransport;
+  // A run of identical bytes compresses to far fewer bytes than it occupies
+  // once expanded again, so the result of the zlib transform is much larger
+  // than the frame section it is read from.  This drives the full write/read
+  // round trip through the zlib transform path.  Keep the payload small enough
+  // to stay within the transform buffer the reader sizes from its write buffer.
+  const std::size_t N = 700;
+  std::vector<uint8_t> payload(N, 0x42);
+
+  std::shared_ptr<TMemoryBuffer> buffer(new TMemoryBuffer());
+  std::shared_ptr<THeaderTransport> writer(new THeaderTransport(buffer));
+  writer->setTransform(THeaderTransport::ZLIB_TRANSFORM);
+  writer->write(payload.data(), static_cast<uint32_t>(payload.size()));
+  writer->flush();
+
+  std::shared_ptr<THeaderTransport> reader(new THeaderTransport(buffer));
+  std::vector<uint8_t> out(N, 0x00);
+  reader->readAll(out.data(), static_cast<uint32_t>(out.size()));
+
+  BOOST_CHECK(out == payload);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,11 +21,16 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
+use Closure;
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
+use Psr\Log\NullLogger;
 use Thrift\Exception\TException;
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * Sockets implementation of the TTransport interface.
@@ -34,238 +40,320 @@ use Thrift\Factory\TStringFuncFactory;
 class TSocket extends TTransport
 {
     /**
+     * Default debug handler used when none is supplied to the constructor.
+     *
+     * @deprecated Callable / function-name debug handlers are deprecated and
+     *             will be removed in the next version. Pass a
+     *             Psr\Log\LoggerInterface to the constructor instead.
+     */
+    public const DEFAULT_DEBUG_HANDLER = 'error_log';
+
+    private static ?bool $hasSocketsExtension = null;
+
+    /**
      * Handle to PHP socket
      *
-     * @var resource
+     * @var resource|null
      */
-    protected $handle_ = null;
+    protected $handle = null;
 
     /**
-     * Remote hostname
+     * Connect timeout in seconds.
      *
-     * @var string
+     * Combined with connectTimeoutUsec this is used for the fsockopen()
+     * timeout. Null means "use the send timeout" for backwards compatibility
+     * with callers that only configure setSendTimeout().
      */
-    protected $host_ = 'localhost';
+    protected ?int $connectTimeoutSec = null;
 
     /**
-     * Remote port
-     *
-     * @var int
+     * Connect timeout in microseconds. Only consulted when connectTimeoutSec
+     * is non-null.
      */
-    protected $port_ = '9090';
+    protected int $connectTimeoutUsec = 0;
 
     /**
      * Send timeout in seconds.
      *
      * Combined with sendTimeoutUsec this is used for send timeouts.
-     *
-     * @var int
      */
-    protected $sendTimeoutSec_ = 0;
+    protected int $sendTimeoutSec = 0;
 
     /**
      * Send timeout in microseconds.
      *
      * Combined with sendTimeoutSec this is used for send timeouts.
-     *
-     * @var int
      */
-    protected $sendTimeoutUsec_ = 100000;
+    protected int $sendTimeoutUsec = 100000;
+
+    /**
+     * True once a caller invoked setSendTimeout(). Used to fire a deprecation
+     * notice in open() when the caller relies on the send-timeout-as-
+     * connect-timeout coupling that this class used to enforce.
+     */
+    private bool $sendTimeoutCustomized = false;
 
     /**
      * Recv timeout in seconds
      *
      * Combined with recvTimeoutUsec this is used for recv timeouts.
-     *
-     * @var int
      */
-    protected $recvTimeoutSec_ = 0;
+    protected int $recvTimeoutSec = 0;
 
     /**
      * Recv timeout in microseconds
      *
      * Combined with recvTimeoutSec this is used for recv timeouts.
-     *
-     * @var int
      */
-    protected $recvTimeoutUsec_ = 750000;
+    protected int $recvTimeoutUsec = 750000;
 
     /**
-     * Persistent socket or plain?
+     * Debugging on? Gates the legacy callable $debugHandler. Has no effect
+     * when a Psr\Log\LoggerInterface is used — that path is always invoked
+     * and the logger is responsible for level filtering.
      *
-     * @var bool
+     * @deprecated Used only with the legacy callable $debugHandler, which
+     *             is itself deprecated. Will be removed alongside it in
+     *             the next version.
      */
-    protected $persist_ = false;
+    protected bool $debug = false;
 
     /**
-     * Debugging on?
-     *
-     * @var bool
+     * PSR-3 logger used for diagnostic output. Defaults to a NullLogger so the
+     * transport is silent unless the caller supplies a real logger.
      */
-    protected $debug_ = false;
+    protected LoggerInterface $logger;
 
     /**
-     * Debug handler
-     *
-     * @var mixed
+     * Legacy debug callback. Only populated when the caller passed a callable
+     * (or, deprecated, a function-name string) instead of a LoggerInterface.
      */
-    protected $debugHandler_ = null;
+    protected ?Closure $debugHandler = null;
 
     /**
      * Socket constructor
      *
-     * @param string $host Remote hostname
-     * @param int $port Remote port
-     * @param bool $persist Whether to use a persistent socket
-     * @param string $debugHandler Function to call for error logging
+     * @param LoggerInterface|callable|string|null $debugHandler PSR-3 logger
+     *        for diagnostic output. Passing a callable or function-name string
+     *        is deprecated and triggers E_USER_DEPRECATED; pass a
+     *        Psr\Log\LoggerInterface instead.
      */
     public function __construct(
-        $host = 'localhost',
-        $port = 9090,
-        $persist = false,
-        $debugHandler = null
+        protected string $host = 'localhost',
+        protected int $port = 9090,
+        protected bool $persist = false,
+        LoggerInterface|callable|string|null $debugHandler = null,
     ) {
-        $this->host_ = $host;
-        $this->port_ = $port;
-        $this->persist_ = $persist;
-        $this->debugHandler_ = $debugHandler ? $debugHandler : 'error_log';
+        if ($debugHandler instanceof LoggerInterface) {
+            $this->logger = $debugHandler;
+            return;
+        }
+
+        $this->logger = new NullLogger();
+
+        if ($debugHandler === null) {
+            return;
+        }
+
+        trigger_error(
+            'Passing a callable as $debugHandler is deprecated and will be '
+            . 'removed in the next version; pass a Psr\\Log\\LoggerInterface '
+            . 'instead.',
+            E_USER_DEPRECATED,
+        );
+
+        $this->debugHandler = Closure::fromCallable($debugHandler);
     }
 
     /**
      * @param resource $handle
-     * @return void
      */
-    public function setHandle($handle)
+    public function setHandle($handle): void
     {
-        $this->handle_ = $handle;
-        stream_set_blocking($this->handle_, false);
+        $this->handle = $handle;
+        stream_set_blocking($this->handle, false);
     }
 
     /**
-     * Sets the send timeout.
+     * Sets the timeout used while establishing the TCP connection (the
+     * `timeout` argument passed to fsockopen()/pfsockopen()).
+     *
+     * When unset, the send timeout is used for the connect step too, for
+     * backwards compatibility with callers that only ever set
+     * setSendTimeout().
      *
      * @param int $timeout Timeout in milliseconds.
      */
-    public function setSendTimeout($timeout)
+    public function setConnectTimeout(int $timeout): void
     {
-        $this->sendTimeoutSec_ = floor($timeout / 1000);
-        $this->sendTimeoutUsec_ =
-            ($timeout - ($this->sendTimeoutSec_ * 1000)) * 1000;
+        $this->connectTimeoutSec = intdiv($timeout, 1000);
+        $this->connectTimeoutUsec =
+            ($timeout - ($this->connectTimeoutSec * 1000)) * 1000;
     }
 
     /**
-     * Sets the receive timeout.
-     *
      * @param int $timeout Timeout in milliseconds.
      */
-    public function setRecvTimeout($timeout)
+    public function setSendTimeout(int $timeout): void
     {
-        $this->recvTimeoutSec_ = floor($timeout / 1000);
-        $this->recvTimeoutUsec_ =
-            ($timeout - ($this->recvTimeoutSec_ * 1000)) * 1000;
+        $this->sendTimeoutSec = intdiv($timeout, 1000);
+        $this->sendTimeoutUsec =
+            ($timeout - ($this->sendTimeoutSec * 1000)) * 1000;
+        $this->sendTimeoutCustomized = true;
     }
 
     /**
-     * Sets debugging output on or off
-     *
-     * @param bool $debug
+     * @param int $timeout Timeout in milliseconds.
      */
-    public function setDebug($debug)
+    public function setRecvTimeout(int $timeout): void
     {
-        $this->debug_ = $debug;
+        $this->recvTimeoutSec = intdiv($timeout, 1000);
+        $this->recvTimeoutUsec =
+            ($timeout - ($this->recvTimeoutSec * 1000)) * 1000;
     }
 
     /**
-     * Get the host that this socket is connected to
+     * Enables or disables emission via the legacy callable $debugHandler.
+     * Has no effect when a Psr\Log\LoggerInterface is in use — configure
+     * the logger's level filter instead.
      *
-     * @return string host
+     * @deprecated The full LoggerInterface migration is planned for the
+     *             next version, at which point this gate becomes
+     *             redundant and will be removed. Pass a configured
+     *             Psr\Log\LoggerInterface to the constructor instead.
      */
-    public function getHost()
+    public function setDebug(bool $debug): void
     {
-        return $this->host_;
+        trigger_error(
+            __METHOD__ . '() is deprecated; pass a Psr\\Log\\LoggerInterface '
+            . 'to the constructor and let the logger filter by level. This '
+            . 'method will be removed in the next version.',
+            E_USER_DEPRECATED,
+        );
+
+        $this->debug = $debug;
     }
 
     /**
-     * Get the remote port that this socket is connected to
+     * Dispatches a diagnostic message.
      *
-     * @return int port
+     * - Legacy callable $debugHandler: gated by setDebug() for BC.
+     * - User-supplied Psr\Log\LoggerInterface: always invoked; the logger
+     *   filters by level.
+     * - No handler supplied (default NullLogger): falls back to PHP's
+     *   error_log() when setDebug(true) is in effect, matching master.
      */
-    public function getPort()
+    protected function log(string $level, string $message): void
     {
-        return $this->port_;
+        if ($this->debugHandler !== null) {
+            if (!$this->debug) {
+                return;
+            }
+            ($this->debugHandler)($message);
+            return;
+        }
+
+        if (!($this->logger instanceof NullLogger)) {
+            $this->logger->log($level, $message);
+            return;
+        }
+
+        if ($this->debug) {
+            error_log($message);
+        }
     }
 
-    /**
-     * Tests whether this is open
-     *
-     * @return bool true if the socket is open
-     */
-    public function isOpen()
+    public function getHost(): string
     {
-        return is_resource($this->handle_);
+        return $this->host;
+    }
+
+    public function getPort(): int
+    {
+        return $this->port;
+    }
+
+    public function isOpen(): bool
+    {
+        return is_resource($this->handle);
     }
 
     /**
      * Connects the socket.
      */
-    public function open()
+    public function open(): void
     {
         if ($this->isOpen()) {
             throw new TTransportException('Socket already connected', TTransportException::ALREADY_OPEN);
         }
 
-        if (empty($this->host_)) {
+        if (empty($this->host)) {
             throw new TTransportException('Cannot open null host', TTransportException::NOT_OPEN);
         }
 
-        if ($this->port_ <= 0) {
+        if ($this->port <= 0 && strpos($this->host, 'unix://') !== 0) {
             throw new TTransportException('Cannot open without port', TTransportException::NOT_OPEN);
         }
 
-        if ($this->persist_) {
-            $this->handle_ = @pfsockopen(
-                $this->host_,
-                $this->port_,
+        if ($this->connectTimeoutSec !== null) {
+            $connectTimeout = $this->connectTimeoutSec + ($this->connectTimeoutUsec / 1000000);
+        } else {
+            if ($this->sendTimeoutCustomized) {
+                trigger_error(
+                    'TSocket::open() reusing setSendTimeout() for the connect '
+                    . 'step is deprecated and will be removed in the next '
+                    . 'version; call setConnectTimeout() explicitly.',
+                    E_USER_DEPRECATED,
+                );
+            }
+            $connectTimeout = $this->sendTimeoutSec + ($this->sendTimeoutUsec / 1000000);
+        }
+
+        if ($this->persist) {
+            $this->handle = @pfsockopen(
+                $this->host,
+                $this->port,
                 $errno,
                 $errstr,
-                $this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000)
+                $connectTimeout
             );
         } else {
-            $this->handle_ = @fsockopen(
-                $this->host_,
-                $this->port_,
+            $this->handle = @fsockopen(
+                $this->host,
+                $this->port,
                 $errno,
                 $errstr,
-                $this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000)
+                $connectTimeout
             );
         }
 
         // Connect failed?
-        if ($this->handle_ === false) {
+        if ($this->handle === false) {
             $error = 'TSocket: Could not connect to ' .
-                $this->host_ . ':' . $this->port_ . ' (' . $errstr . ' [' . $errno . '])';
-            if ($this->debug_) {
-                call_user_func($this->debugHandler_, $error);
-            }
+                $this->host . ':' . $this->port . ' (' . $errstr . ' [' . $errno . '])';
+            $this->log(LogLevel::ERROR, $error);
             throw new TException($error);
         }
 
-        if (function_exists('socket_import_stream') && function_exists('socket_set_option')) {
+        if (self::hasSocketsExtension()) {
             // warnings silenced due to bug https://bugs.php.net/bug.php?id=70939
-            $socket = socket_import_stream($this->handle_);
+            $socket = socket_import_stream($this->handle);
             if ($socket !== false) {
                 @socket_set_option($socket, SOL_TCP, TCP_NODELAY, 1);
             }
         }
     }
 
-    /**
-     * Closes the socket.
-     */
-    public function close()
+    private static function hasSocketsExtension(): bool
     {
-        @fclose($this->handle_);
-        $this->handle_ = null;
+        return self::$hasSocketsExtension ??=
+            function_exists('socket_import_stream') && function_exists('socket_set_option');
+    }
+
+    public function close(): void
+    {
+        @fclose($this->handle);
+        $this->handle = null;
     }
 
     /**
@@ -273,98 +361,88 @@ class TSocket extends TTransport
      *
      * This method will not wait for all the requested data, it will return as
      * soon as any data is received.
-     *
-     * @param int $len Maximum number of bytes to read.
-     * @return string Binary data
      */
-    public function read($len)
+    public function read(int $len): string
     {
         $null = null;
-        $read = array($this->handle_);
+        $read = [$this->handle];
         $readable = @stream_select(
             $read,
             $null,
             $null,
-            $this->recvTimeoutSec_,
-            $this->recvTimeoutUsec_
+            $this->recvTimeoutSec,
+            $this->recvTimeoutUsec
         );
 
         if ($readable > 0) {
-            $data = fread($this->handle_, $len);
+            $data = fread($this->handle, $len);
             if ($data === false) {
                 throw new TTransportException('TSocket: Could not read ' . $len . ' bytes from ' .
-                    $this->host_ . ':' . $this->port_);
-            } elseif ($data == '' && feof($this->handle_)) {
+                    $this->host . ':' . $this->port);
+            } elseif ($data == '' && feof($this->handle)) {
                 throw new TTransportException('TSocket read 0 bytes');
             }
 
             return $data;
         } elseif ($readable === 0) {
             throw new TTransportException('TSocket: timed out reading ' . $len . ' bytes from ' .
-                $this->host_ . ':' . $this->port_);
+                $this->host . ':' . $this->port);
         } else {
             throw new TTransportException('TSocket: Could not read ' . $len . ' bytes from ' .
-                $this->host_ . ':' . $this->port_);
+                $this->host . ':' . $this->port);
         }
     }
 
     /**
      * Write to the socket.
-     *
-     * @param string $buf The data to write
      */
-    public function write($buf)
+    public function write(string $buf): void
     {
         $null = null;
-        $write = array($this->handle_);
+        $write = [$this->handle];
 
         // keep writing until all the data has been written
-        while (TStringFuncFactory::create()->strlen($buf) > 0) {
+        while (strlen($buf) > 0) {
             // wait for stream to become available for writing
             $writable = @stream_select(
                 $null,
                 $write,
                 $null,
-                $this->sendTimeoutSec_,
-                $this->sendTimeoutUsec_
+                $this->sendTimeoutSec,
+                $this->sendTimeoutUsec
             );
             if ($writable > 0) {
                 // write buffer to stream
-                $written = fwrite($this->handle_, $buf);
-                $closed_socket = $written === 0 && feof($this->handle_);
-                if ($written === -1 || $written === false || $closed_socket) {
+                $written = fwrite($this->handle, $buf);
+                $closed_socket = $written === 0 && feof($this->handle);
+                if ($written === false || $closed_socket) {
                     throw new TTransportException(
-                        'TSocket: Could not write ' . TStringFuncFactory::create()->strlen($buf) . ' bytes ' .
-                        $this->host_ . ':' . $this->port_
+                        'TSocket: Could not write ' . strlen($buf) . ' bytes ' .
+                        $this->host . ':' . $this->port
                     );
                 }
                 // determine how much of the buffer is left to write
-                $buf = TStringFuncFactory::create()->substr($buf, $written);
+                $buf = substr($buf, $written);
             } elseif ($writable === 0) {
                 throw new TTransportException(
-                    'TSocket: timed out writing ' . TStringFuncFactory::create()->strlen($buf) . ' bytes from ' .
-                    $this->host_ . ':' . $this->port_
+                    'TSocket: timed out writing ' . strlen($buf) . ' bytes from ' .
+                    $this->host . ':' . $this->port
                 );
             } else {
                 throw new TTransportException(
-                    'TSocket: Could not write ' . TStringFuncFactory::create()->strlen($buf) . ' bytes ' .
-                    $this->host_ . ':' . $this->port_
+                    'TSocket: Could not write ' . strlen($buf) . ' bytes ' .
+                    $this->host . ':' . $this->port
                 );
             }
         }
     }
 
     /**
-     * Flush output to the socket.
-     *
      * Since read(), readAll() and write() operate on the sockets directly,
-     * this is a no-op
-     *
-     * If you wish to have flushable buffering behaviour, wrap this TSocket
-     * in a TBufferedTransport.
+     * this is a no-op. Wrap this TSocket in a TBufferedTransport if you
+     * need flushable buffering.
      */
-    public function flush()
+    public function flush(): void
     {
-        // no-op
     }
 }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,12 +21,11 @@
 require 'spec_helper'
 
 describe 'Thrift::HTTPClientTransport' do
-
   describe Thrift::HTTPClientTransport do
     before(:each) do
       @client = Thrift::HTTPClientTransport.new("http://my.domain.com/path/to/service?param=value")
     end
-    
+
     it "should provide a reasonable to_s" do
       @client.to_s == "http://my.domain.com/path/to/service?param=value"
     end
@@ -84,7 +84,7 @@ describe 'Thrift::HTTPClientTransport' do
         end
       end
 
-      @client.flush  rescue
+      @client.flush rescue
       expect(@client.instance_variable_get(:@outbuf)).to eq(Thrift::Bytes.empty_byte_buffer)
     end
 
@@ -105,7 +105,6 @@ describe 'Thrift::HTTPClientTransport' do
 
       expect { @client.flush }.to raise_error(Thrift::TransportException)
     end
-
   end
 
   describe 'ssl enabled' do
@@ -124,7 +123,7 @@ describe 'Thrift::HTTPClientTransport' do
           expect(http).to receive(:use_ssl=).with(true)
           expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
           expect(http).to receive(:post).with(@service_path, "test",
-              "Content-Type" => "application/x-thrift") do
+              {"Content-Type" => "application/x-thrift"}) do
             double("Net::HTTPOK").tap do |response|
               expect(response).to receive(:body).and_return "data"
               expect(response).to receive(:code).and_return "200"
@@ -146,7 +145,7 @@ describe 'Thrift::HTTPClientTransport' do
           expect(http).to receive(:use_ssl=).with(true)
           expect(http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_NONE)
           expect(http).to receive(:post).with(@service_path, "test",
-              "Content-Type" => "application/x-thrift") do
+              {"Content-Type" => "application/x-thrift"}) do
             double("Net::HTTPOK").tap do |response|
               expect(response).to receive(:body).and_return "data"
               expect(response).to receive(:code).and_return "200"

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -27,7 +28,7 @@ module Thrift
   module Struct
     def ==(other)
       return false unless other.is_a? self.class
-      self.class.const_get(:FIELDS).collect {|fid, data| data[:name] }.all? do |field|
+      self.class.const_get(:FIELDS).collect { |fid, data| data[:name] }.all? do |field|
         send(field) == other.send(field)
       end
     end

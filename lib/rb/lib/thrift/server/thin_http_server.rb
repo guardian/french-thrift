@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -32,7 +33,7 @@ module Thrift
     # * :ip
     # * :path
     # * :protocol_factory
-    def initialize(processor, options={})
+    def initialize(processor, options = {})
       port = options[:port] || 80
       ip = options[:ip] || "0.0.0.0"
       path = options[:path] || "/"
@@ -60,9 +61,9 @@ module Thrift
             run lambda { |env|
               request = Rack::Request.new(env)
               if RackApplication.valid_thrift_request?(request)
-                RackApplication.successful_request(request, processor, protocol_factory)
+                RackApplication.successful_request(request, processor, protocol_factory).finish
               else
-                RackApplication.failed_request
+                RackApplication.failed_request.finish
               end
             }
           end

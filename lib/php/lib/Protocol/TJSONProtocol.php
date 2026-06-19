@@ -21,61 +21,73 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol;
 
 use Thrift\Exception\TException;
-use Thrift\Type\TType;
 use Thrift\Exception\TProtocolException;
 use Thrift\Protocol\JSON\BaseContext;
+use Thrift\Protocol\JSON\ListContext;
 use Thrift\Protocol\JSON\LookaheadReader;
 use Thrift\Protocol\JSON\PairContext;
-use Thrift\Protocol\JSON\ListContext;
+use Thrift\Transport\TTransport;
+use Thrift\Type\TType;
 
 /**
  * JSON implementation of thrift protocol, ported from Java.
  */
 class TJSONProtocol extends TProtocol
 {
-    const COMMA = ',';
-    const COLON = ':';
-    const LBRACE = '{';
-    const RBRACE = '}';
-    const LBRACKET = '[';
-    const RBRACKET = ']';
-    const QUOTE = '"';
-    const BACKSLASH = '\\';
-    const ZERO = '0';
-    const ESCSEQ = '\\';
-    const DOUBLEESC = '__DOUBLE_ESCAPE_SEQUENCE__';
+    public const COMMA = ',';
+    public const COLON = ':';
+    public const LBRACE = '{';
+    public const RBRACE = '}';
+    public const LBRACKET = '[';
+    public const RBRACKET = ']';
+    public const QUOTE = '"';
+    public const BACKSLASH = '\\';
+    public const ZERO = '0';
+    public const ESCSEQ = '\\';
+    public const DOUBLEESC = '__DOUBLE_ESCAPE_SEQUENCE__';
 
-    const VERSION = 1;
+    public const VERSION = 1;
 
-    public static $JSON_CHAR_TABLE = array(
+    /** @var array<int, int|string> */
+    public static array $JSON_CHAR_TABLE = [
         /*  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F */
         0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0, // 0
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1
         1, 1, '"', 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 2
-    );
+    ];
 
-    public static $ESCAPE_CHARS = array('"', '\\', '/', "b", "f", "n", "r", "t");
+    /** @var list<string> */
+    public static array $ESCAPE_CHARS = ['"', '\\', '/', "b", "f", "n", "r", "t"];
 
-    public static $ESCAPE_CHAR_VALS = array(
+    /** @var list<string> */
+    public static array $ESCAPE_CHAR_VALS = [
         '"', '\\', '/', "\x08", "\f", "\n", "\r", "\t",
-    );
+    ];
 
-    const NAME_BOOL = "tf";
-    const NAME_BYTE = "i8";
-    const NAME_I16 = "i16";
-    const NAME_I32 = "i32";
-    const NAME_I64 = "i64";
-    const NAME_DOUBLE = "dbl";
-    const NAME_STRUCT = "rec";
-    const NAME_STRING = "str";
-    const NAME_MAP = "map";
-    const NAME_LIST = "lst";
-    const NAME_SET = "set";
+    public const NAME_BOOL = "tf";
+    public const NAME_BYTE = "i8";
+    public const NAME_I16 = "i16";
+    public const NAME_I32 = "i32";
+    public const NAME_I64 = "i64";
+    public const NAME_DOUBLE = "dbl";
+    public const NAME_STRUCT = "rec";
+    public const NAME_STRING = "str";
+    public const NAME_MAP = "map";
+    public const NAME_LIST = "lst";
+    public const NAME_SET = "set";
+    public const NAME_UUID = "uid";
 
-    private function getTypeNameForTypeID($typeID)
+    /** Quoted tokens used to round-trip non-finite doubles through the JSON protocol. */
+    public const TOKEN_NAN = "NaN";
+    public const TOKEN_POS_INFINITY = "Infinity";
+    public const TOKEN_NEG_INFINITY = "-Infinity";
+
+    private function getTypeNameForTypeID(int $typeID): string
     {
         switch ($typeID) {
             case TType::BOOL:
@@ -100,12 +112,14 @@ class TJSONProtocol extends TProtocol
                 return self::NAME_SET;
             case TType::LST:
                 return self::NAME_LIST;
+            case TType::UUID:
+                return self::NAME_UUID;
             default:
                 throw new TProtocolException("Unrecognized type", TProtocolException::UNKNOWN);
         }
     }
 
-    private function getTypeIDForTypeName($name)
+    private function getTypeIDForTypeName(string $name): int
     {
         $result = TType::STOP;
 
@@ -149,6 +163,9 @@ class TJSONProtocol extends TProtocol
                 case 't':
                     $result = TType::BOOL;
                     break;
+                case 'u':
+                    $result = TType::UUID;
+                    break;
             }
         }
         if ($result == TType::STOP) {
@@ -158,130 +175,140 @@ class TJSONProtocol extends TProtocol
         return $result;
     }
 
-    public $contextStack_ = array();
-    public $context_;
-    public $reader_;
+    /** @var list<BaseContext> */
+    private array $contextStack = [];
+    private BaseContext $context;
+    private LookaheadReader $reader;
 
-    private function pushContext($c)
+    private function pushContext(BaseContext $c): void
     {
-        array_push($this->contextStack_, $this->context_);
-        $this->context_ = $c;
+        array_push($this->contextStack, $this->context);
+        $this->context = $c;
     }
 
-    private function popContext()
+    private function popContext(): void
     {
-        $this->context_ = array_pop($this->contextStack_);
+        $this->context = array_pop($this->contextStack) ?? new BaseContext();
     }
 
-    public function __construct($trans)
+    public function __construct(TTransport $trans)
     {
         parent::__construct($trans);
-        $this->context_ = new BaseContext();
-        $this->reader_ = new LookaheadReader($this);
+        $this->context = new BaseContext();
+        $this->reader = new LookaheadReader($this);
     }
 
-    public function reset()
+    public function reset(): void
     {
-        $this->contextStack_ = array();
-        $this->context_ = new BaseContext();
-        $this->reader_ = new LookaheadReader($this);
+        $this->contextStack = [];
+        $this->context = new BaseContext();
+        $this->reader = new LookaheadReader($this);
     }
 
-    public function readJSONSyntaxChar($b)
+    public function readJSONSyntaxChar(string $b): void
     {
-        $ch = $this->reader_->read();
+        $ch = $this->reader->read();
 
         if (substr($ch, 0, 1) != $b) {
             throw new TProtocolException("Unexpected character: " . $ch, TProtocolException::INVALID_DATA);
         }
     }
 
-    private function writeJSONString($b)
+    private function writeJSONString(mixed $b): void
     {
-        $this->context_->write();
+        $this->context->write();
 
-        if (is_numeric($b) && $this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
+        if (is_numeric($b) && $this->context->escapeNum()) {
+            $this->trans->write(self::QUOTE . $b . self::QUOTE);
+            return;
         }
 
-        $this->trans_->write(json_encode($b, JSON_UNESCAPED_UNICODE));
+        $this->trans->write(json_encode($b, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
 
-        if (is_numeric($b) && $this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
+    private function writeJSONInteger(int $num): void
+    {
+        $this->context->write();
+
+        if ($this->context->escapeNum()) {
+            $this->trans->write(self::QUOTE);
+        }
+
+        $this->trans->write((string) $num);
+
+        if ($this->context->escapeNum()) {
+            $this->trans->write(self::QUOTE);
         }
     }
 
-    private function writeJSONInteger($num)
+    private function writeJSONDouble(float $num): void
     {
-        $this->context_->write();
+        $this->context->write();
 
-        if ($this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
+        if (is_nan($num)) {
+            $this->trans->write(self::QUOTE . self::TOKEN_NAN . self::QUOTE);
+            return;
         }
 
-        $this->trans_->write($num);
+        if (is_infinite($num)) {
+            $token = $num > 0 ? self::TOKEN_POS_INFINITY : self::TOKEN_NEG_INFINITY;
+            $this->trans->write(self::QUOTE . $token . self::QUOTE);
+            return;
+        }
 
-        if ($this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
+        if ($this->context->escapeNum()) {
+            $this->trans->write(self::QUOTE);
+        }
+
+        $this->trans->write(json_encode($num));
+
+        if ($this->context->escapeNum()) {
+            $this->trans->write(self::QUOTE);
         }
     }
 
-    private function writeJSONDouble($num)
+    private function writeJSONObjectStart(): void
     {
-        $this->context_->write();
-
-        if ($this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
-        }
-
-        #TODO add compatibility with NAN and INF
-        $this->trans_->write(json_encode($num));
-
-        if ($this->context_->escapeNum()) {
-            $this->trans_->write(self::QUOTE);
-        }
-    }
-
-    private function writeJSONObjectStart()
-    {
-        $this->context_->write();
-        $this->trans_->write(self::LBRACE);
+        $this->context->write();
+        $this->trans->write(self::LBRACE);
         $this->pushContext(new PairContext($this));
     }
 
-    private function writeJSONObjectEnd()
+    private function writeJSONObjectEnd(): void
     {
         $this->popContext();
-        $this->trans_->write(self::RBRACE);
+        $this->trans->write(self::RBRACE);
     }
 
-    private function writeJSONArrayStart()
+    private function writeJSONArrayStart(): void
     {
-        $this->context_->write();
-        $this->trans_->write(self::LBRACKET);
+        $this->context->write();
+        $this->trans->write(self::LBRACKET);
         $this->pushContext(new ListContext($this));
     }
 
-    private function writeJSONArrayEnd()
+    private function writeJSONArrayEnd(): void
     {
         $this->popContext();
-        $this->trans_->write(self::RBRACKET);
+        $this->trans->write(self::RBRACKET);
     }
 
-    private function readJSONString($skipContext)
+    private function readJSONString(bool $skipContext): mixed
     {
         if (!$skipContext) {
-            $this->context_->read();
+            $this->context->read();
         }
 
         $jsonString = '';
         $lastChar = null;
         while (true) {
-            $ch = $this->reader_->read();
+            $ch = $this->reader->read();
             $jsonString .= $ch;
-            if ($ch == self::QUOTE &&
+            if (
+                $ch == self::QUOTE &&
                 $lastChar !== null &&
-                $lastChar !== self::ESCSEQ) {
+                $lastChar !== self::ESCSEQ
+            ) {
                 break;
             }
             if ($ch == self::ESCSEQ && $lastChar == self::ESCSEQ) {
@@ -294,7 +321,7 @@ class TJSONProtocol extends TProtocol
         return json_decode($jsonString);
     }
 
-    private function isJSONNumeric($b)
+    private function isJSONNumeric(string $b): bool
     {
         switch ($b) {
             case '+':
@@ -318,34 +345,34 @@ class TJSONProtocol extends TProtocol
         return false;
     }
 
-    private function readJSONNumericChars()
+    private function readJSONNumericChars(): string
     {
-        $strbld = array();
+        $strbld = [];
 
         while (true) {
-            $ch = $this->reader_->peek();
+            $ch = $this->reader->peek();
 
             if (!$this->isJSONNumeric($ch)) {
                 break;
             }
 
-            $strbld[] = $this->reader_->read();
+            $strbld[] = $this->reader->read();
         }
 
         return implode("", $strbld);
     }
 
-    private function readJSONInteger()
+    private function readJSONInteger(): int
     {
-        $this->context_->read();
+        $this->context->read();
 
-        if ($this->context_->escapeNum()) {
+        if ($this->context->escapeNum()) {
             $this->readJSONSyntaxChar(self::QUOTE);
         }
 
         $str = $this->readJSONNumericChars();
 
-        if ($this->context_->escapeNum()) {
+        if ($this->context->escapeNum()) {
             $this->readJSONSyntaxChar(self::QUOTE);
         }
 
@@ -362,17 +389,17 @@ class TJSONProtocol extends TProtocol
      * separate function?  So we don't have to force the rest of the
      * use cases through the extra conditional.
      */
-    private function readJSONIntegerAsString()
+    private function readJSONIntegerAsString(): string
     {
-        $this->context_->read();
+        $this->context->read();
 
-        if ($this->context_->escapeNum()) {
+        if ($this->context->escapeNum()) {
             $this->readJSONSyntaxChar(self::QUOTE);
         }
 
         $str = $this->readJSONNumericChars();
 
-        if ($this->context_->escapeNum()) {
+        if ($this->context->escapeNum()) {
             $this->readJSONSyntaxChar(self::QUOTE);
         }
 
@@ -383,18 +410,20 @@ class TJSONProtocol extends TProtocol
         return $str;
     }
 
-    private function readJSONDouble()
+    private function readJSONDouble(): float
     {
-        $this->context_->read();
+        $this->context->read();
 
-        if (substr($this->reader_->peek(), 0, 1) == self::QUOTE) {
+        if (substr($this->reader->peek(), 0, 1) == self::QUOTE) {
             $arr = $this->readJSONString(true);
 
-            if ($arr == "NaN") {
+            if ($arr === self::TOKEN_NAN) {
                 return NAN;
-            } elseif ($arr == "Infinity") {
+            } elseif ($arr === self::TOKEN_POS_INFINITY) {
                 return INF;
-            } elseif (!$this->context_->escapeNum()) {
+            } elseif ($arr === self::TOKEN_NEG_INFINITY) {
+                return -INF;
+            } elseif (!$this->context->escapeNum()) {
                 throw new TProtocolException(
                     "Numeric data unexpectedly quoted " . $arr,
                     TProtocolException::INVALID_DATA
@@ -403,7 +432,7 @@ class TJSONProtocol extends TProtocol
 
             return floatval($arr);
         } else {
-            if ($this->context_->escapeNum()) {
+            if ($this->context->escapeNum()) {
                 $this->readJSONSyntaxChar(self::QUOTE);
             }
 
@@ -411,177 +440,210 @@ class TJSONProtocol extends TProtocol
         }
     }
 
-    private function readJSONObjectStart()
+    private function readJSONObjectStart(): void
     {
-        $this->context_->read();
+        $this->context->read();
         $this->readJSONSyntaxChar(self::LBRACE);
         $this->pushContext(new PairContext($this));
     }
 
-    private function readJSONObjectEnd()
+    private function readJSONObjectEnd(): void
     {
         $this->readJSONSyntaxChar(self::RBRACE);
         $this->popContext();
     }
 
-    private function readJSONArrayStart()
+    private function readJSONArrayStart(): void
     {
-        $this->context_->read();
+        $this->context->read();
         $this->readJSONSyntaxChar(self::LBRACKET);
         $this->pushContext(new ListContext($this));
     }
 
-    private function readJSONArrayEnd()
+    private function readJSONArrayEnd(): void
     {
         $this->readJSONSyntaxChar(self::RBRACKET);
         $this->popContext();
     }
 
     /**
-     * Writes the message header
-     *
-     * @param string $name Function name
-     * @param int $type message type TMessageType::CALL or TMessageType::REPLY
-     * @param int $seqid The sequence id of this message
+     * Note on return values:
+     * TJSONProtocol does not track precise byte counts for read/write
+     * operations; it instead matches the historical contract that
+     * generated callers accumulate via `$xfer += $protocol->readX(...)`.
+     * Methods that previously returned `true` (cast to 1 in accumulation)
+     * keep returning `1`; methods that previously returned nothing or
+     * `0` keep returning `0`. Recomputing actual byte counts would
+     * require threading through the writeJSON* helpers and is out of
+     * scope for the typing pass.
      */
-    public function writeMessageBegin($name, $type, $seqid)
+    public function writeMessageBegin(string $name, int $type, int $seqid): int
     {
         $this->writeJSONArrayStart();
         $this->writeJSONInteger(self::VERSION);
         $this->writeJSONString($name);
         $this->writeJSONInteger($type);
         $this->writeJSONInteger($seqid);
+
+        return 0;
     }
 
-    /**
-     * Close the message
-     */
-    public function writeMessageEnd()
+    public function writeMessageEnd(): int
     {
         $this->writeJSONArrayEnd();
+
+        return 0;
     }
 
     /**
-     * Writes a struct header.
-     *
-     * @param  string $name Struct name
      * @throws TException on write error
-     * @return int        How many bytes written
      */
-    public function writeStructBegin($name)
+    public function writeStructBegin(string $name): int
     {
         $this->writeJSONObjectStart();
+
+        return 0;
     }
 
     /**
-     * Close a struct.
-     *
      * @throws TException on write error
-     * @return int        How many bytes written
      */
-    public function writeStructEnd()
+    public function writeStructEnd(): int
     {
         $this->writeJSONObjectEnd();
+
+        return 0;
     }
 
-    public function writeFieldBegin($fieldName, $fieldType, $fieldId)
+    public function writeFieldBegin(string $fieldName, int $fieldType, int $fieldId): int
     {
         $this->writeJSONInteger($fieldId);
         $this->writeJSONObjectStart();
         $this->writeJSONString($this->getTypeNameForTypeID($fieldType));
+
+        return 0;
     }
 
-    public function writeFieldEnd()
+    public function writeFieldEnd(): int
     {
         $this->writeJsonObjectEnd();
+
+        return 0;
     }
 
-    public function writeFieldStop()
+    public function writeFieldStop(): int
     {
+        return 0;
     }
 
-    public function writeMapBegin($keyType, $valType, $size)
+    public function writeMapBegin(int $keyType, int $valType, int $size): int
     {
         $this->writeJSONArrayStart();
         $this->writeJSONString($this->getTypeNameForTypeID($keyType));
         $this->writeJSONString($this->getTypeNameForTypeID($valType));
         $this->writeJSONInteger($size);
         $this->writeJSONObjectStart();
+
+        return 0;
     }
 
-    public function writeMapEnd()
+    public function writeMapEnd(): int
     {
         $this->writeJSONObjectEnd();
         $this->writeJSONArrayEnd();
+
+        return 0;
     }
 
-    public function writeListBegin($elemType, $size)
+    public function writeListBegin(int $elemType, int $size): int
     {
         $this->writeJSONArrayStart();
         $this->writeJSONString($this->getTypeNameForTypeID($elemType));
         $this->writeJSONInteger($size);
+
+        return 0;
     }
 
-    public function writeListEnd()
+    public function writeListEnd(): int
     {
         $this->writeJSONArrayEnd();
+
+        return 0;
     }
 
-    public function writeSetBegin($elemType, $size)
+    public function writeSetBegin(int $elemType, int $size): int
     {
         $this->writeJSONArrayStart();
         $this->writeJSONString($this->getTypeNameForTypeID($elemType));
         $this->writeJSONInteger($size);
+
+        return 0;
     }
 
-    public function writeSetEnd()
+    public function writeSetEnd(): int
     {
         $this->writeJSONArrayEnd();
+
+        return 0;
     }
 
-    public function writeBool($bool)
+    public function writeBool(bool $bool): int
     {
         $this->writeJSONInteger($bool ? 1 : 0);
+
+        return 0;
     }
 
-    public function writeByte($byte)
+    public function writeByte(int $byte): int
     {
         $this->writeJSONInteger($byte);
+
+        return 0;
     }
 
-    public function writeI16($i16)
+    public function writeI16(int $i16): int
     {
         $this->writeJSONInteger($i16);
+
+        return 0;
     }
 
-    public function writeI32($i32)
+    public function writeI32(int $i32): int
     {
         $this->writeJSONInteger($i32);
+
+        return 0;
     }
 
-    public function writeI64($i64)
+    public function writeI64(int $i64): int
     {
         $this->writeJSONInteger($i64);
+
+        return 0;
     }
 
-    public function writeDouble($dub)
+    public function writeDouble(float $dub): int
     {
         $this->writeJSONDouble($dub);
+
+        return 0;
     }
 
-    public function writeString($str)
+    public function writeString(string $str): int
     {
         $this->writeJSONString($str);
+
+        return 0;
     }
 
-    /**
-     * Reads the message header
-     *
-     * @param string $name Function name
-     * @param int $type message type TMessageType::CALL or TMessageType::REPLY
-     * @parem int $seqid The sequence id of this message
-     */
-    public function readMessageBegin(&$name, &$type, &$seqid)
+    public function writeUuid(string $uuid): int
+    {
+        $this->writeJSONString($uuid);
+
+        return 0;
+    }
+
+    public function readMessageBegin(?string &$name, ?int &$type, ?int &$seqid): int
     {
         $this->readJSONArrayStart();
 
@@ -593,32 +655,33 @@ class TJSONProtocol extends TProtocol
         $type = $this->readJSONInteger();
         $seqid = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    /**
-     * Read the close of message
-     */
-    public function readMessageEnd()
+    public function readMessageEnd(): int
     {
         $this->readJSONArrayEnd();
+
+        return 0;
     }
 
-    public function readStructBegin(&$name)
+    public function readStructBegin(?string &$name): int
     {
         $this->readJSONObjectStart();
 
         return 0;
     }
 
-    public function readStructEnd()
+    public function readStructEnd(): int
     {
         $this->readJSONObjectEnd();
+
+        return 0;
     }
 
-    public function readFieldBegin(&$name, &$fieldType, &$fieldId)
+    public function readFieldBegin(?string &$name, ?int &$fieldType, ?int &$fieldId): int
     {
-        $ch = $this->reader_->peek();
+        $ch = $this->reader->peek();
         $name = "";
 
         if (substr($ch, 0, 1) == self::RBRACE) {
@@ -628,85 +691,97 @@ class TJSONProtocol extends TProtocol
             $this->readJSONObjectStart();
             $fieldType = $this->getTypeIDForTypeName($this->readJSONString(false));
         }
+
+        return 0;
     }
 
-    public function readFieldEnd()
+    public function readFieldEnd(): int
     {
         $this->readJSONObjectEnd();
+
+        return 0;
     }
 
-    public function readMapBegin(&$keyType, &$valType, &$size)
+    public function readMapBegin(?int &$keyType, ?int &$valType, ?int &$size): int
     {
         $this->readJSONArrayStart();
         $keyType = $this->getTypeIDForTypeName($this->readJSONString(false));
         $valType = $this->getTypeIDForTypeName($this->readJSONString(false));
         $size = $this->readJSONInteger();
         $this->readJSONObjectStart();
+
+        return 0;
     }
 
-    public function readMapEnd()
+    public function readMapEnd(): int
     {
         $this->readJSONObjectEnd();
         $this->readJSONArrayEnd();
+
+        return 0;
     }
 
-    public function readListBegin(&$elemType, &$size)
+    public function readListBegin(?int &$elemType, ?int &$size): int
     {
         $this->readJSONArrayStart();
         $elemType = $this->getTypeIDForTypeName($this->readJSONString(false));
         $size = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    public function readListEnd()
+    public function readListEnd(): int
     {
         $this->readJSONArrayEnd();
+
+        return 0;
     }
 
-    public function readSetBegin(&$elemType, &$size)
+    public function readSetBegin(?int &$elemType, ?int &$size): int
     {
         $this->readJSONArrayStart();
         $elemType = $this->getTypeIDForTypeName($this->readJSONString(false));
         $size = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    public function readSetEnd()
+    public function readSetEnd(): int
     {
         $this->readJSONArrayEnd();
+
+        return 0;
     }
 
-    public function readBool(&$bool)
+    public function readBool(?bool &$bool): int
     {
         $bool = $this->readJSONInteger() == 0 ? false : true;
 
-        return true;
+        return 1;
     }
 
-    public function readByte(&$byte)
+    public function readByte(?int &$byte): int
     {
         $byte = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    public function readI16(&$i16)
+    public function readI16(?int &$i16): int
     {
         $i16 = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    public function readI32(&$i32)
+    public function readI32(?int &$i32): int
     {
         $i32 = $this->readJSONInteger();
 
-        return true;
+        return 1;
     }
 
-    public function readI64(&$i64)
+    public function readI64(?int &$i64): int
     {
         if (PHP_INT_SIZE === 4) {
             $i64 = $this->readJSONIntegerAsString();
@@ -714,20 +789,27 @@ class TJSONProtocol extends TProtocol
             $i64 = $this->readJSONInteger();
         }
 
-        return true;
+        return 1;
     }
 
-    public function readDouble(&$dub)
+    public function readDouble(?float &$dub): int
     {
         $dub = $this->readJSONDouble();
 
-        return true;
+        return 1;
     }
 
-    public function readString(&$str)
+    public function readString(?string &$str): int
     {
         $str = $this->readJSONString(false);
 
-        return true;
+        return 1;
+    }
+
+    public function readUuid(?string &$uuid): int
+    {
+        $uuid = $this->readJSONString(false);
+
+        return 1;
     }
 }

@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import org.apache.thrift.TException;
+import org.apache.thrift.partial.TFieldData;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
 
@@ -91,6 +92,10 @@ public class TCompactProtocol extends TProtocol {
   private static final byte TYPE_MASK = (byte) 0xE0; // 1110 0000
   private static final byte TYPE_BITS = 0x07; // 0000 0111
   private static final int TYPE_SHIFT_AMOUNT = 5;
+
+  // Maximum wire bytes for a varint-encoded integer: ceil(32/7)=5, ceil(64/7)=10.
+  private static final int MAX_VARINT32_BYTES = 5;
+  private static final int MAX_VARINT64_BYTES = 10;
 
   /** All of the on-wire type codes. */
   private static class Types {
@@ -343,8 +348,9 @@ public class TCompactProtocol extends TProtocol {
 
   @Override
   public void writeUuid(UUID uuid) throws TException {
-    fixedLongToBytes(uuid.getLeastSignificantBits(), temp, 0);
-    fixedLongToBytes(uuid.getMostSignificantBits(), temp, 8);
+    ByteBuffer bb = ByteBuffer.wrap(temp);
+    bb.putLong(uuid.getMostSignificantBits());
+    bb.putLong(uuid.getLeastSignificantBits());
     trans_.write(temp, 0, 16);
   }
 
@@ -536,29 +542,7 @@ public class TCompactProtocol extends TProtocol {
       return TSTOP;
     }
 
-    short fieldId;
-
-    // mask off the 4 MSB of the type header. it could contain a field id delta.
-    short modifier = (short) ((type & 0xf0) >> 4);
-    if (modifier == 0) {
-      // not a delta. look ahead for the zigzag varint field id.
-      fieldId = readI16();
-    } else {
-      // has a delta. add the delta to the last read field id.
-      fieldId = (short) (lastFieldId_ + modifier);
-    }
-
-    TField field = new TField("", getTType((byte) (type & 0x0f)), fieldId);
-
-    // if this happens to be a boolean field, the value is encoded in the type
-    if (isBoolType(type)) {
-      // save the boolean value in a special instance variable.
-      boolValue_ = (byte) (type & 0x0f) == Types.BOOLEAN_TRUE ? Boolean.TRUE : Boolean.FALSE;
-    }
-
-    // push the new field onto the field stack so we can keep the deltas going.
-    lastFieldId_ = field.id;
-    return field;
+    return new TField("", getTType((byte) (type & 0x0f)), readFieldId(type));
   }
 
   /**
@@ -663,9 +647,8 @@ public class TCompactProtocol extends TProtocol {
   @Override
   public UUID readUuid() throws TException {
     trans_.readAll(temp, 0, 16);
-    long mostSigBits = bytesToLong(temp, 8);
-    long leastSigBits = bytesToLong(temp, 0);
-    return new UUID(mostSigBits, leastSigBits);
+    ByteBuffer bb = ByteBuffer.wrap(temp, 0, 16);
+    return new UUID(bb.getLong(), bb.getLong());
   }
 
   /** Reads a byte[] (via readBinary), and then UTF-8 decodes it. */
@@ -771,7 +754,7 @@ public class TCompactProtocol extends TProtocol {
   private int readVarint32() throws TException {
     int result = 0;
     int shift = 0;
-    if (trans_.getBytesRemainingInBuffer() >= 5) {
+    if (trans_.getBytesRemainingInBuffer() >= MAX_VARINT32_BYTES) {
       byte[] buf = trans_.getBuffer();
       int pos = trans_.getBufferPosition();
       int off = 0;
@@ -781,15 +764,21 @@ public class TCompactProtocol extends TProtocol {
         if ((b & 0x80) != 0x80) break;
         shift += 7;
         off++;
+        if (off >= MAX_VARINT32_BYTES) {
+          throw new TProtocolException(
+              TProtocolException.INVALID_DATA, "Variable-length int over 5 bytes.");
+        }
       }
       trans_.consumeBuffer(off + 1);
     } else {
-      while (true) {
+      for (int rsize = 0; rsize < MAX_VARINT32_BYTES; rsize++) {
         byte b = readByte();
         result |= (b & 0x7f) << shift;
-        if ((b & 0x80) != 0x80) break;
+        if ((b & 0x80) != 0x80) return result;
         shift += 7;
       }
+      throw new TProtocolException(
+          TProtocolException.INVALID_DATA, "Variable-length int over 5 bytes.");
     }
     return result;
   }
@@ -801,7 +790,7 @@ public class TCompactProtocol extends TProtocol {
   private long readVarint64() throws TException {
     int shift = 0;
     long result = 0;
-    if (trans_.getBytesRemainingInBuffer() >= 10) {
+    if (trans_.getBytesRemainingInBuffer() >= MAX_VARINT64_BYTES) {
       byte[] buf = trans_.getBuffer();
       int pos = trans_.getBufferPosition();
       int off = 0;
@@ -811,15 +800,21 @@ public class TCompactProtocol extends TProtocol {
         if ((b & 0x80) != 0x80) break;
         shift += 7;
         off++;
+        if (off >= MAX_VARINT64_BYTES) {
+          throw new TProtocolException(
+              TProtocolException.INVALID_DATA, "Variable-length int over 10 bytes.");
+        }
       }
       trans_.consumeBuffer(off + 1);
     } else {
-      while (true) {
+      for (int rsize = 0; rsize < MAX_VARINT64_BYTES; rsize++) {
         byte b = readByte();
         result |= (long) (b & 0x7f) << shift;
-        if ((b & 0x80) != 0x80) break;
+        if ((b & 0x80) != 0x80) return result;
         shift += 7;
       }
+      throw new TProtocolException(
+          TProtocolException.INVALID_DATA, "Variable-length int over 10 bytes.");
     }
     return result;
   }
@@ -911,9 +906,9 @@ public class TCompactProtocol extends TProtocol {
   public int getMinSerializedSize(byte type) throws TTransportException {
     switch (type) {
       case 0:
-        return 0; // Stop
+        return 1; // Stop - T_STOP needs to count itself
       case 1:
-        return 0; // Void
+        return 1; // Void - T_VOID needs to count itself
       case 2:
         return 1; // Bool sizeof(byte)
       case 3:
@@ -929,7 +924,7 @@ public class TCompactProtocol extends TProtocol {
       case 11:
         return 1; // string length sizeof(byte)
       case 12:
-        return 0; // empty struct
+        return 1; // empty struct needs at least 1 byte for the T_STOP
       case 13:
         return 1; // element count Map sizeof(byte)
       case 14:
@@ -943,6 +938,43 @@ public class TCompactProtocol extends TProtocol {
 
   // -----------------------------------------------------------------
   // Additional methods to improve performance.
+
+  @Override
+  public int readFieldBeginData() throws TException {
+    byte type = readByte();
+
+    // if it's a stop, then we can return immediately, as the struct is over.
+    if (type == TType.STOP) {
+      return TFieldData.encode(type);
+    }
+
+    return TFieldData.encode(getTType((byte) (type & 0x0f)), readFieldId(type));
+  }
+
+  // Only makes sense to be called by readFieldBegin and readFieldBeginData
+  private short readFieldId(byte type) throws TException {
+    short fieldId;
+
+    // mask off the 4 MSB of the type header. it could contain a field id delta.
+    short modifier = (short) ((type & 0xf0) >> 4);
+    if (modifier == 0) {
+      // not a delta. look ahead for the zigzag varint field id.
+      fieldId = readI16();
+    } else {
+      // has a delta. add the delta to the last read field id.
+      fieldId = (short) (lastFieldId_ + modifier);
+    }
+
+    // if this happens to be a boolean field, the value is encoded in the type
+    if (isBoolType(type)) {
+      // save the boolean value in a special instance variable.
+      boolValue_ = (byte) (type & 0x0f) == Types.BOOLEAN_TRUE ? Boolean.TRUE : Boolean.FALSE;
+    }
+
+    // push the new field onto the field stack so we can keep the deltas going.
+    lastFieldId_ = fieldId;
+    return fieldId;
+  }
 
   @Override
   protected void skipBinary() throws TException {

@@ -1,0 +1,483 @@
+version: 2
+mergeable:
+  - when: pull_request.*
+    name: Add 'c_glib' label to PR if changeset includes changes to c_glib library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/c_glib/.*'
+          - must_include:
+              regex: 'test/c_glib/.*'
+          - must_include:
+              regex: 'tutorial/c_glib/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_c_glib_generator\..*'
+    pass:
+      - do: labels
+        labels: ['c_glib']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'c++' label to PR if changeset includes changes to C++ library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/cpp/.*'
+          - must_include:
+              regex: 'test/cpp/.*'
+          - must_include:
+              regex: 'tutorial/cpp/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_cpp_generator\..*'
+    pass:
+      - do: labels
+        labels: ['c++']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'dart' label to PR if changeset includes changes to Dart library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/dart/.*'
+          - must_include:
+              regex: 'test/dart/.*'
+          - must_include:
+              regex: 'tutorial/dart/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_dart_generator\..*'
+    pass:
+      - do: labels
+        labels: ['dart']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'd' label to PR if changeset includes changes to D library, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/d/.*'
+          - must_include:
+              regex: 'tutorial/d/.*'
+          - must_include:
+              regex: '^dub\.json$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_d_generator\..*'
+    pass:
+      - do: labels
+        labels: ['d']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'delphi' label to PR if changeset includes changes to Delphi library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/delphi/.*'
+          - must_include:
+              regex: 'test/delphi/.*'
+          - must_include:
+              regex: 'tutorial/delphi/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_delphi_generator\..*'
+    pass:
+      - do: labels
+        labels: ['delphi']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'erlang' label to PR if changeset includes changes to Erlang library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/erl/.*'
+          - must_include:
+              regex: 'test/erl/.*'
+          - must_include:
+              regex: 'tutorial/erl/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_erl_generator\..*'
+    pass:
+      - do: labels
+        labels: ['erlang']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'golang' label to PR if changeset includes changes to Go library, tests, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/go/.*'
+          - must_include:
+              regex: 'test/go/.*'
+          - must_include:
+              regex: 'tutorial/go/.*'
+          - must_include:
+              regex: '^go\.mod$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_go_generator\..*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/go_validator_generator\..*'
+    pass:
+      - do: labels
+        labels: ['golang']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'haxe' label to PR if changeset includes changes to Haxe library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/haxe/.*'
+          - must_include:
+              regex: 'test/haxe/.*'
+          - must_include:
+              regex: 'tutorial/haxe/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_haxe_generator\..*'
+    pass:
+      - do: labels
+        labels: ['haxe']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'java' label to PR if changeset includes changes to Java library, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/java/.*'
+          - must_include:
+              regex: 'lib/javame/.*'
+          - must_include:
+              regex: 'tutorial/java/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_java_generator\..*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_javame_generator\..*'
+    pass:
+      - do: labels
+        labels: ['java']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'javascript' label to PR if changeset includes changes to JavaScript library, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/js/.*'
+          - must_include:
+              regex: 'tutorial/js/.*'
+          - must_include:
+              regex: '^bower\.json$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_js_generator\..*'
+    pass:
+      - do: labels
+        labels: ['javascript']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'json' label to PR if changeset includes changes to the lib/json directory or JSON generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/json/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_json_generator\..*'
+    pass:
+      - do: labels
+        labels: ['json']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'kotlin' label to PR if changeset includes changes to the lib/kotlin directory or Kotlin generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/kotlin/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_kotlin_generator\..*'
+    pass:
+      - do: labels
+        labels: ['kotlin']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'lua' label to PR if changeset includes changes to Lua library, tests, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/lua/.*'
+          - must_include:
+              regex: 'test/lua/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_lua_generator\..*'
+    pass:
+      - do: labels
+        labels: ['lua']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'c#' label to PR if changeset includes changes to .NET library, tests, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/netstd/.*'
+          - must_include:
+              regex: 'test/netstd/.*'
+          - must_include:
+              regex: 'tutorial/netstd/.*'
+          - must_include:
+              regex: '^ApacheThrift\.nuspec$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_netstd_generator\..*'
+    pass:
+      - do: labels
+        labels: ['c#']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'nodejs' label to PR if changeset includes changes to Node.js library, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/nodejs/.*'
+          - must_include:
+              regex: 'tutorial/nodejs/.*'
+          - must_include:
+              regex: '^package\.json$'
+          - must_include:
+              regex: '^package-lock\.json$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_js_generator\..*'
+    pass:
+      - do: labels
+        labels: ['nodejs']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'typescript' label to PR if changeset includes changes to TypeScript libraries, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/nodets/.*'
+          - must_include:
+              regex: 'lib/ts/.*'
+          - must_include:
+              regex: '^package\.json$'
+          - must_include:
+              regex: '^package-lock\.json$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_js_generator\..*'
+    pass:
+      - do: labels
+        labels: ['typescript']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'ocaml' label to PR if changeset includes changes to OCaml library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/ocaml/.*'
+          - must_include:
+              regex: 'test/ocaml/.*'
+          - must_include:
+              regex: 'tutorial/ocaml/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_ocaml_generator\..*'
+    pass:
+      - do: labels
+        labels: ['ocaml']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'perl' label to PR if changeset includes changes to Perl library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/perl/.*'
+          - must_include:
+              regex: 'test/perl/.*'
+          - must_include:
+              regex: 'tutorial/perl/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_perl_generator\..*'
+    pass:
+      - do: labels
+        labels: ['perl']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'php' label to PR if changeset includes changes to PHP library, tests, tutorial, package, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/php/.*'
+          - must_include:
+              regex: 'test/php/.*'
+          - must_include:
+              regex: 'tutorial/php/.*'
+          - must_include:
+              regex: '^composer\.json$'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_php_generator\..*'
+    pass:
+      - do: labels
+        labels: ['php']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'python' label to PR if changeset includes changes to Python library, tests, tutorials, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/py/.*'
+          - must_include:
+              regex: 'test/py/.*'
+          - must_include:
+              regex: 'test/py.tornado/.*'
+          - must_include:
+              regex: 'test/py.twisted/.*'
+          - must_include:
+              regex: 'tutorial/py/.*'
+          - must_include:
+              regex: 'tutorial/py.tornado/.*'
+          - must_include:
+              regex: 'tutorial/py.twisted/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_py_generator\..*'
+    pass:
+      - do: labels
+        labels: ['python']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'ruby' label to PR if changeset includes changes to Ruby library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/rb/.*'
+          - must_include:
+              regex: 'test/rb/.*'
+          - must_include:
+              regex: 'tutorial/rb/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_rb_generator\..*'
+    pass:
+      - do: labels
+        labels: ['ruby']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'rust' label to PR if changeset includes changes to Rust library, tests, tutorial, or generator files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: 'lib/rs/.*'
+          - must_include:
+              regex: 'test/rs/.*'
+          - must_include:
+              regex: 'tutorial/rs/.*'
+          - must_include:
+              regex: 'compiler/cpp/src/thrift/generate/t_rs_generator\..*'
+    pass:
+      - do: labels
+        labels: ['rust']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'compiler' label to PR if changeset includes changes to the compiler/cpp directory
+    validate:
+      - do: changeset
+        must_include:
+          regex: 'compiler/cpp/.*'
+    pass:
+      - do: labels
+        labels: ['compiler']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'testsuite' label to PR if changeset includes changes to shared test schemas, fixtures, or harnesses
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: '^test/[^/]+\.thrift$'
+          - must_include:
+              regex: '^test/(Makefile|Makefile\.am|Makefile\.in|README\.md|index\.html|known_failures_Linux\.json|rebuild_known_failures\.sh|result\.js|results\.json|test\.py|tests\.json|valgrind\.suppress)$'
+          - must_include:
+              regex: '^test/(audit|crossrunner|features|keys|log|partial|threads|v0\.16)/.*'
+    pass:
+      - do: labels
+        labels: ['testsuite']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'build and general CI' label to PR if changeset includes changes to CMake, automake, or build system files
+    validate:
+      - do: changeset
+        or:
+          - must_include:
+              regex: '(^|.*/)CMakeLists\.txt$'
+          - must_include:
+              regex: '.*\.cmake$'
+          - must_include:
+              regex: '(^|.*/)Makefile\.am$'
+          - must_include:
+              regex: '(^|.*/)Makefile\.in$'
+          - must_include:
+              regex: '(^|.*/)configure\.ac$'
+          - must_include:
+              regex: '^bootstrap\.sh$'
+          - must_include:
+              regex: '^aclocal$'
+          - must_include:
+              regex: '^aclocal\.m4$'
+          - must_include:
+              regex: '^build/.*'
+          - must_include:
+              regex: '^build-docker/.*'
+          - must_include:
+              regex: '^debian/.*'
+          - must_include:
+              regex: '^appveyor\.yml$'
+          - must_include:
+              regex: '^sonar-project\.properties$'
+    pass:
+      - do: labels
+        labels: ['build and general CI']
+        mode: 'add'
+
+  - when: pull_request.*
+    name: Add 'github_actions' label to PR if changeset includes changes to the .github/workflows directory
+    validate:
+      - do: changeset
+        must_include:
+          regex: '.github/workflows/.*'
+    pass:
+      - do: labels
+        labels: ['github_actions']
+        mode: 'add'

@@ -44,10 +44,12 @@ cmake-*
 dub.selections.json
 libapache-thrift.a
 node_modules
+opsx-*.md
 compile
 test-driver
 erl_crash.dump
 project.lock.json
+SKILL.md
 
 .Dockerfile.sha512
 .sonar
@@ -57,6 +59,7 @@ project.lock.json
 .vscode
 .vs
 
+/.claude
 /aclocal/libtool.m4
 /aclocal/lt*.m4
 /autoscan.log
@@ -106,6 +109,7 @@ project.lock.json
 /contrib/fb303/py/fb303/__init__.py
 /contrib/fb303/py/fb303/constants.py
 /contrib/fb303/py/fb303/ttypes.py
+/contrib/thrift-maven-plugin/target/
 /depcomp
 /install-sh
 /lib/cl/backport-update.zip
@@ -211,7 +215,6 @@ project.lock.json
 /lib/delphi/**/*.local
 /lib/delphi/**/*.dcu
 /lib/delphi/**/*.2007
-/lib/delphi/**/codegen/*.bat
 /lib/erl/.eunit
 /lib/erl/.generated
 /lib/erl/.rebar/
@@ -255,14 +258,13 @@ project.lock.json
 /lib/perl/pm_to_blib
 /lib/py/build
 /lib/py/thrift.egg-info/
-/lib/rb/Gemfile.lock
 /lib/rb/debug_proto_test
 /lib/rb/.config
 /lib/rb/ext/conftest.dSYM/
 /lib/rb/ext/mkmf.log
 /lib/rb/ext/thrift_native.bundle
 /lib/rb/ext/thrift_native.so
-/lib/rb/test/
+/lib/rb/test/debug_proto/
 /lib/rb/thrift-*.gem
 /lib/php/src/ext/thrift_protocol/Makefile.*
 /lib/php/src/ext/thrift_protocol/build/
@@ -281,7 +283,7 @@ project.lock.json
 /lib/php/src/ext/thrift_protocol/run-tests.php
 /lib/php/src/ext/thrift_protocol/thrift_protocol.la
 /lib/php/src/ext/thrift_protocol/tmp-php.ini
-/lib/php/tests/Resources/packages/
+/lib/php/test/Resources/packages/
 /lib/php/test/test-log-junit.xml
 /lib/py/dist/
 /lib/erl/logs/
@@ -302,6 +304,7 @@ project.lock.json
 /lib/ocaml/*/*.mldylib
 /lib/ocaml/Makefile
 /lib/ocaml/OCamlMakefile
+/lib/rb/vendor/
 /lib/rs/target/
 /lib/rs/Cargo.lock
 /lib/rs/test/Cargo.lock
@@ -326,13 +329,13 @@ project.lock.json
 /lib/rs/test_recursive/bin/
 /lib/rs/*.iml
 /lib/rs/**/*.iml
-/lib/swift/.build
 /lib/ts/test/build/
 /lib/ts/test/gen-*
 /libtool
 /ltmain.sh
 /missing
 /node_modules/
+/openspec
 /vendor/
 /composer.lock
 /stamp-h1
@@ -374,7 +377,7 @@ project.lock.json
 /test/hs/TestServer
 /test/php/php_ext_dir/
 /test/py.twisted/_trial_temp/
-/test/rb/Gemfile.lock
+/test/rb/vendor/
 /test/netstd/**/bin
 /test/netstd/**/obj
 /test/netstd/**/launchSettings.json
@@ -392,7 +395,6 @@ project.lock.json
 /test/rs/target/
 /test/rs/*.iml
 /test/rs/**/*.iml
-/test/swift/CrossTests/.build
 /lib/cl/backport-update.zip
 /lib/cl/lib
 /tutorial/cl/quicklisp.lisp
@@ -455,3 +457,6 @@ compiler/cpp/tests/*.cmake
 compiler/cpp/tests/Testing/
 compiler/cpp/tests/bin/
 compiler/cpp/tests/*.a
+compiler/cpp/tests/build/
+compiler/cpp/build/
+/lib/php/coverage.xml

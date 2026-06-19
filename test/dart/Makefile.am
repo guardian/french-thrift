@@ -17,6 +17,9 @@
 # under the License.
 #
 
+# Dart build command
+DARTPUB = dart pub
+
 gen-dart/thrift_test/lib/thrift_test.dart: ../v0.16/ThriftTest.thrift
 	$(THRIFT) --gen dart ../v0.16/ThriftTest.thrift
 
@@ -31,6 +34,19 @@ stubs: gen-dart/thrift_test/lib/thrift_test.dart pub-get
 precross: stubs
 
 check: stubs
+
+# Recursion-depth regression test (THRIFT-6056). Kept out of the default
+# cross-test chain because it needs a null-safe Dart SDK (>= 2.12); run it
+# explicitly with: make recursion-test
+gen-dart/Recursive/lib/Recursive.dart: ../Recursive.thrift
+	$(THRIFT) --gen dart ../Recursive.thrift
+
+recursion-stubs: gen-dart/Recursive/lib/Recursive.dart
+	cd gen-dart/Recursive; ${DARTPUB} get
+	cd recursion_depth_test; ${DARTPUB} get
+
+recursion-test: recursion-stubs
+	cd recursion_depth_test; ${DART} test
 
 clean-local:
 	$(RM) -r gen-dart/ test_client/.pub
@@ -52,4 +68,5 @@ distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
 
 EXTRA_DIST = \
-	test_client
+	test_client \
+	recursion_depth_test

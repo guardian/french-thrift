@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,26 +7,34 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 module Thrift
   class BinaryProtocol < BaseProtocol
     VERSION_MASK = 0xffff0000
     VERSION_1 = 0x80010000
     TYPE_MASK = 0x000000ff
-    
+    BYTE_MIN = -2**7
+    BYTE_MAX = 2**7 - 1
+    I16_MIN = -2**15
+    I16_MAX = 2**15 - 1
+    I32_MIN = -2**31
+    I32_MAX = 2**31 - 1
+    I64_MIN = -2**63
+    I64_MAX = 2**63 - 1
+
     attr_reader :strict_read, :strict_write
 
-    def initialize(trans, strict_read=true, strict_write=true)
+    def initialize(trans, strict_read = true, strict_write = true)
       super(trans)
       @strict_read = strict_read
       @strict_write = strict_write
@@ -36,11 +45,10 @@ module Thrift
     end
 
     def write_message_begin(name, type, seqid)
-      # this is necessary because we added (needed) bounds checking to 
-      # write_i32, and 0x80010000 is too big for that.
       if strict_write
-        write_i16(VERSION_1 >> 16)
-        write_i16(type)
+        raise ::TypeError, 'integer argument expected' unless type.is_a?(Integer)
+        raise RangeError if type < BYTE_MIN || type > BYTE_MAX
+        trans.write([VERSION_1 | type].pack('N'))
         write_string(name)
         write_i32(seqid)
       else
@@ -64,17 +72,17 @@ module Thrift
     def write_map_begin(ktype, vtype, size)
       write_byte(ktype)
       write_byte(vtype)
-      write_i32(size)
+      write_i32_size(size)
     end
 
     def write_list_begin(etype, size)
       write_byte(etype)
-      write_i32(size)
+      write_i32_size(size)
     end
 
     def write_set_begin(etype, size)
       write_byte(etype)
-      write_i32(size)
+      write_i32_size(size)
     end
 
     def write_bool(bool)
@@ -82,38 +90,55 @@ module Thrift
     end
 
     def write_byte(byte)
-      raise RangeError if byte < -2**31 || byte >= 2**32
+      raise 'nil argument not allowed!' if byte.nil?
+      raise ::TypeError, 'integer argument expected' unless byte.is_a?(Integer)
+      raise RangeError if byte < BYTE_MIN || byte > BYTE_MAX
       trans.write([byte].pack('c'))
     end
 
     def write_i16(i16)
+      raise 'nil argument not allowed!' if i16.nil?
+      raise ::TypeError, 'integer argument expected' unless i16.is_a?(Integer)
+      raise RangeError if i16 < I16_MIN || i16 > I16_MAX
       trans.write([i16].pack('n'))
     end
 
     def write_i32(i32)
-      raise RangeError if i32 < -2**31 || i32 >= 2**31
+      raise 'nil argument not allowed!' if i32.nil?
+      raise ::TypeError, 'integer argument expected' unless i32.is_a?(Integer)
+      raise RangeError if i32 < I32_MIN || i32 > I32_MAX
       trans.write([i32].pack('N'))
     end
 
     def write_i64(i64)
-      raise RangeError if i64 < -2**63 || i64 >= 2**64
+      raise 'nil argument not allowed!' if i64.nil?
+      raise ::TypeError, 'integer argument expected' unless i64.is_a?(Integer)
+      raise RangeError if i64 < I64_MIN || i64 > I64_MAX
       hi = i64 >> 32
       lo = i64 & 0xffffffff
       trans.write([hi, lo].pack('N2'))
     end
 
     def write_double(dub)
+      raise 'nil argument not allowed!' if dub.nil?
       trans.write([dub].pack('G'))
     end
 
     def write_string(str)
+      raise 'nil argument not allowed!' if str.nil?
       buf = Bytes.convert_to_utf8_byte_buffer(str)
       write_binary(buf)
     end
 
     def write_binary(buf)
-      write_i32(buf.bytesize)
+      raise 'nil argument not allowed!' if buf.nil?
+      write_i32_size(buf.bytesize)
       trans.write(buf)
+    end
+
+    def write_uuid(uuid)
+      UUID.validate_uuid!(uuid)
+      trans.write(UUID.uuid_bytes(uuid))
     end
 
     def read_message_begin
@@ -153,18 +178,21 @@ module Thrift
       ktype = read_byte
       vtype = read_byte
       size = read_i32
+      raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
       [ktype, vtype, size]
     end
 
     def read_list_begin
       etype = read_byte
       size = read_i32
+      raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
       [etype, size]
     end
 
     def read_set_begin
       etype = read_byte
       size = read_i32
+      raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
       [etype, size]
     end
 
@@ -224,11 +252,28 @@ module Thrift
 
     def read_binary
       size = read_i32
-      trans.read_all(size)
+      if size >= 0
+        trans.read_all(size)
+      else
+        raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size')
+      end
     end
-    
+
+    def read_uuid
+      UUID.uuid_from_bytes(trans.read_all(16))
+    end
+
     def to_s
       "binary(#{super.to_s})"
+    end
+
+    private
+
+    def write_i32_size(size)
+      raise 'nil argument not allowed!' if size.nil?
+      raise ::TypeError, 'integer argument expected' unless size.is_a?(Integer)
+      raise RangeError if size < 0 || size > I32_MAX
+      trans.write([size].pack('N'))
     end
   end
 
@@ -236,7 +281,7 @@ module Thrift
     def get_protocol(trans)
       return Thrift::BinaryProtocol.new(trans)
     end
-    
+
     def to_s
       "binary"
     end

@@ -21,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Protocol\TBinaryProtocol;
@@ -31,31 +33,14 @@ use Thrift\Transport\TTransport;
  */
 class TBinaryProtocolFactory implements TProtocolFactory
 {
-    /**
-     * @var bool
-     */
-    private $strictRead_ = false;
-    /**
-     * @var bool
-     */
-    private $strictWrite_ = false;
-
-    /**
-     * @param bool $strictRead
-     * @param bool $strictWrite
-     */
-    public function __construct($strictRead = false, $strictWrite = false)
-    {
-        $this->strictRead_ = $strictRead;
-        $this->strictWrite_ = $strictWrite;
+    public function __construct(
+        private bool $strictRead = false,
+        private bool $strictWrite = false,
+    ) {
     }
 
-    /**
-     * @param TTransport $trans
-     * @return TBinaryProtocol
-     */
-    public function getProtocol($trans)
+    public function getProtocol(TTransport $trans): TBinaryProtocol
     {
-        return new TBinaryProtocol($trans, $this->strictRead_, $this->strictWrite_);
+        return new TBinaryProtocol($trans, $this->strictRead, $this->strictWrite);
     }
 }

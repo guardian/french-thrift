@@ -233,8 +233,8 @@ fn make_thrift_calls(
 
     info!("testUuid");
     verify_expected_result(
-        thrift_test_client.test_uuid(uuid::uuid!("00010203-0405-0607-0809-0a0b0c0d0e0f")),
-        uuid::uuid!("00010203-0405-0607-0809-0a0b0c0d0e0f"),
+        thrift_test_client.test_uuid(uuid::uuid!("00112233-4455-6677-8899-aabbccddeeff")),
+        uuid::uuid!("00112233-4455-6677-8899-aabbccddeeff"),
     )?;
 
     info!("testBool");
@@ -252,10 +252,7 @@ fn make_thrift_calls(
     info!("testi64");
     // try!(verify_expected_result(thrift_test_client.test_i64(-8651829879438294565),
     // -8651829879438294565));
-    verify_expected_result(
-        thrift_test_client.test_i64(i64::min_value()),
-        i64::min_value(),
-    )?;
+    verify_expected_result(thrift_test_client.test_i64(i64::MIN), i64::MIN)?;
 
     info!("testDouble");
     verify_expected_result(

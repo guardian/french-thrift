@@ -83,7 +83,7 @@ inline void TZlibTransport::checkZlibRvNothrow(int status, const char* message) 
   if (status != Z_OK) {
     string output = "TZlibTransport: zlib failure in destructor: "
                     + TZlibTransportException::errorMessage(status, message);
-    GlobalOutput(output.c_str());
+    TOutput::instance()(output.c_str());
   }
 }
 
@@ -149,6 +149,7 @@ uint32_t TZlibTransport::read(uint8_t* buf, uint32_t len) {
     need -= give;
     buf += give;
     urpos_ += give;
+    countConsumedMessageBytes(give);
 
     // If they were satisfied, we are done.
     if (need == 0) {

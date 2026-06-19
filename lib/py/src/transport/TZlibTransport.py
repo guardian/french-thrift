@@ -22,13 +22,14 @@ class, using the python standard library zlib module to implement
 data compression.
 """
 
-from __future__ import division
 import zlib
-from .TTransport import TTransportBase, CReadableTransport
-from ..compat import BufferIO
+from io import BytesIO
+
+from .TTransport import TTransportBase, CReadableTransport, TTransportException
+from .THeaderTransport import DEFAULT_MAX_FRAME_SIZE
 
 
-class TZlibTransportFactory(object):
+class TZlibTransportFactory:
     """Factory transport that builds zlib compressed transports.
 
     This factory caches the last single client/transport that it was passed
@@ -47,7 +48,8 @@ class TZlibTransportFactory(object):
     _last_trans = None
     _last_z = None
 
-    def getTransport(self, trans, compresslevel=9):
+    def getTransport(self, trans, compresslevel=9,
+                     max_decompressed_size=DEFAULT_MAX_FRAME_SIZE):
         """Wrap a transport, trans, with the TZlibTransport
         compressed transport class, returning a new
         transport to the caller.
@@ -61,7 +63,7 @@ class TZlibTransportFactory(object):
         """
         if trans == self._last_trans:
             return self._last_z
-        ztrans = TZlibTransport(trans, compresslevel)
+        ztrans = TZlibTransport(trans, compresslevel, max_decompressed_size)
         self._last_trans = trans
         self._last_z = ztrans
         return ztrans
@@ -76,7 +78,8 @@ class TZlibTransport(TTransportBase, CReadableTransport):
     # the TBinaryProtocolAccelerated class.
     DEFAULT_BUFFSIZE = 4096
 
-    def __init__(self, trans, compresslevel=9):
+    def __init__(self, trans, compresslevel=9,
+                 max_decompressed_size=DEFAULT_MAX_FRAME_SIZE):
         """Create a new TZlibTransport, wrapping C{trans}, another
         TTransport derived object.
 
@@ -85,11 +88,16 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         @param compresslevel: The zlib compression level, ranging
         from 0 (no compression) to 9 (best compression).  Default is 9.
         @type compresslevel: int
+        @param max_decompressed_size: Maximum total decompressed bytes
+        allowed per session before a SIZE_LIMIT exception is raised.
+        Defaults to DEFAULT_MAX_FRAME_SIZE (16384000 bytes).
+        @type max_decompressed_size: int
         """
         self.__trans = trans
         self.compresslevel = compresslevel
-        self.__rbuf = BufferIO()
-        self.__wbuf = BufferIO()
+        self._max_decompressed_size = max_decompressed_size
+        self.__rbuf = BytesIO()
+        self.__wbuf = BytesIO()
         self._init_zlib()
         self._init_stats()
 
@@ -97,8 +105,8 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         """Internal method to initialize/reset the internal StringIO objects
         for read and write buffers.
         """
-        self.__rbuf = BufferIO()
-        self.__wbuf = BufferIO()
+        self.__rbuf = BytesIO()
+        self.__wbuf = BytesIO()
 
     def _init_stats(self):
         """Internal method to reset the internal statistics counters
@@ -115,6 +123,7 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         """
         self._zcomp_read = zlib.decompressobj()
         self._zcomp_write = zlib.compressobj(self.compresslevel)
+        self._bytes_decompressed = 0
 
     def getCompRatio(self):
         """Get the current measured compression ratios (in,out) from
@@ -199,11 +208,18 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         """
         zbuf = self.__trans.read(sz)
         zbuf = self._zcomp_read.unconsumed_tail + zbuf
-        buf = self._zcomp_read.decompress(zbuf)
+        remaining = self._max_decompressed_size - self._bytes_decompressed
+        buf = self._zcomp_read.decompress(zbuf, remaining)
+        if self._zcomp_read.unconsumed_tail:
+            raise TTransportException(
+                TTransportException.SIZE_LIMIT,
+                "Decompressed payload exceeds maximum allowed size.",
+            )
+        self._bytes_decompressed += len(buf)
         self.bytes_in += len(zbuf)
         self.bytes_in_comp += len(buf)
         old = self.__rbuf.read()
-        self.__rbuf = BufferIO(old + buf)
+        self.__rbuf = BytesIO(old + buf)
         if len(old) + len(buf) == 0:
             return False
         return True
@@ -228,7 +244,7 @@ class TZlibTransport(TTransportBase, CReadableTransport):
         ztail = self._zcomp_write.flush(zlib.Z_SYNC_FLUSH)
         self.bytes_out_comp += len(ztail)
         if (len(zbuf) + len(ztail)) > 0:
-            self.__wbuf = BufferIO()
+            self.__wbuf = BytesIO()
             self.__trans.write(zbuf + ztail)
         self.__trans.flush()
 
@@ -244,5 +260,5 @@ class TZlibTransport(TTransportBase, CReadableTransport):
             retstring += self.read(self.DEFAULT_BUFFSIZE)
         while len(retstring) < reqlen:
             retstring += self.read(reqlen - len(retstring))
-        self.__rbuf = BufferIO(retstring)
+        self.__rbuf = BytesIO(retstring)
         return self.__rbuf

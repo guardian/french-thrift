@@ -1,0 +1,239 @@
+name: MSVC Build 
+
+on:
+  push:
+    branches: [ '*' ]
+  pull_request:
+    branches: [ '*' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    permissions:
+      contents: read
+      packages: write
+    env:
+      THRIFT_BUILD_DIR: C:\thrift-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Ensure expected workspace path
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'C:\src')) { New-Item -Path 'C:\src' -ItemType Directory | Out-Null }
+          if (Test-Path 'C:\src\thrift') { Remove-Item 'C:\src\thrift' -Recurse -Force }
+          cmd /c mklink /J C:\src\thrift $env:GITHUB_WORKSPACE
+
+      - name: Configure build output directory
+        shell: pwsh
+        run: |
+          New-Item -Path $env:THRIFT_BUILD_DIR -ItemType Directory -Force | Out-Null
+
+      - name: Configure Docker credential store
+        shell: pwsh
+        run: |
+          $dockerConfig = Join-Path $env:RUNNER_TEMP 'docker-config'
+          New-Item -Path $dockerConfig -ItemType Directory -Force | Out-Null
+
+          if (-not (Get-Command 'docker-credential-wincred.exe' -ErrorAction SilentlyContinue)) {
+            Write-Error 'docker-credential-wincred.exe is not available on this runner'
+            exit 1
+          }
+
+          '{"credsStore":"wincred"}' | Out-File -FilePath (Join-Path $dockerConfig 'config.json') -Encoding ascii
+          "DOCKER_CONFIG=$dockerConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set Docker image name
+        shell: pwsh
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          $image = "ghcr.io/{0}/thrift-build" -f $env:OWNER.ToLower()
+          "DOCKER_IMAGE=$image" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Compute Docker image tag
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 'build/docker/msvc/Dockerfile').Hash.ToLower().Substring(0, 12)
+          "IMAGE_TAG=msvc-$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Wait for Docker daemon
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          # GitHub-hosted Windows runners (especially windows-2025-vs2026) have
+          # the Docker Engine installed but not always auto-started. Kick it
+          # explicitly, then poll until the daemon answers.
+          $svc = Get-Service -Name Docker -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -ne 'Running') {
+            Write-Host "Starting Docker service..."
+            Start-Service -Name Docker -ErrorAction SilentlyContinue
+          }
+          $deadline = (Get-Date).AddMinutes(6)
+          while ($true) {
+            docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Docker daemon is ready."
+              break
+            }
+            if ((Get-Date) -gt $deadline) {
+              Write-Error "Docker daemon did not become ready within the timeout."
+              exit 1
+            }
+            Write-Host "Docker daemon not ready yet; retrying in 5s..."
+            Start-Sleep -Seconds 5
+          }
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $env:GHCR_TOKEN | docker login ghcr.io --username $env:GHCR_USERNAME --password-stdin
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to log in to GHCR"
+            exit 1
+          }
+
+      - name: Pull cached image
+        id: pull_cached
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $needBuild = $true
+
+          if ([string]::IsNullOrWhiteSpace($env:DOCKER_IMAGE) -or [string]::IsNullOrWhiteSpace($env:IMAGE_TAG)) {
+            Write-Error "DOCKER_IMAGE or IMAGE_TAG is empty. DOCKER_IMAGE='$env:DOCKER_IMAGE' IMAGE_TAG='$env:IMAGE_TAG'"
+            exit 1
+          }
+
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Attempting to pull hash-based tag (attempt $attempt/$maxAttempts): $($env:DOCKER_IMAGE):$($env:IMAGE_TAG)"
+            $output = docker pull "$($env:DOCKER_IMAGE):$($env:IMAGE_TAG)" 2>&1
+            $output | Out-Host
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Successfully pulled cached image with hash tag"
+              $needBuild = $false
+              break
+            } elseif ($output -match 'not found|does not exist|404|manifest unknown') {
+              Write-Host "Image not found in registry, will build from scratch."
+              $needBuild = $true
+              break
+            } elseif ($attempt -lt $maxAttempts) {
+              Write-Host "##[warning]Docker pull failed (attempt $attempt/$maxAttempts) - transient registry/network/daemon error; retrying in 10s..."
+              Start-Sleep -Seconds 10
+            } else {
+              Write-Host "##[error]Docker pull failed after $maxAttempts attempts. Check logs above."
+              Write-Host "This may indicate an authentication issue, registry problem, or network error."
+              exit 1
+            }
+          }
+
+          Write-Host "Setting outputs: need_build=$needBuild"
+          "need_build=$needBuild" >> $env:GITHUB_OUTPUT
+
+      - name: Build Docker image
+        if: steps.pull_cached.outputs.need_build == 'true'
+        timeout-minutes: 60
+        shell: pwsh
+        run: |
+          Write-Host "Building with tag: $($env:DOCKER_IMAGE):$($env:IMAGE_TAG)"
+          docker build -t "$($env:DOCKER_IMAGE):$($env:IMAGE_TAG)" -f build\docker\msvc\Dockerfile 'build\'
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Docker build failed"
+            exit 1
+          }
+          Write-Host "Verifying tags were created:"
+          docker images "$($env:DOCKER_IMAGE)"
+
+      - name: Push Docker image
+        if: github.event_name != 'pull_request' && steps.pull_cached.outputs.need_build == 'true'
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          Write-Host "Pushing hash-based tag only: $($env:DOCKER_IMAGE):$($env:IMAGE_TAG)"
+          docker push "$($env:DOCKER_IMAGE):$($env:IMAGE_TAG)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to push hash-based tag"
+            exit 1
+          }
+          Write-Host "Successfully pushed hash-tagged image"
+
+      - name: Build and test inside container
+        timeout-minutes: 120
+        shell: pwsh
+        run: |
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Running build container (attempt $attempt/$maxAttempts)..."
+            # Tee so the build log streams live AND is captured for the
+            # daemon-error check below.
+            docker run -v c:\src\thrift:C:\Thrift -v "${env:THRIFT_BUILD_DIR}:C:\build" --rm -t "$($env:DOCKER_IMAGE):$($env:IMAGE_TAG)" c:\thrift\build\docker\msvc\build.bat 2>&1 | Tee-Object -Variable output
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              break
+            }
+
+            # Retry only when the daemon was unreachable / the container never
+            # started; a genuine build or test failure must NOT trigger a costly
+            # rebuild and is propagated to the "Check test results" step.
+            $daemonError = ($output -join "`n") -match 'pipe/docker_engine|error during connect|cannot connect to the Docker daemon|failed to connect to the docker API'
+            if ($daemonError -and $attempt -lt $maxAttempts) {
+              Write-Host "##[warning]Docker daemon not reachable (attempt $attempt/$maxAttempts); retrying in 10s..."
+              Start-Sleep -Seconds 10
+              continue
+            }
+
+            Write-Error "Container build failed with exit code $code"
+            exit $code
+          }
+
+      - name: Check test results
+        if: always()
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:THRIFT_BUILD_DIR 'Testing\Temporary\LastTest.log'
+          if (Test-Path $logPath) {
+            $content = Get-Content $logPath -Raw
+            if ($content -match 'Test Failed\.') {
+              Write-Error "Tests failed - check LastTest.log artifact for details"
+              exit 1
+            } else {
+              Write-Host "All tests passed"
+            }
+          } else {
+            Write-Error "LastTest.log not found at $logPath"
+            exit 1
+          }
+
+      - name: Upload LastTest log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: msvc-LastTest-log
+          path: ${{ env.THRIFT_BUILD_DIR }}\Testing\Temporary\LastTest.log
+          if-no-files-found: warn
+
+      - name: Remove Docker credential store
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:DOCKER_CONFIG) -and (Test-Path $env:DOCKER_CONFIG)) {
+            Remove-Item $env:DOCKER_CONFIG -Recurse -Force
+          }

@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,16 +7,16 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 require 'set'
 
@@ -34,6 +35,7 @@ module Thrift
     MAP = 13
     SET = 14
     LIST = 15
+    UUID = 16
   end
 
   class << self
@@ -43,7 +45,7 @@ module Thrift
   class TypeError < Exception
   end
 
-  def self.check_type(value, field, name, skip_nil=true)
+  def self.check_type(value, field, name, skip_nil = true)
     return if value.nil? and skip_nil
     klasses = case field[:type]
               when Types::VOID
@@ -55,6 +57,8 @@ module Thrift
               when Types::DOUBLE
                 Float
               when Types::STRING
+                String
+              when Types::UUID
                 String
               when Types::STRUCT
                 [Struct, Union]
@@ -70,7 +74,7 @@ module Thrift
     # check elements now
     case field[:type]
     when Types::MAP
-      value.each_pair do |k,v|
+      value.each_pair do |k, v|
         check_type(k, field[:key], "#{name}.key", false)
         check_type(v, field[:value], "#{name}.value", false)
       end

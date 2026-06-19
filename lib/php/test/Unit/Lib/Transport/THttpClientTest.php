@@ -19,16 +19,21 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Test\Thrift\Unit\Lib\ReflectionHelper;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\THttpClient;
 
 class THttpClientTest extends TestCase
 {
     use PHPMock;
+    use ReflectionHelper;
 
     public function testSetTimeoutSecs()
     {
@@ -36,10 +41,7 @@ class THttpClientTest extends TestCase
         $transport = new THttpClient($host);
         $transport->setTimeoutSecs(1000);
 
-        $ref = new \ReflectionClass($transport);
-        $prop = $ref->getProperty('timeout_');
-        $prop->setAccessible(true);
-        $this->assertEquals(1000, $prop->getValue($transport));
+        $this->assertEquals(1000, $this->getPropertyValue($transport, 'timeout'));
     }
 
     public function testIsOpen()
@@ -67,18 +69,13 @@ class THttpClientTest extends TestCase
         $host = 'localhost';
         $transport = new THttpClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('handle_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, $handle);
+        $this->setPropertyValue($transport, 'handle', $handle);
 
         $this->assertNull($transport->close());
-        $this->assertNull($propRequest->getValue($transport));
+        $this->assertNull($this->getPropertyValue($transport, 'handle'));
     }
 
-    /**
-     * @dataProvider readDataProvider
-     */
+    #[DataProvider('readDataProvider')]
     public function testRead(
         $readLen,
         $freadResult,
@@ -108,15 +105,12 @@ class THttpClientTest extends TestCase
         $host = 'localhost';
         $transport = new THttpClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('handle_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, $handle);
+        $this->setPropertyValue($transport, 'handle', $handle);
 
         $this->assertEquals($expectedResult, $transport->read($readLen));
     }
 
-    public function readDataProvider()
+    public static function readDataProvider()
     {
         yield 'read success' => [
             'readLen' => 10,
@@ -156,18 +150,12 @@ class THttpClientTest extends TestCase
         $host = 'localhost';
         $transport = new THttpClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $prop = $ref->getProperty('buf_');
-        $prop->setAccessible(true);
-
         $transport->write('1234567890');
 
-        $this->assertEquals('1234567890', $prop->getValue($transport));
+        $this->assertEquals('1234567890', $this->getPropertyValue($transport, 'buf'));
     }
 
-    /**
-     * @dataProvider flushDataProvider
-     */
+    #[DataProvider('flushDataProvider')]
     public function testFlush(
         $host,
         $port,
@@ -216,11 +204,11 @@ class THttpClientTest extends TestCase
         $this->assertNull($transport->flush());
     }
 
-    public function flushDataProvider()
+    public static function flushDataProvider()
     {
         $default = [
             'host' => 'localhost',
-            'port' => '80',
+            'port' => 80,
             'uri' => '',
             'scheme' => 'http',
             'context' => [],
@@ -321,12 +309,9 @@ class THttpClientTest extends TestCase
         $host = 'localhost';
         $transport = new THttpClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('headers_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, ['test' => '1234567890']);
+        $this->setPropertyValue($transport, 'headers', ['test' => '1234567890']);
 
         $transport->addHeaders(['test2' => '12345']);
-        $this->assertEquals(['test' => '1234567890', 'test2' => '12345'], $propRequest->getValue($transport));
+        $this->assertEquals(['test' => '1234567890', 'test2' => '12345'], $this->getPropertyValue($transport, 'headers'));
     }
 }

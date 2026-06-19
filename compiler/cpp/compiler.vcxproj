@@ -66,6 +66,7 @@
     <ClCompile Include="src\thrift\generate\t_haxe_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_html_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_markdown_generator.cc" />
+    <ClCompile Include="src\thrift\generate\t_mmd_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_java_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_javame_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_js_generator.cc" />
@@ -80,7 +81,6 @@
     <ClCompile Include="src\thrift\generate\t_rb_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_rs_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_st_generator.cc" />
-    <ClCompile Include="src\thrift\generate\t_swift_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_xml_generator.cc" />
     <ClCompile Include="src\thrift\generate\t_xsd_generator.cc" />
     <ClCompile Include="src\thrift\generate\go_validator_generator.cc" />
@@ -105,27 +105,27 @@
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <CharacterSet>MultiByte</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <CharacterSet>MultiByte</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>MultiByte</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>MultiByte</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">

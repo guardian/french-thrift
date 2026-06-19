@@ -19,12 +19,13 @@
   -->
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latestMajor</LangVersion>
     <AssemblyName>Server</AssemblyName>
     <PackageId>Server</PackageId>
     <OutputType>Exe</OutputType>
-    <Version>0.21.0.0</Version>
+    <Version>0.24.0.0</Version>
+    <Nullable>enable</Nullable>
     <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
     <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
     <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
@@ -34,6 +35,8 @@
   <ItemGroup>
     <ProjectReference Include="../Interfaces/Interfaces.csproj" />
     <ProjectReference Include="../../../lib/netstd/Thrift/Thrift.csproj" />
+    <!-- THttpServerTransport (ASP.NET Core middleware) now lives in the separate ApacheThrift.AspNetCore package. -->
+    <ProjectReference Include="../../../lib/netstd/Thrift.AspNetCore/Thrift.AspNetCore.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net7.0'">

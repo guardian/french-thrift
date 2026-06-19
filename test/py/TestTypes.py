@@ -20,13 +20,17 @@
 from ThriftTest import ThriftTest
 from ThriftTest.ThriftTest import Client
 from ThriftTest.ttypes import Xtruct
+from uuid import UUID
 
 import unittest
 
-# only run this test if the string 'options string: py:type_hints' esxists in the file 
+# only run this test if the string 'options string: py:type_hints' esxists in the file
+
+
 def has_type_hints_option():
     with open(ThriftTest.__file__) as f:
         return 'options string: py:type_hints' in f.read()
+
 
 @unittest.skipUnless(has_type_hints_option(), "type hints not enabled")
 class TypeAnnotationsTest(unittest.TestCase):
@@ -57,9 +61,12 @@ class TypeAnnotationsTest(unittest.TestCase):
 
     def test_map(self):
         self.assertEqual(Client.testMap.__annotations__, {'return': dict[int, int], 'thing': dict[int, int]})
-    
+
     def test_list(self):
         self.assertEqual(Client.testList.__annotations__, {'return': list[int], 'thing': list[int]})
 
     def test_set(self):
         self.assertEqual(Client.testSet.__annotations__, {'return': set[int], 'thing': set[int]})
+
+    def test_uuid(self):
+        self.assertEqual(Client.testUuid.__annotations__, {'return': UUID, 'thing': UUID})

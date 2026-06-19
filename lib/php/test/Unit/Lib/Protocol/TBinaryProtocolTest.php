@@ -20,9 +20,13 @@
  *
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Protocol;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Constraint\Constraint;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\Exception\TProtocolException;
 use Thrift\Protocol\TBinaryProtocol;
 use Thrift\Transport\TTransport;
@@ -33,9 +37,7 @@ class TBinaryProtocolTest extends TestCase
     private const VERSION_MASK = 0xffff0000;
     private const VERSION_1 = 0x80010000;
 
-    /**
-     * @dataProvider writeMessageBeginDataProvider
-     */
+    #[DataProvider('writeMessageBeginDataProvider')]
     public function testWriteMessageBegin(
         $strictWrite,
         $name,
@@ -50,14 +52,25 @@ class TBinaryProtocolTest extends TestCase
 
         $transport->expects($this->exactly(count($writeCallsParams)))
                   ->method('write')
-                  ->withConsecutive(...$writeCallsParams)
-                  ->willReturnOnConsecutiveCalls(...$writeCallsResults);
+                  ->willReturnCallback(function (...$callArgs) use ($writeCallsParams, $writeCallsResults) {
+                      static $iteration = 0;
+                      $expected = $writeCallsParams[$iteration];
+                    foreach ($expected as $i => $exp) {
+                        if ($exp instanceof Constraint) {
+                            $this->assertThat($callArgs[$i], $exp);
+                        } else {
+                            $this->assertSame($exp, $callArgs[$i]);
+                        }
+                    }
+
+                      return $writeCallsResults[$iteration++];
+                  });
 
         $result = $protocol->writeMessageBegin($name, $type, $seqid);
         $this->assertEquals($expectedResult, $result);
     }
 
-    public function writeMessageBeginDataProvider()
+    public static function writeMessageBeginDataProvider()
     {
         $type = TType::STRING;
         $seqid = 555;
@@ -68,10 +81,10 @@ class TBinaryProtocolTest extends TestCase
             'type' => $type,
             'seqid' => $seqid,
             'writeCallsParams' => [
-                [pack('N', self::VERSION_1 | $type), 4], #writeI32
-                [pack('N', strlen('testName')), 4], #writeStringLen
-                ['testName', 8], #writeString
-                [pack('N', $seqid), 4], #writeI32
+                [pack('N', self::VERSION_1 | $type)], #writeI32
+                [pack('N', strlen('testName'))], #writeStringLen
+                ['testName'], #writeString
+                [pack('N', $seqid)], #writeI32
             ],
             'writeCallsResults' => [
                 4,
@@ -88,10 +101,10 @@ class TBinaryProtocolTest extends TestCase
             'type' => $type,
             'seqid' => $seqid,
             'writeCallsParams' => [
-                [pack('N', strlen('testName')), 4], #writeStringLen
-                ['testName', 8], #writeString
-                [pack('c', $type), 1], #writeByte
-                [pack('N', $seqid), 4], #writeI32
+                [pack('N', strlen('testName'))], #writeStringLen
+                ['testName'], #writeString
+                [pack('c', $type)], #writeByte
+                [pack('N', $seqid)], #writeI32
             ],
             'writeCallsResults' => [
                 4,
@@ -105,7 +118,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testWriteMessageEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeMessageEnd());
@@ -113,7 +126,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testWriteStructBegin()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeStructBegin('testName'));
@@ -121,7 +134,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testWriteStructEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeStructEnd());
@@ -136,22 +149,34 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedWriteArgs = [
+            [pack('c', $fieldType)], #writeByte
+            [pack('n', $fieldId)], #writeI16
+        ];
+        $writeReturns = [1, 2];
         $transport
             ->expects($this->exactly(2))
             ->method('write')
-            ->withConsecutive(
-                ...[
-                       [pack('c', $fieldType), 1], #writeByte
-                       [pack('n', $fieldId), 2], #writeI16
-                   ]
-            )->willReturnOnConsecutiveCalls([1, 2]);
+            ->willReturnCallback(function (...$callArgs) use ($expectedWriteArgs, $writeReturns) {
+                static $iteration = 0;
+                $expected = $expectedWriteArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $writeReturns[$iteration++];
+            });
 
         $this->assertEquals(3, $protocol->writeFieldBegin($fieldName, $fieldType, $fieldId));
     }
 
     public function testWriteFieldEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeFieldEnd());
@@ -165,8 +190,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('c', TType::STOP), 1) #writeByte
-            ->willReturn(1);
+            ->with(pack('c', TType::STOP)); #writeByte
 
         $this->assertEquals(1, $protocol->writeFieldStop());
     }
@@ -180,23 +204,35 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedWriteArgs = [
+            [pack('c', $keyType)], #writeByte
+            [pack('c', $valType)], #writeByte
+            [pack('N', $size)], #writeI32
+        ];
+        $writeReturns = [1, 1, 4];
         $transport
             ->expects($this->exactly(3))
             ->method('write')
-            ->withConsecutive(
-                ...[
-                       [pack('c', $keyType), 1], #writeByte
-                       [pack('c', $valType), 1], #writeByte
-                       [pack('N', $size), 4], #writeI32
-                   ]
-            )->willReturnOnConsecutiveCalls([1, 1, 4]);
+            ->willReturnCallback(function (...$callArgs) use ($expectedWriteArgs, $writeReturns) {
+                static $iteration = 0;
+                $expected = $expectedWriteArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $writeReturns[$iteration++];
+            });
 
         $this->assertEquals(6, $protocol->writeMapBegin($keyType, $valType, $size));
     }
 
     public function testWriteMapEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeMapEnd());
@@ -210,22 +246,34 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedWriteArgs = [
+            [pack('c', $elemType)], #writeByte
+            [pack('N', $size)], #writeI32
+        ];
+        $writeReturns = [1, 4];
         $transport
             ->expects($this->exactly(2))
             ->method('write')
-            ->withConsecutive(
-                ...[
-                       [pack('c', $elemType), 1], #writeByte
-                       [pack('N', $size), 4], #writeI32
-                   ]
-            )->willReturnOnConsecutiveCalls([1, 4]);
+            ->willReturnCallback(function (...$callArgs) use ($expectedWriteArgs, $writeReturns) {
+                static $iteration = 0;
+                $expected = $expectedWriteArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $writeReturns[$iteration++];
+            });
 
         $this->assertEquals(5, $protocol->writeListBegin($elemType, $size));
     }
 
     public function testWriteListEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeListEnd());
@@ -239,22 +287,34 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedWriteArgs = [
+            [pack('c', $elemType)], #writeByte
+            [pack('N', $size)], #writeI32
+        ];
+        $writeReturns = [1, 4];
         $transport
             ->expects($this->exactly(2))
             ->method('write')
-            ->withConsecutive(
-                ...[
-                       [pack('c', $elemType), 1], #writeByte
-                       [pack('N', $size), 4], #writeI32
-                   ]
-            )->willReturnOnConsecutiveCalls([1, 4]);
+            ->willReturnCallback(function (...$callArgs) use ($expectedWriteArgs, $writeReturns) {
+                static $iteration = 0;
+                $expected = $expectedWriteArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $writeReturns[$iteration++];
+            });
 
         $this->assertEquals(5, $protocol->writeSetBegin($elemType, $size));
     }
 
     public function testWriteSetEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->writeSetEnd());
@@ -269,8 +329,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('c', (int)$value), 1) #writeByte
-            ->willReturn(1);
+            ->with(pack('c', (int)$value)); #writeByte
 
         $this->assertEquals(1, $protocol->writeBool($value));
     }
@@ -284,8 +343,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('c', $value), 1) #writeByte
-            ->willReturn(1);
+            ->with(pack('c', $value)); #writeByte
 
         $this->assertEquals(1, $protocol->writeByte($value));
     }
@@ -299,8 +357,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('n', $value), 2) #writeI16
-            ->willReturn(2);
+            ->with(pack('n', $value)); #writeI16
 
         $this->assertEquals(2, $protocol->writeI16($value));
     }
@@ -314,8 +371,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('N', $value), 4) #writeI32
-            ->willReturn(4);
+            ->with(pack('N', $value)); #writeI32
 
         $this->assertEquals(4, $protocol->writeI32($value));
     }
@@ -352,8 +408,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('N2', $hi, $lo), 8) #writeI64
-            ->willReturn(4);
+            ->with(pack('N2', $hi, $lo)); #writeI64
 
         $this->assertEquals(8, $protocol->writeI64($value));
     }
@@ -373,8 +428,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('N2', $hi, $lo), 8) #writeI64
-            ->willReturn(8);
+            ->with(pack('N2', $hi, $lo)); #writeI64
 
         $this->assertEquals(8, $protocol->writeI64($value));
     }
@@ -388,8 +442,7 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(strrev(pack('d', $value)), 8) #writeDouble
-            ->willReturn(8);
+            ->with(strrev(pack('d', $value))); #writeDouble
 
         $this->assertEquals(8, $protocol->writeDouble($value));
     }
@@ -400,22 +453,61 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedWriteArgs = [
+            [pack('N', strlen($value))], #writeI32,
+            [$value], #write,
+        ];
+        $writeReturns = [4, 6];
         $transport
             ->expects($this->exactly(2))
             ->method('write')
-            ->withConsecutive(
-                ...[
-                       [pack('N', strlen($value))], #writeI32,
-                       [$value, strlen($value)], #write,
-                   ]
-            )->willReturnOnConsecutiveCalls([4, 6]);
+            ->willReturnCallback(function (...$callArgs) use ($expectedWriteArgs, $writeReturns) {
+                static $iteration = 0;
+                $expected = $expectedWriteArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $writeReturns[$iteration++];
+            });
 
         $this->assertEquals(10, $protocol->writeString($value));
     }
 
-    /**
-     * @dataProvider readMessageBeginDataProvider
-     */
+    public function testWriteUuid()
+    {
+        $uuid = '01234567-89ab-cdef-0123-456789abcdef';
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $transport
+            ->expects($this->once())
+            ->method('write')
+            ->with(hex2bin('0123456789abcdef0123456789abcdef'));
+
+        $this->assertEquals(16, $protocol->writeUuid($uuid));
+    }
+
+    public function testReadUuid()
+    {
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $transport
+            ->expects($this->once())
+            ->method('readAll')
+            ->with(16)
+            ->willReturn(hex2bin('0123456789abcdef0123456789abcdef'));
+
+        $this->assertEquals(16, $protocol->readUuid($value));
+        $this->assertEquals('01234567-89ab-cdef-0123-456789abcdef', $value);
+    }
+
+    #[DataProvider('readMessageBeginDataProvider')]
     public function testReadMessageBegin(
         $strictRead,
         $readCallsParams,
@@ -439,8 +531,19 @@ class TBinaryProtocolTest extends TestCase
 
         $transport->expects($this->exactly(count($readCallsParams)))
                   ->method('readAll')
-                  ->withConsecutive(...$readCallsParams)
-                  ->willReturnOnConsecutiveCalls(...$readCallsResults);
+                  ->willReturnCallback(function (...$callArgs) use ($readCallsParams, $readCallsResults) {
+                      static $iteration = 0;
+                      $expected = $readCallsParams[$iteration];
+                    foreach ($expected as $i => $exp) {
+                        if ($exp instanceof Constraint) {
+                            $this->assertThat($callArgs[$i], $exp);
+                        } else {
+                            $this->assertSame($exp, $callArgs[$i]);
+                        }
+                    }
+
+                      return $readCallsResults[$iteration++];
+                  });
 
         $result = $protocol->readMessageBegin($name, $type, $seqid);
         $this->assertEquals($expectedReadLengthResult, $result);
@@ -449,7 +552,7 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals($expectedSeqid, $seqid);
     }
 
-    public function readMessageBeginDataProvider()
+    public static function readMessageBeginDataProvider()
     {
         yield 'strictRead=true' => [
             'strictRead' => true,
@@ -528,7 +631,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadMessageEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readMessageEnd());
@@ -536,7 +639,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadStructBegin()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readStructBegin($name));
@@ -545,15 +648,13 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadStructEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readStructEnd());
     }
 
-    /**
-     * @dataProvider readFieldBeginDataProvider
-     */
+    #[DataProvider('readFieldBeginDataProvider')]
     public function testReadFieldBegin(
         $storedFieldType,
         $readCallsParams,
@@ -569,8 +670,19 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->exactly(count($readCallsParams)))
             ->method('readAll')
-            ->withConsecutive(...$readCallsParams)
-            ->willReturnOnConsecutiveCalls(...$readCallsResults);
+            ->willReturnCallback(function (...$callArgs) use ($readCallsParams, $readCallsResults) {
+                static $iteration = 0;
+                $expected = $readCallsParams[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $readCallsResults[$iteration++];
+            });
 
         $this->assertEquals($expectedResult, $protocol->readFieldBegin($name, $fieldType, $fieldId));
         $this->assertEquals($expectedName, $name);
@@ -578,7 +690,7 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals($expectedFieldId, $fieldId);
     }
 
-    public function readFieldBeginDataProvider()
+    public static function readFieldBeginDataProvider()
     {
         yield 'default' => [
             'storedFieldType' => TType::STRING,
@@ -591,7 +703,7 @@ class TBinaryProtocolTest extends TestCase
                 pack('n', 555),
             ],
             'expectedResult' => 3,
-            'exprectedName' => '',
+            'expectedName' => '',
             'expectedFieldType' => TType::STRING,
             'expectedFieldId' => 555,
         ];
@@ -605,7 +717,7 @@ class TBinaryProtocolTest extends TestCase
                 pack('c', TType::STOP),
             ],
             'expectedResult' => 1,
-            'exprectedName' => '',
+            'expectedName' => '',
             'expectedFieldType' => 0,
             'expectedFieldId' => 0,
         ];
@@ -613,7 +725,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadFieldEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readFieldEnd());
@@ -624,20 +736,32 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedReadAllArgs = [
+            [1], #readByte
+            [1], #readByte
+            [4], #readI32
+        ];
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('c', TType::STRING),
+            pack('N', 555),
+        ];
         $transport
             ->expects($this->exactly(3))
             ->method('readAll')
-            ->withConsecutive(
-                ...[
-                       [1], #readByte
-                       [1], #readByte
-                       [4], #readI32
-                   ]
-            )->willReturnOnConsecutiveCalls(
-                pack('c', TType::I32),
-                pack('c', TType::STRING),
-                pack('N', 555)
-            );
+            ->willReturnCallback(function (...$callArgs) use ($expectedReadAllArgs, $readAllReturns) {
+                static $iteration = 0;
+                $expected = $expectedReadAllArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $readAllReturns[$iteration++];
+            });
 
         $this->assertEquals(6, $protocol->readMapBegin($keyType, $valType, $size));
         $this->assertEquals(TType::I32, $keyType);
@@ -647,7 +771,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadMapEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readMapEnd());
@@ -658,18 +782,30 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedReadAllArgs = [
+            [1], #readByte
+            [4], #readI32
+        ];
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('N', 555),
+        ];
         $transport
             ->expects($this->exactly(2))
             ->method('readAll')
-            ->withConsecutive(
-                ...[
-                       [1], #readByte
-                       [4], #readI32
-                   ]
-            )->willReturnOnConsecutiveCalls(
-                pack('c', TType::I32),
-                pack('N', 555)
-            );
+            ->willReturnCallback(function (...$callArgs) use ($expectedReadAllArgs, $readAllReturns) {
+                static $iteration = 0;
+                $expected = $expectedReadAllArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $readAllReturns[$iteration++];
+            });
 
         $this->assertEquals(5, $protocol->readListBegin($elemType, $size));
         $this->assertEquals(TType::I32, $elemType);
@@ -678,7 +814,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadListEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readListEnd());
@@ -689,18 +825,30 @@ class TBinaryProtocolTest extends TestCase
         $transport = $this->createMock(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
+        $expectedReadAllArgs = [
+            [1], #readByte
+            [4], #readI32
+        ];
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('N', 555),
+        ];
         $transport
             ->expects($this->exactly(2))
             ->method('readAll')
-            ->withConsecutive(
-                ...[
-                       [1], #readByte
-                       [4], #readI32
-                   ]
-            )->willReturnOnConsecutiveCalls(
-                pack('c', TType::I32),
-                pack('N', 555)
-            );
+            ->willReturnCallback(function (...$callArgs) use ($expectedReadAllArgs, $readAllReturns) {
+                static $iteration = 0;
+                $expected = $expectedReadAllArgs[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $readAllReturns[$iteration++];
+            });
 
         $this->assertEquals(5, $protocol->readSetBegin($elemType, $size));
         $this->assertEquals(TType::I32, $elemType);
@@ -709,7 +857,7 @@ class TBinaryProtocolTest extends TestCase
 
     public function testReadSetEnd()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TBinaryProtocol($transport, false, false);
 
         $this->assertEquals(0, $protocol->readSetEnd());
@@ -745,9 +893,7 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals(1, $value);
     }
 
-    /**
-     * @dataProvider readI16DataProvider
-     */
+    #[DataProvider('readI16DataProvider')]
     public function testReadI16(
         $storedValue,
         $expectedValue
@@ -765,15 +911,13 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals($expectedValue, $value);
     }
 
-    public function readI16DataProvider()
+    public static function readI16DataProvider()
     {
         yield 'positive' => [1, 1];
         yield 'negative' => [-1, -1];
     }
 
-    /**
-     * @dataProvider readI16DataProvider
-     */
+    #[DataProvider('readI16DataProvider')]
     public function testReadI32(
         $storedValue,
         $expectedValue
@@ -797,9 +941,7 @@ class TBinaryProtocolTest extends TestCase
         yield 'negative' => [-1, -1];
     }
 
-    /**
-     * @dataProvider readI64For32BitArchitectureDataProvider
-     */
+    #[DataProvider('readI64For32BitArchitectureDataProvider')]
     public function testReadI64For32BitArchitecture(
         $storedValue,
         $expectedValue
@@ -834,16 +976,21 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->once())
             ->method('write')
-            ->with(pack('N2', $hi, $lo), 8) #writeI64
-            ->willReturn(4);
+            ->with(pack('N2', $hi, $lo)); #writeI64
 
         $this->assertEquals(8, $protocol->readI64($value));
         $this->assertEquals($expectedValue, $value);
     }
 
-    public function readI64For32BitArchitectureDataProvider()
+    public static function readI64For32BitArchitectureDataProvider()
     {
         $storedValueRepresent = function ($value) {
+            // PHP_INT_MIN (-2^63) cannot be safely negated:
+            // -PHP_INT_MIN overflows the 64-bit signed integer range.
+            if ($value === PHP_INT_MIN) {
+                return pack('N2', 0x80000000, 0x00000000);
+            }
+
             $neg = $value < 0;
 
             if ($neg) {
@@ -888,9 +1035,7 @@ class TBinaryProtocolTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider readI64For64BitArchitectureDataProvider
-     */
+    #[DataProvider('readI64For64BitArchitectureDataProvider')]
     public function testReadI64For64BitArchitecture(
         $storedValue,
         $expectedValue
@@ -911,7 +1056,7 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals($expectedValue, $value);
     }
 
-    public function readI64For64BitArchitectureDataProvider()
+    public static function readI64For64BitArchitectureDataProvider()
     {
         $storedValueRepresent = function ($value) {
             $hi = $value >> 32;
@@ -956,9 +1101,7 @@ class TBinaryProtocolTest extends TestCase
         $this->assertEquals(789, $value);
     }
 
-    /**
-     * @dataProvider readStringDataProvider
-     */
+    #[DataProvider('readStringDataProvider')]
     public function testReadString(
         $readCallsParams,
         $readCallsResults,
@@ -971,14 +1114,25 @@ class TBinaryProtocolTest extends TestCase
         $transport
             ->expects($this->exactly(count($readCallsParams)))
             ->method('readAll')
-            ->withConsecutive(...$readCallsParams)
-            ->willReturnOnConsecutiveCalls(...$readCallsResults);
+            ->willReturnCallback(function (...$callArgs) use ($readCallsParams, $readCallsResults) {
+                static $iteration = 0;
+                $expected = $readCallsParams[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                return $readCallsResults[$iteration++];
+            });
 
         $this->assertEquals($expectedLength, $protocol->readString($value));
         $this->assertEquals($expectedValue, $value);
     }
 
-    public function readStringDataProvider()
+    public static function readStringDataProvider()
     {
         $storedValue = '';
         yield 'empty' => [
@@ -1005,5 +1159,79 @@ class TBinaryProtocolTest extends TestCase
             'expectedLength' => 10,
             'expectedValue' => 'string',
         ];
+    }
+
+    public function testReadMapBeginRejectsNegativeSize()
+    {
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('c', TType::STRING),
+            pack('N', 0xffffffff),
+        ];
+        $transport->method('readAll')
+            ->willReturnCallback(function () use ($readAllReturns) {
+                static $iteration = 0;
+                return $readAllReturns[$iteration++];
+            });
+
+        $this->expectException(TProtocolException::class);
+        $this->expectExceptionCode(TProtocolException::NEGATIVE_SIZE);
+        $protocol->readMapBegin($keyType, $valType, $size);
+    }
+
+    public function testReadListBeginRejectsNegativeSize()
+    {
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('N', 0xffffffff),
+        ];
+        $transport->method('readAll')
+            ->willReturnCallback(function () use ($readAllReturns) {
+                static $iteration = 0;
+                return $readAllReturns[$iteration++];
+            });
+
+        $this->expectException(TProtocolException::class);
+        $this->expectExceptionCode(TProtocolException::NEGATIVE_SIZE);
+        $protocol->readListBegin($elemType, $size);
+    }
+
+    public function testReadSetBeginRejectsNegativeSize()
+    {
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $readAllReturns = [
+            pack('c', TType::I32),
+            pack('N', 0xffffffff),
+        ];
+        $transport->method('readAll')
+            ->willReturnCallback(function () use ($readAllReturns) {
+                static $iteration = 0;
+                return $readAllReturns[$iteration++];
+            });
+
+        $this->expectException(TProtocolException::class);
+        $this->expectExceptionCode(TProtocolException::NEGATIVE_SIZE);
+        $protocol->readSetBegin($elemType, $size);
+    }
+
+    public function testReadStringRejectsNegativeSize()
+    {
+        $transport = $this->createMock(TTransport::class);
+        $protocol = new TBinaryProtocol($transport, false, false);
+
+        $transport->method('readAll')
+            ->willReturn(pack('N', 0xffffffff));
+
+        $this->expectException(TProtocolException::class);
+        $this->expectExceptionCode(TProtocolException::NEGATIVE_SIZE);
+        $protocol->readString($value);
     }
 }

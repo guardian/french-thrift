@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,11 +21,14 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
 use Thrift\Exception\TException;
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * Sockets implementation of the TTransport interface.
@@ -34,89 +38,71 @@ use Thrift\Factory\TStringFuncFactory;
 class TSSLSocket extends TSocket
 {
     /**
-     * Remote port
+     * Stream context
      *
-     * @var null|resource
+     * @var resource|null
      */
-    protected $context_ = null;
+    protected $context;
 
     /**
      * Socket constructor
      *
-     * @param string $host Remote hostname
-     * @param int $port Remote port
-     * @param resource $context Stream context
-     * @param bool $persist Whether to use a persistent socket
-     * @param string $debugHandler Function to call for error logging
+     * @param resource|null                        $context      Stream context
+     * @param LoggerInterface|callable|string|null $debugHandler PSR-3 logger or
+     *        legacy callable; see TSocket::__construct().
      */
     public function __construct(
-        $host = 'localhost',
-        $port = 9090,
+        string $host = 'localhost',
+        int $port = 9090,
         $context = null,
-        $debugHandler = null
+        LoggerInterface|callable|string|null $debugHandler = null,
     ) {
-        $this->host_ = $this->getSSLHost($host);
-        $this->port_ = $port;
-        // Initialize a stream context if not provided
-        if ($context === null) {
-            $context = stream_context_create();
-        }
-        $this->context_ = $context;
-        $this->debugHandler_ = $debugHandler ? $debugHandler : 'error_log';
-    }
-
-    /**
-     * Creates a host name with SSL transport protocol
-     * if no transport protocol already specified in
-     * the host name.
-     *
-     * @param string $host Host to listen on
-     * @return string $host   Host name with transport protocol
-     */
-    private function getSSLHost($host)
-    {
-        $transport_protocol_loc = strpos($host, "://");
-        if ($transport_protocol_loc === false) {
-            $host = 'ssl://' . $host;
-        }
-        return $host;
+        parent::__construct($this->ensureSslHostPrefix($host), $port, false, $debugHandler);
+        $this->context = $context ?? stream_context_create();
     }
 
     /**
      * Connects the socket.
      */
-    public function open()
+    public function open(): void
     {
         if ($this->isOpen()) {
             throw new TTransportException('Socket already connected', TTransportException::ALREADY_OPEN);
         }
 
-        $host = parse_url($this->host_, PHP_URL_HOST);
+        $host = parse_url($this->host, PHP_URL_HOST);
         if (empty($host)) {
             throw new TTransportException('Cannot open null host', TTransportException::NOT_OPEN);
         }
 
-        if ($this->port_ <= 0) {
+        if ($this->port <= 0) {
             throw new TTransportException('Cannot open without port', TTransportException::NOT_OPEN);
         }
 
-        $this->handle_ = @stream_socket_client(
-            $this->host_ . ':' . $this->port_,
+        $this->handle = @stream_socket_client(
+            $this->host . ':' . $this->port,
             $errno,
             $errstr,
-            $this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+            $this->sendTimeoutSec + ($this->sendTimeoutUsec / 1000000),
             STREAM_CLIENT_CONNECT,
-            $this->context_
+            $this->context
         );
 
         // Connect failed?
-        if ($this->handle_ === false) {
+        if ($this->handle === false) {
             $error = 'TSocket: Could not connect to ' .
-                $this->host_ . ':' . $this->port_ . ' (' . $errstr . ' [' . $errno . '])';
-            if ($this->debug_) {
-                call_user_func($this->debugHandler_, $error);
-            }
+                $this->host . ':' . $this->port . ' (' . $errstr . ' [' . $errno . '])';
+            $this->log(LogLevel::ERROR, $error);
             throw new TException($error);
         }
+    }
+
+    /**
+     * Returns the host with an `ssl://` prefix when no transport-protocol
+     * prefix is already present.
+     */
+    private function ensureSslHostPrefix(string $host): string
+    {
+        return str_contains($host, '://') ? $host : 'ssl://' . $host;
     }
 }

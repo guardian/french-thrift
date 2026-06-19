@@ -19,9 +19,12 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\TMemoryBuffer;
 
@@ -54,9 +57,7 @@ class TMemoryBufferTest extends TestCase
         $transport->read(1);
     }
 
-    /**
-     * @dataProvider readDataProvider
-     */
+    #[DataProvider('readDataProvider')]
     public function testRead(
         $startBuffer,
         $readLength,
@@ -68,7 +69,7 @@ class TMemoryBufferTest extends TestCase
         $this->assertEquals($expectedBuffer, $transport->getBuffer());
     }
 
-    public function readDataProvider()
+    public static function readDataProvider()
     {
         yield 'Read part of buffer' => [
             'startBuffer' => '1234567890',
@@ -96,9 +97,7 @@ class TMemoryBufferTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider writeDataProvider
-     */
+    #[DataProvider('writeDataProvider')]
     public function testWrite(
         $startBuffer,
         $writeData,
@@ -109,7 +108,7 @@ class TMemoryBufferTest extends TestCase
         $this->assertEquals($expectedBuffer, $transport->getBuffer());
     }
 
-    public function writeDataProvider()
+    public static function writeDataProvider()
     {
         yield 'empty start buffer' => [
             'startBuffer' => '',

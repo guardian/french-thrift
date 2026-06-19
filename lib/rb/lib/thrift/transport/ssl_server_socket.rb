@@ -1,4 +1,5 @@
 # encoding: ascii-8bit
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -22,8 +23,8 @@ require 'socket'
 
 module Thrift
   class SSLServerSocket < ServerSocket
-    def initialize(host_or_port, port = nil, ssl_context = nil)
-      super(host_or_port, port)
+    def initialize(host_or_port, port = nil, ssl_context = nil, client_timeout: DEFAULT_CLIENT_TIMEOUT)
+      super(host_or_port, port, client_timeout: client_timeout)
       @ssl_context = ssl_context
     end
 
@@ -33,7 +34,7 @@ module Thrift
       socket = TCPServer.new(@host, @port)
       @handle = OpenSSL::SSL::SSLServer.new(socket, @ssl_context)
     end
-    
+
     def to_s
       "ssl(#{super.to_s})"
     end

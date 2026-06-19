@@ -41,6 +41,7 @@ thrift_SOURCES = src/thrift/audit/t_audit.cpp \
                  src/thrift/generate/t_generator_registry.h \
                  src/thrift/generate/t_html_generator.h \
                  src/thrift/generate/t_oop_generator.h \
+				 src/thrift/generate/sha256.h\
                  src/thrift/globals.h \
                  src/thrift/logging.h \
                  src/thrift/main.cc \
@@ -82,6 +83,7 @@ thrift_SOURCES += src/thrift/generate/t_c_glib_generator.cc \
                   src/thrift/generate/t_haxe_generator.cc \
                   src/thrift/generate/t_html_generator.cc \
                   src/thrift/generate/t_markdown_generator.cc \
+                  src/thrift/generate/t_mmd_generator.cc \
                   src/thrift/generate/t_java_generator.cc \
                   src/thrift/generate/t_javame_generator.cc \
                   src/thrift/generate/t_js_generator.cc \
@@ -97,7 +99,6 @@ thrift_SOURCES += src/thrift/generate/t_c_glib_generator.cc \
                   src/thrift/generate/t_rb_generator.cc \
                   src/thrift/generate/t_rs_generator.cc \
                   src/thrift/generate/t_st_generator.cc \
-                  src/thrift/generate/t_swift_generator.cc \
                   src/thrift/generate/t_xml_generator.cc \
                   src/thrift/generate/t_xsd_generator.cc \
                   src/thrift/generate/validator_parser.cc \
@@ -110,7 +111,7 @@ thrift_CXXFLAGS = -Wall -Wextra -pedantic -Werror
 thrift_LDADD = @LEXLIB@ src/thrift/libparse.a
 
 WINDOWS_DIST = \
-             compiler.sln \
+             compiler.slnx \
              compiler.vcxproj \
              compiler.vcxproj.filters
 

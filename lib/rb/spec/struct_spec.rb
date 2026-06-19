@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,11 +21,10 @@
 require 'spec_helper'
 
 describe 'Struct' do
-
   describe Thrift::Struct do
     it "should iterate over all fields properly" do
       fields = {}
-      SpecNamespace::Foo.new.each_field { |fid,field_info| fields[fid] = field_info }
+      SpecNamespace::Foo.new.each_field { |fid, field_info| fields[fid] = field_info }
       expect(fields).to eq(SpecNamespace::Foo::FIELDS)
     end
 
@@ -51,10 +51,10 @@ describe 'Struct' do
       begin
         struct = SpecNamespace::Foo.new
         struct.ints << 17
-        expect(SpecNamespace::Foo.new.ints).to eq([1,2,2,3])
+        expect(SpecNamespace::Foo.new.ints).to eq([1, 2, 2, 3])
       ensure
         # ensure no leakage to other tests
-        SpecNamespace::Foo::FIELDS[4][:default] = [1,2,2,3]
+        SpecNamespace::Foo::FIELDS[4][:default] = [1, 2, 2, 3]
       end
     end
 
@@ -142,6 +142,34 @@ describe 'Struct' do
       expect(struct.shorts).to eq(Set.new([3, 2]))
     end
 
+    it "rejects negative container sizes while reading" do
+      struct = SpecNamespace::Foo.new
+      prot = Thrift::BaseProtocol.new(double("transport"))
+
+      expect(prot).to receive(:read_list_begin).and_return([Thrift::Types::I32, -1])
+
+      expect {
+        struct.send(:read_field, prot, SpecNamespace::Foo::FIELDS[4])
+      }.to raise_error(Thrift::ProtocolException, "Negative size") { |error|
+        expect(error.type).to eq(Thrift::ProtocolException::NEGATIVE_SIZE)
+      }
+    end
+
+    it "does not preallocate arrays from declared list sizes" do
+      struct = SpecNamespace::Foo.new
+      prot = Thrift::BaseProtocol.new(double("transport"))
+      declared_size = 1 << 30
+      sentinel = RuntimeError.new("stop after first element")
+
+      expect(prot).to receive(:read_list_begin).and_return([Thrift::Types::I32, declared_size])
+      expect(prot).to receive(:read_i32).and_raise(sentinel)
+      expect(Array).not_to receive(:new).with(declared_size)
+
+      expect {
+        struct.send(:read_field, prot, SpecNamespace::Foo::FIELDS[4])
+      }.to raise_error(sentinel)
+    end
+
     it "should serialize false boolean fields correctly" do
       b = SpecNamespace::BoolStruct.new(:yesno => false)
       prot = Thrift::BinaryProtocol.new(Thrift::MemoryBufferTransport.new)
@@ -181,7 +209,7 @@ describe 'Struct' do
     end
 
     it "should write itself to the wire" do
-      prot = Thrift::BaseProtocol.new(double("transport")) #mock("Protocol")
+      prot = Thrift::BaseProtocol.new(double("transport")) # mock("Protocol")
       expect(prot).to receive(:write_struct_begin).with("SpecNamespace::Foo")
       expect(prot).to receive(:write_struct_begin).with("SpecNamespace::Hello")
       expect(prot).to receive(:write_struct_end).twice
@@ -227,7 +255,7 @@ describe 'Struct' do
     it "should support optional type-checking in Thrift::Struct.new" do
       Thrift.type_checking = true
       begin
-        expect { SpecNamespace::Hello.new(:greeting => 3) }.to raise_error(Thrift::TypeError, /Expected Types::STRING, received (Integer|Fixnum) for field greeting/)
+        expect { SpecNamespace::Hello.new(:greeting => 3) }.to raise_error(Thrift::TypeError, "Expected Types::STRING, received Integer for field greeting")
       ensure
         Thrift.type_checking = false
       end
@@ -238,7 +266,7 @@ describe 'Struct' do
       Thrift.type_checking = true
       begin
         hello = SpecNamespace::Hello.new
-        expect { hello.greeting = 3 }.to raise_error(Thrift::TypeError, /Expected Types::STRING, received (Integer|Fixnum) for field greeting/)
+        expect { hello.greeting = 3 }.to raise_error(Thrift::TypeError, "Expected Types::STRING, received Integer for field greeting")
       ensure
         Thrift.type_checking = false
       end
@@ -259,9 +287,9 @@ describe 'Struct' do
         prot = Thrift::BaseProtocol.new(double("trans"))
         expect(prot).to receive(:write_struct_begin).with("SpecNamespace::Xception")
         expect(prot).to receive(:write_struct_end)
-        expect(prot).to receive(:write_field_begin).with('message', Thrift::Types::STRING, 1)#, "something happened")
+        expect(prot).to receive(:write_field_begin).with('message', Thrift::Types::STRING, 1)
         expect(prot).to receive(:write_string).with("something happened")
-        expect(prot).to receive(:write_field_begin).with('code', Thrift::Types::I32, 2)#, 1)
+        expect(prot).to receive(:write_field_begin).with('code', Thrift::Types::I32, 2)
         expect(prot).to receive(:write_i32).with(1)
         expect(prot).to receive(:write_field_stop)
         expect(prot).to receive(:write_field_end).twice
@@ -288,6 +316,83 @@ describe 'Struct' do
 
         e.write(prot)
       end
+    end
+
+    it "should handle UUID fields in structs" do
+      struct = SpecNamespace::Foo.new(
+        simple: 42,
+        words: 'test',
+        opt_uuid: '550e8400-e29b-41d4-a716-446655440000'
+      )
+
+      trans = Thrift::MemoryBufferTransport.new
+      prot = Thrift::BinaryProtocol.new(trans)
+
+      struct.write(prot)
+
+      result = SpecNamespace::Foo.new
+      result.read(prot)
+
+      expect(result.simple).to eq(42)
+      expect(result.words).to eq('test')
+      expect(result.opt_uuid).to eq('550e8400-e29b-41d4-a716-446655440000')
+    end
+
+    it "should handle optional UUID fields when unset" do
+      struct = SpecNamespace::Foo.new(simple: 42, words: 'test')
+      expect(struct.opt_uuid).to be_nil
+      expect(struct.opt_uuid?).to be_falsey
+    end
+
+    it "should handle list of UUIDs in SimpleList" do
+      uuids = ['550e8400-e29b-41d4-a716-446655440000', '6ba7b810-9dad-11d1-80b4-00c04fd430c8']
+      struct = SpecNamespace::SimpleList.new(uuids: uuids)
+
+      trans = Thrift::MemoryBufferTransport.new
+      prot = Thrift::CompactProtocol.new(trans)
+
+      struct.write(prot)
+
+      result = SpecNamespace::SimpleList.new
+      result.read(prot)
+
+      expect(result.uuids).to eq(uuids)
+    end
+
+    it "should normalize UUID case to lowercase" do
+      struct = SpecNamespace::Foo.new(opt_uuid: '550E8400-E29B-41D4-A716-446655440000')
+
+      trans = Thrift::MemoryBufferTransport.new
+      prot = Thrift::BinaryProtocol.new(trans)
+
+      struct.write(prot)
+
+      result = SpecNamespace::Foo.new
+      result.read(prot)
+
+      expect(result.opt_uuid).to eq('550e8400-e29b-41d4-a716-446655440000')
+    end
+
+    it "should handle UUID alongside other types in SimpleList" do
+      struct = SpecNamespace::SimpleList.new(
+        bools: [true, false],
+        i32s: [1, 2, 3],
+        strings: ['hello', 'world'],
+        uuids: ['550e8400-e29b-41d4-a716-446655440000', '00000000-0000-0000-0000-000000000000']
+      )
+
+      trans = Thrift::MemoryBufferTransport.new
+      prot = Thrift::BinaryProtocol.new(trans)
+
+      struct.write(prot)
+
+      result = SpecNamespace::SimpleList.new
+      result.read(prot)
+
+      expect(result.bools).to eq([true, false])
+      expect(result.i32s).to eq([1, 2, 3])
+      expect(result.strings).to eq(['hello', 'world'])
+      expect(result.uuids).to eq(['550e8400-e29b-41d4-a716-446655440000', '00000000-0000-0000-0000-000000000000'])
     end
   end
 end

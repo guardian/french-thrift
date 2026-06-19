@@ -170,8 +170,8 @@ static inline To bitwise_cast(From from) {
       | (((n) & 0x0000ff00ul) << 8)  \
       | (((n) & 0x000000fful) << 24) )
 #  define bswap_16(n) \
-      ( (((n) & ((unsigned short)0xff00ul)) >> 8)  \
-      | (((n) & ((unsigned short)0x00fful)) << 8)  )
+      ( (((n) & static_cast<unsigned short>(0xff00ul)) >> 8)  \
+      | (((n) & static_cast<unsigned short>(0x00fful)) << 8)  )
 #  define THRIFT_htolell(n) bswap_64(n)
 #  define THRIFT_letohll(n) bswap_64(n)
 #  define THRIFT_htolel(n) bswap_32(n)
@@ -191,11 +191,11 @@ static inline To bitwise_cast(From from) {
 #  define THRIFT_ntohll(n) bswap_64(n)
 #  define THRIFT_htonll(n) bswap_64(n)
 # elif defined(_MSC_VER) /* Microsoft Visual C++ */
-#  define THRIFT_ntohll(n) ( _byteswap_uint64((uint64_t)n) )
-#  define THRIFT_htonll(n) ( _byteswap_uint64((uint64_t)n) )
+#  define THRIFT_ntohll(n) ( _byteswap_uint64(static_cast<uint64_t>(n)) )
+#  define THRIFT_htonll(n) ( _byteswap_uint64(static_cast<uint64_t>(n)) )
 # elif !defined(THRIFT_ntohll) /* Not GNUC/GLIBC or MSVC */
-#  define THRIFT_ntohll(n) ( (((uint64_t)ntohl((uint32_t)n)) << 32) + ntohl((uint32_t)(n >> 32)) )
-#  define THRIFT_htonll(n) ( (((uint64_t)htonl((uint32_t)n)) << 32) + htonl((uint32_t)(n >> 32)) )
+#  define THRIFT_ntohll(n) ( (static_cast<uint64_t>(ntohl(static_cast<uint32_t>(n))) << 32) + ntohl(static_cast<uint32_t>(n >> 32)) )
+#  define THRIFT_htonll(n) ( (static_cast<uint64_t>(htonl(static_cast<uint32_t>(n))) << 32) + htonl(static_cast<uint32_t>(n >> 32)) )
 # endif /* GNUC/GLIBC or MSVC or something else */
 #else /* __THRIFT_BYTE_ORDER */
 # error "Can't define THRIFT_htonll or THRIFT_ntohll!"
@@ -604,18 +604,18 @@ protected:
 
   virtual void checkReadBytesAvailable(TSet& set)
   {
-      ptrans_->checkReadBytesAvailable(set.size_ * getMinSerializedSize(set.elemType_));
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(set.size_) * getMinSerializedSize(set.elemType_));
   }
 
   virtual void checkReadBytesAvailable(TList& list)
   {
-      ptrans_->checkReadBytesAvailable(list.size_ * getMinSerializedSize(list.elemType_));
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(list.size_) * getMinSerializedSize(list.elemType_));
   }
 
   virtual void checkReadBytesAvailable(TMap& map)
   {
       int elmSize = getMinSerializedSize(map.keyType_) + getMinSerializedSize(map.valueType_);
-      ptrans_->checkReadBytesAvailable(map.size_ * elmSize);
+      ptrans_->checkReadBytesAvailable(static_cast<int64_t>(map.size_) * elmSize);
   }
 
   std::shared_ptr<TTransport> ptrans_;
@@ -783,6 +783,10 @@ uint32_t skip(Protocol_& prot, TType type) {
     }
     result += prot.readListEnd();
     return result;
+  }
+  case T_UUID: {
+    TUuid uuid;
+    return prot.readUUID(uuid);
   }
   default:
     break;

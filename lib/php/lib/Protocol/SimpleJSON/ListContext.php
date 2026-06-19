@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,26 +21,26 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\SimpleJSON;
 
 use Thrift\Protocol\TSimpleJSONProtocol;
 
 class ListContext extends Context
 {
-    protected $first_ = true;
-    private $p_;
+    protected bool $first = true;
 
-    public function __construct($p)
+    public function __construct(private TSimpleJSONProtocol $protocol)
     {
-        $this->p_ = $p;
     }
 
-    public function write()
+    public function write(): void
     {
-        if ($this->first_) {
-            $this->first_ = false;
+        if ($this->first) {
+            $this->first = false;
         } else {
-            $this->p_->getTransport()->write(TSimpleJSONProtocol::COMMA);
+            $this->protocol->getTransport()->write(TSimpleJSONProtocol::COMMA);
         }
     }
 }

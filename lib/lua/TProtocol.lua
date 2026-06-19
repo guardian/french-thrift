@@ -48,6 +48,8 @@ function TProtocolException:__errorCodeToString()
   end
 end
 
+DEFAULT_RECURSION_DEPTH = 64
+
 TProtocolBase = __TObject:new{
   __type = 'TProtocolBase',
   trans
@@ -63,7 +65,23 @@ function TProtocolBase:new(obj)
     error('You must provide ' .. ttype(self) .. ' with a trans')
   end
 
+  obj.recursionDepth = 0
   return __TObject.new(self, obj)
+end
+
+function TProtocolBase:incrementRecursionDepth()
+  self.recursionDepth = self.recursionDepth + 1
+  if self.recursionDepth > DEFAULT_RECURSION_DEPTH then
+    self.recursionDepth = self.recursionDepth - 1
+    terror(TProtocolException:new{
+      message = 'Maximum recursion depth exceeded',
+      errorCode = TProtocolException.DEPTH_LIMIT
+    })
+  end
+end
+
+function TProtocolBase:decrementRecursionDepth()
+  self.recursionDepth = self.recursionDepth - 1
 end
 
 function TProtocolBase:writeMessageBegin(name, ttype, seqid) end
@@ -86,6 +104,7 @@ function TProtocolBase:writeI32(i32) end
 function TProtocolBase:writeI64(i64) end
 function TProtocolBase:writeDouble(dub) end
 function TProtocolBase:writeString(str) end
+function TProtocolBase:writeUuid(uuid) end
 function TProtocolBase:readMessageBegin() end
 function TProtocolBase:readMessageEnd() end
 function TProtocolBase:readStructBegin() end
@@ -105,6 +124,7 @@ function TProtocolBase:readI32() end
 function TProtocolBase:readI64() end
 function TProtocolBase:readDouble() end
 function TProtocolBase:readString() end
+function TProtocolBase:readUuid() end
 
 function TProtocolBase:skip(ttype)
   if ttype == TType.BOOL then
@@ -151,6 +171,8 @@ function TProtocolBase:skip(ttype)
       self:skip(ettype)
     end
     self:readListEnd()
+  elseif ttype == TType.UUID then
+    self:readUuid()
   else
     terror(TProtocolException:new{
       message = 'Invalid data'

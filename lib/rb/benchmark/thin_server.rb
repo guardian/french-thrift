@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -18,6 +19,7 @@
 #
 
 $:.unshift File.dirname(__FILE__) + '/../lib'
+$:.unshift File.dirname(__FILE__) + '/../ext'
 require 'thrift'
 $:.unshift File.dirname(__FILE__) + "/gen-rb"
 require 'benchmark_service'

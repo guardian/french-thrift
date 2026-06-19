@@ -19,7 +19,7 @@
   -->
 
   <PropertyGroup>
-    <ThriftVersion>0.21.0</ThriftVersion>
+    <ThriftVersion>0.24.0</ThriftVersion>
     <ThriftVersionOutput>Thrift version $(ThriftVersion)</ThriftVersionOutput>
     <TargetFramework>net8.0</TargetFramework>
     <LangVersion>latestMajor</LangVersion>
@@ -38,7 +38,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.ServiceModel.Primitives" Version="8.0.0" />
+    <PackageReference Include="System.ServiceModel.Primitives" Version="8.1.2" />
   </ItemGroup>
 
   <ItemGroup>
@@ -76,6 +76,7 @@
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../optional_required_default.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../name_conflicts.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../../../../../test/ThriftTest.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../../../../../test/ExceptionStruct.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../../../../../contrib/fb303/if/fb303.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../Thrift5253.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:wcf,union,serial,net8 -r ../Thrift5320.thrift" />

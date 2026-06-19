@@ -20,11 +20,16 @@
  *
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Protocol;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\Exception\TException;
 use Thrift\Protocol\TSimpleJSONProtocol;
+use Thrift\Protocol\SimpleJSON\CollectionMapKeyException;
+use Thrift\Transport\TMemoryBuffer;
 use Thrift\Transport\TTransport;
 use Thrift\Type\TType;
 
@@ -37,97 +42,325 @@ class TSimpleJSONProtocolTest extends TestCase
      * - see http://wiki.apache.org/thrift/ThriftUsageJava
      * - use JSON instead
      *
-     * @dataProvider readDataProvider
      */
-    public function testRead(
-        $methodName,
-        $methodArguments
-    ) {
+    /**
+     * All read methods throw TException("Not implemented") in
+     * TSimpleJSONProtocol. The dispatch arity (count of by-ref output
+     * params, including nullable scalars) is all we need to invoke the
+     * typed signatures correctly before the exception propagates.
+     */
+    #[DataProvider('readDataProvider')]
+    public function testRead(string $methodName, int $argCount): void
+    {
         $this->expectException(TException::class);
         $this->expectExceptionMessage("Not implemented");
 
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $protocol = new TSimpleJSONProtocol($transport);
-        $protocol->$methodName(...$methodArguments);
+
+        $args = array_fill(0, $argCount, null);
+        $protocol->$methodName(...$args);
     }
 
-    public function readDataProvider()
+    public static function readDataProvider(): \Generator
     {
-        yield 'readMessageBegin' => [
-            'methodName' => 'readMessageBegin',
-            'methodArguments' => ['name', 'type', 'seqId'],
+        yield 'readMessageBegin' => ['readMessageBegin', 3];
+        yield 'readMessageEnd' => ['readMessageEnd', 0];
+        yield 'readStructBegin' => ['readStructBegin', 1];
+        yield 'readStructEnd' => ['readStructEnd', 0];
+        yield 'readFieldBegin' => ['readFieldBegin', 3];
+        yield 'readFieldEnd' => ['readFieldEnd', 0];
+        yield 'readMapBegin' => ['readMapBegin', 3];
+        yield 'readMapEnd' => ['readMapEnd', 0];
+        yield 'readListBegin' => ['readListBegin', 2];
+        yield 'readListEnd' => ['readListEnd', 0];
+        yield 'readSetBegin' => ['readSetBegin', 2];
+        yield 'readSetEnd' => ['readSetEnd', 0];
+        yield 'readBool' => ['readBool', 1];
+        yield 'readByte' => ['readByte', 1];
+        yield 'readI16' => ['readI16', 1];
+        yield 'readI32' => ['readI32', 1];
+        yield 'readI64' => ['readI64', 1];
+        yield 'readDouble' => ['readDouble', 1];
+        yield 'readString' => ['readString', 1];
+    }
+
+    #[DataProvider('writeScalarProvider')]
+    public function testWriteScalar(string $writeMethod, $value, string $expectedJson)
+    {
+        $transport = new TMemoryBuffer();
+        $protocol = new TSimpleJSONProtocol($transport);
+
+        $protocol->writeListBegin(TType::STRING, 1);
+        $protocol->$writeMethod($value);
+        $protocol->writeListEnd();
+
+        $this->assertSame('[' . $expectedJson . ']', $transport->getBuffer());
+    }
+
+    public static function writeScalarProvider()
+    {
+        yield 'bool true' => [
+            'writeMethod' => 'writeBool',
+            'value' => true,
+            'expectedJson' => '1',
         ];
-        yield 'readMessageEnd' => [
-            'methodName' => 'readMessageEnd',
-            'methodArguments' => [],
+        yield 'bool false' => [
+            'writeMethod' => 'writeBool',
+            'value' => false,
+            'expectedJson' => '0',
         ];
-        yield 'readStructBegin' => [
-            'methodName' => 'readStructBegin',
-            'methodArguments' => ['name'],
+        yield 'byte zero' => [
+            'writeMethod' => 'writeByte',
+            'value' => 0,
+            'expectedJson' => '0',
         ];
-        yield 'readStructEnd' => [
-            'methodName' => 'readStructEnd',
-            'methodArguments' => [],
+        yield 'byte max' => [
+            'writeMethod' => 'writeByte',
+            'value' => 127,
+            'expectedJson' => '127',
         ];
-        yield 'readFieldBegin' => [
-            'methodName' => 'readFieldBegin',
-            'methodArguments' => ['name', TType::STRING, 1],
+        yield 'byte min' => [
+            'writeMethod' => 'writeByte',
+            'value' => -128,
+            'expectedJson' => '-128',
         ];
-        yield 'readFieldEnd' => [
-            'methodName' => 'readFieldEnd',
-            'methodArguments' => [],
+        yield 'i16 max' => [
+            'writeMethod' => 'writeI16',
+            'value' => 32767,
+            'expectedJson' => '32767',
         ];
-        yield 'readMapBegin' => [
-            'methodName' => 'readMapBegin',
-            'methodArguments' => [TType::STRING, TType::STRING, 1],
+        yield 'i16 min' => [
+            'writeMethod' => 'writeI16',
+            'value' => -32768,
+            'expectedJson' => '-32768',
         ];
-        yield 'readMapEnd' => [
-            'methodName' => 'readMapEnd',
-            'methodArguments' => [],
+        yield 'i16 zero' => [
+            'writeMethod' => 'writeI16',
+            'value' => 0,
+            'expectedJson' => '0',
         ];
-        yield 'readListBegin' => [
-            'methodName' => 'readListBegin',
-            'methodArguments' => [TType::STRING, 1],
+        yield 'i32 max' => [
+            'writeMethod' => 'writeI32',
+            'value' => 2147483647,
+            'expectedJson' => '2147483647',
         ];
-        yield 'readListEnd' => [
-            'methodName' => 'readListEnd',
-            'methodArguments' => [],
+        yield 'i32 zero' => [
+            'writeMethod' => 'writeI32',
+            'value' => 0,
+            'expectedJson' => '0',
         ];
-        yield 'readSetBegin' => [
-            'methodName' => 'readSetBegin',
-            'methodArguments' => [TType::STRING, 1],
+        yield 'i32 negative' => [
+            'writeMethod' => 'writeI32',
+            'value' => -1,
+            'expectedJson' => '-1',
         ];
-        yield 'readSetEnd' => [
-            'methodName' => 'readSetEnd',
-            'methodArguments' => [],
+        yield 'i64 large' => [
+            'writeMethod' => 'writeI64',
+            'value' => 1000000000,
+            'expectedJson' => '1000000000',
         ];
-        yield 'readBool' => [
-            'methodName' => 'readBool',
-            'methodArguments' => [true],
+        yield 'i64 zero' => [
+            'writeMethod' => 'writeI64',
+            'value' => 0,
+            'expectedJson' => '0',
         ];
-        yield 'readByte' => [
-            'methodName' => 'readByte',
-            'methodArguments' => [0x01],
+        yield 'i64 negative' => [
+            'writeMethod' => 'writeI64',
+            'value' => -1000000000,
+            'expectedJson' => '-1000000000',
         ];
-        yield 'readI16' => [
-            'methodName' => 'readI16',
-            'methodArguments' => [1],
+        yield 'double pi' => [
+            'writeMethod' => 'writeDouble',
+            'value' => 3.14,
+            'expectedJson' => json_encode(3.14),
         ];
-        yield 'readI32' => [
-            'methodName' => 'readI32',
-            'methodArguments' => [1],
+        yield 'double negative' => [
+            'writeMethod' => 'writeDouble',
+            'value' => -2.5,
+            'expectedJson' => json_encode(-2.5),
         ];
-        yield 'readI64' => [
-            'methodName' => 'readI64',
-            'methodArguments' => [1],
+        yield 'double large' => [
+            'writeMethod' => 'writeDouble',
+            'value' => 1.0e10,
+            'expectedJson' => json_encode(1.0e10),
         ];
-        yield 'readDouble' => [
-            'methodName' => 'readDouble',
-            'methodArguments' => [0.1],
+        yield 'double zero' => [
+            'writeMethod' => 'writeDouble',
+            'value' => 0.0,
+            'expectedJson' => json_encode(0.0),
         ];
-        yield 'readString' => [
-            'methodName' => 'readString',
-            'methodArguments' => ['string'],
+        yield 'string simple' => [
+            'writeMethod' => 'writeString',
+            'value' => 'hello',
+            'expectedJson' => '"hello"',
         ];
+        yield 'string with quotes' => [
+            'writeMethod' => 'writeString',
+            'value' => 'quote "inside"',
+            'expectedJson' => '"quote \"inside\""',
+        ];
+        yield 'string with path' => [
+            'writeMethod' => 'writeString',
+            'value' => 'path/to/file',
+            'expectedJson' => '"path/to/file"',
+        ];
+        yield 'string empty' => [
+            'writeMethod' => 'writeString',
+            'value' => '',
+            'expectedJson' => '""',
+        ];
+        yield 'string unicode' => [
+            'writeMethod' => 'writeString',
+            'value' => 'привіт',
+            'expectedJson' => json_encode('привіт'),
+        ];
+        yield 'uuid' => [
+            'writeMethod' => 'writeUuid',
+            'value' => '12345678-1234-5678-1234-567812345678',
+            'expectedJson' => '"12345678-1234-5678-1234-567812345678"',
+        ];
+    }
+
+    #[DataProvider('writeContainerProvider')]
+    public function testWriteContainer(array $operations, string $expectedJson)
+    {
+        $transport = new TMemoryBuffer();
+        $protocol = new TSimpleJSONProtocol($transport);
+
+        foreach ($operations as [$method, $args]) {
+            $protocol->$method(...$args);
+        }
+
+        $this->assertSame($expectedJson, $transport->getBuffer());
+    }
+
+    public static function writeContainerProvider()
+    {
+        yield 'list of integers' => [
+            'operations' => [
+                ['writeListBegin', [TType::I32, 3]],
+                ['writeI32', [1]],
+                ['writeI32', [2]],
+                ['writeI32', [3]],
+                ['writeListEnd', []],
+            ],
+            'expectedJson' => '[1,2,3]',
+        ];
+        yield 'empty list' => [
+            'operations' => [
+                ['writeListBegin', [TType::I32, 0]],
+                ['writeListEnd', []],
+            ],
+            'expectedJson' => '[]',
+        ];
+        yield 'set of integers' => [
+            'operations' => [
+                ['writeSetBegin', [TType::I32, 2]],
+                ['writeI32', [10]],
+                ['writeI32', [20]],
+                ['writeSetEnd', []],
+            ],
+            'expectedJson' => '[10,20]',
+        ];
+        yield 'map string to i32' => [
+            'operations' => [
+                ['writeMapBegin', [TType::STRING, TType::I32, 2]],
+                ['writeString', ['key1']],
+                ['writeI32', [100]],
+                ['writeString', ['key2']],
+                ['writeI32', [200]],
+                ['writeMapEnd', []],
+            ],
+            'expectedJson' => '{"key1":100,"key2":200}',
+        ];
+        yield 'empty map' => [
+            'operations' => [
+                ['writeMapBegin', [TType::STRING, TType::I32, 0]],
+                ['writeMapEnd', []],
+            ],
+            'expectedJson' => '{}',
+        ];
+        yield 'nested list' => [
+            'operations' => [
+                ['writeListBegin', [TType::LST, 2]],
+                ['writeListBegin', [TType::I32, 2]],
+                ['writeI32', [1]],
+                ['writeI32', [2]],
+                ['writeListEnd', []],
+                ['writeListBegin', [TType::I32, 2]],
+                ['writeI32', [3]],
+                ['writeI32', [4]],
+                ['writeListEnd', []],
+                ['writeListEnd', []],
+            ],
+            'expectedJson' => '[[1,2],[3,4]]',
+        ];
+    }
+
+    #[DataProvider('writeStructuralProvider')]
+    public function testWriteStructural(array $operations, string $expectedJson)
+    {
+        $transport = new TMemoryBuffer();
+        $protocol = new TSimpleJSONProtocol($transport);
+
+        foreach ($operations as [$method, $args]) {
+            $protocol->$method(...$args);
+        }
+
+        $this->assertSame($expectedJson, $transport->getBuffer());
+    }
+
+    public static function writeStructuralProvider()
+    {
+        yield 'message begin' => [
+            'operations' => [
+                ['writeMessageBegin', ['name', 1, 42]],
+            ],
+            'expectedJson' => '["name",1,42',
+        ];
+        yield 'message begin and end' => [
+            'operations' => [
+                ['writeMessageBegin', ['name', 1, 42]],
+                ['writeMessageEnd', []],
+            ],
+            'expectedJson' => '["name",1,42]',
+        ];
+        yield 'struct with i32 field' => [
+            'operations' => [
+                ['writeStructBegin', ['MyStruct']],
+                ['writeFieldBegin', ['field_name', TType::I32, 1]],
+                ['writeI32', [42]],
+                ['writeFieldEnd', []],
+                ['writeFieldStop', []],
+                ['writeStructEnd', []],
+            ],
+            'expectedJson' => '{"field_name":42}',
+        ];
+        yield 'struct with multiple fields' => [
+            'operations' => [
+                ['writeStructBegin', ['MyStruct']],
+                ['writeFieldBegin', ['name', TType::STRING, 1]],
+                ['writeString', ['test']],
+                ['writeFieldEnd', []],
+                ['writeFieldBegin', ['value', TType::I32, 2]],
+                ['writeI32', [99]],
+                ['writeFieldEnd', []],
+                ['writeFieldStop', []],
+                ['writeStructEnd', []],
+            ],
+            'expectedJson' => '{"name":"test","value":99}',
+        ];
+    }
+
+    public function testMapKeyCannotBeCollection()
+    {
+        $this->expectException(CollectionMapKeyException::class);
+
+        $transport = new TMemoryBuffer();
+        $protocol = new TSimpleJSONProtocol($transport);
+
+        $protocol->writeMapBegin(TType::STRING, TType::I32, 1);
+        $protocol->writeMapBegin(TType::STRING, TType::I32, 1);
     }
 }

@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,16 +7,16 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 require 'logger'
 require 'thread'
@@ -23,7 +24,7 @@ require 'thread'
 module Thrift
   # this class expects to always use a FramedTransport for reading messages
   class NonblockingServer < BaseServer
-    def initialize(processor, server_transport, transport_factory=nil, protocol_factory=nil, num=20, logger=nil)
+    def initialize(processor, server_transport, transport_factory = nil, protocol_factory = nil, num = 20, logger = nil)
       super(processor, server_transport, transport_factory, protocol_factory)
       @num_threads = num
       if logger.nil?
@@ -97,7 +98,7 @@ module Thrift
 
     class IOManager # :nodoc:
       DEFAULT_BUFFER = 2**20
-      
+
       def initialize(processor, server_transport, transport_factory, protocol_factory, num, logger)
         @processor = processor
         @server_transport = server_transport
@@ -106,7 +107,7 @@ module Thrift
         @num_threads = num
         @logger = logger
         @connections = []
-        @buffers = Hash.new { |h,k| h[k] = '' }
+        @buffers = Hash.new { |h, k| h[k] = Bytes.empty_byte_buffer }
         @signal_queue = Queue.new
         @signal_pipes = IO.pipe
         @signal_pipes[1].sync = true
@@ -138,11 +139,16 @@ module Thrift
 
       def ensure_closed
         kill_worker_threads if @worker_threads
-        @iom_thread.kill
+        if @iom_thread&.alive?
+          @iom_thread.kill
+          @iom_thread.join
+        end
+        close_connections
+        close_signal_pipes
       end
 
       private
-      
+
       def run
         spin_worker_threads
 
@@ -244,6 +250,26 @@ module Thrift
           t.kill if t.status
         end
         @worker_threads.clear
+      end
+
+      def close_connections
+        @connections.each do |fd|
+          begin
+            fd.close
+          rescue IOError, SystemCallError, TransportException
+          end
+        end
+        @connections.clear
+        @buffers.clear
+      end
+
+      def close_signal_pipes
+        @signal_pipes.each do |pipe|
+          begin
+            pipe.close unless pipe.closed?
+          rescue IOError
+          end
+        end
       end
 
       def slice_frame!(buf)

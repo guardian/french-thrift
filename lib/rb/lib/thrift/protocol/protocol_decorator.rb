@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -111,6 +112,10 @@ module Thrift
       @protocol.write_binary(buf)
     end
 
+    def write_uuid(uuid)
+      @protocol.write_uuid(uuid)
+    end
+
     def read_message_begin
       @protocol.read_message_begin
     end
@@ -189,6 +194,10 @@ module Thrift
 
     def read_binary
       @protocol.read_binary
+    end
+
+    def read_uuid
+      @protocol.read_uuid
     end
   end
 end

@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -55,6 +56,7 @@ module Thrift
         value.read(iprot)
       when Types::MAP
         key_type, val_type, size = iprot.read_map_begin
+        raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
         # Skip the map contents if the declared key or value types don't match the expected ones.
         if (size != 0 && (key_type != field[:key][:type] || val_type != field[:value][:type]))
           size.times do
@@ -73,6 +75,7 @@ module Thrift
         iprot.read_map_end
       when Types::LIST
         e_type, size = iprot.read_list_begin
+        raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
         # Skip the list contents if the declared element type doesn't match the expected one.
         if (e_type != field[:element][:type])
           size.times do
@@ -80,13 +83,15 @@ module Thrift
           end
           value = nil
         else
-          value = Array.new(size) do |n|
-            read_field(iprot, field_info(field[:element]))
+          value = []
+          size.times do
+            value << read_field(iprot, field_info(field[:element]))
           end
         end
         iprot.read_list_end
       when Types::SET
         e_type, size = iprot.read_set_begin
+        raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
         # Skip the set contents if the declared element type doesn't match the expected one.
         if (e_type != field[:element][:type])
           size.times do
@@ -159,7 +164,7 @@ module Thrift
     def inspect_field(value, field_info)
       if enum_class = field_info[:enum_class]
         "#{enum_class.const_get(:VALUE_MAP)[value]} (#{value})"
-      elsif value.is_a? Hash 
+      elsif value.is_a? Hash
         if field_info[:type] == Types::MAP
           map_buf = []
           value.each do |k, v|
@@ -180,13 +185,13 @@ module Thrift
         value.inspect
       end
     end
-    
+
     def inspect_collection(collection, field_info)
       buf = []
       collection.each do |k|
         buf << inspect_field(k, field_info[:element])
       end
-      "[" + buf.join(", ") + "]"      
+      "[" + buf.join(", ") + "]"
     end
   end
 end

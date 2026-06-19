@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,7 +21,6 @@
 require 'spec_helper'
 
 describe 'StructNestedContainers' do
-
   def with_type_checking
     saved_type_checking, Thrift.type_checking = Thrift.type_checking, true
     begin
@@ -166,7 +166,7 @@ describe 'StructNestedContainers' do
       with_type_checking do
         a, b = SpecNamespace::NestedMapInMapKey.new, SpecNamespace::NestedMapInMapKey.new
         [a, b].each do |thrift_struct|
-          thrift_struct.value = { { 1 => 2, 3 => 4} => 1, {2 => 3, 4 => 5}  => 2 }
+          thrift_struct.value = { { 1 => 2, 3 => 4} => 1, {2 => 3, 4 => 5} => 2 }
           thrift_struct.validate
         end
         expect(a).to eq(b)

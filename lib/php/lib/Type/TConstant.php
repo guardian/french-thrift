@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,6 +21,8 @@
  * @package thrift
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Type;
 
 /**
@@ -36,14 +39,12 @@ abstract class TConstant
 
     /**
      * Get a constant value
-     * @param  string $constant
-     * @return mixed
      */
-    public static function get($constant)
+    public static function get(string $constant): mixed
     {
         if (is_null(static::$$constant)) {
             static::$$constant = call_user_func(
-                sprintf('static::init_%s', $constant)
+                sprintf(static::class . '::init_%s', $constant)
             );
         }
 

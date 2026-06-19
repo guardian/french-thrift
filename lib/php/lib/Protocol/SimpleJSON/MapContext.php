@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,25 +21,28 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\SimpleJSON;
+
+use Thrift\Protocol\TSimpleJSONProtocol;
 
 class MapContext extends StructContext
 {
-    protected $isKey = true;
-    private $p_;
+    protected bool $isKey = true;
 
-    public function __construct($p)
+    public function __construct(TSimpleJSONProtocol $protocol)
     {
-        parent::__construct($p);
+        parent::__construct($protocol);
     }
 
-    public function write()
+    public function write(): void
     {
         parent::write();
         $this->isKey = !$this->isKey;
     }
 
-    public function isMapKey()
+    public function isMapKey(): bool
     {
         // we want to coerce map keys to json strings regardless
         // of their type

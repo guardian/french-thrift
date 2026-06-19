@@ -1,5 +1,6 @@
 # encoding: ascii-8bit
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -7,16 +8,16 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 module Thrift
   class TransportException < Exception
@@ -25,10 +26,12 @@ module Thrift
     ALREADY_OPEN = 2
     TIMED_OUT = 3
     END_OF_FILE = 4
+    NEGATIVE_SIZE = 5
+    SIZE_LIMIT = 6
 
     attr_reader :type
 
-    def initialize(type=UNKNOWN, message=nil)
+    def initialize(type = UNKNOWN, message = nil)
       super(message)
       @type = type
     end
@@ -48,12 +51,12 @@ module Thrift
 
   class BaseTransport
     def open?; end
-    
+
     def open; end
 
     def close; end
 
-    # Reads a number of bytes from the transports. In Ruby 1.9+, the String returned will have a BINARY (aka ASCII8BIT) encoding.
+    # Reads a number of bytes from the transports. The String returned will have a BINARY (aka ASCII-8BIT) encoding.
     #
     # sz - The number of bytes to read from the transport.
     #
@@ -62,7 +65,7 @@ module Thrift
       raise NotImplementedError
     end
 
-    # Returns an unsigned byte as a Fixnum in the range (0..255).
+    # Returns an unsigned byte as a Integer in the range (0..255).
     def read_byte
       buf = read_all(1)
       return Bytes.get_string_byte(buf, 0)
@@ -80,17 +83,18 @@ module Thrift
     end
 
     def read_all(size)
-      return Bytes.empty_byte_buffer if size <= 0
-      buf = read(size)
+      raise TransportException.new(TransportException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
+      return Bytes.empty_byte_buffer if size == 0
+      buf = Bytes.force_binary_encoding(read(size))
       while (buf.length < size)
         chunk = read(size - buf.length)
         buf << chunk
       end
-    
+
       buf
     end
 
-    # Writes the byte buffer to the transport. In Ruby 1.9+, the buffer will be forced into BINARY encoding.
+    # Writes the byte buffer to the transport. The buffer will be forced into BINARY encoding.
     #
     # buf - A String acting as a byte buffer.
     #
@@ -104,12 +108,12 @@ module Thrift
       "base"
     end
   end
-  
+
   class BaseTransportFactory
     def get_transport(trans)
       return trans
     end
-    
+
     def to_s
       "base"
     end

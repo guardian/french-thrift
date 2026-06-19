@@ -17,7 +17,7 @@
 # under the License.
 #
 
-cmake_minimum_required(VERSION 3.3)
+cmake_minimum_required(VERSION 3.16)
 project("thrift-compiler" VERSION ${PACKAGE_VERSION})
 
 # version.h now handled via veralign.sh
@@ -30,7 +30,7 @@ find_package(BISON REQUIRED)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/thrift/)
 
 # Create flex and bison files and build the lib parse static library
-BISON_TARGET(thrifty ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thrifty.yy ${CMAKE_CURRENT_BINARY_DIR}/thrift/thrifty.cc)
+BISON_TARGET(thrifty ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thrifty.yy ${CMAKE_CURRENT_BINARY_DIR}/thrift/thrifty.cc COMPILE_FLAGS "--file-prefix-map=${CMAKE_BINARY_DIR}='' --file-prefix-map=${CMAKE_SOURCE_DIR}=''")
 FLEX_TARGET(thriftl ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thriftl.ll ${CMAKE_CURRENT_BINARY_DIR}/thrift/thriftl.cc)
 ADD_FLEX_BISON_DEPENDENCY(thriftl thrifty)
 
@@ -98,6 +98,7 @@ THRIFT_ADD_COMPILER(gv            "Enable compiler for GraphViz" ON)
 THRIFT_ADD_COMPILER(haxe          "Enable compiler for Haxe" ON)
 THRIFT_ADD_COMPILER(html          "Enable compiler for HTML Documentation" ON)
 THRIFT_ADD_COMPILER(markdown      "Enable compiler for Markdown Documentation" ON)
+THRIFT_ADD_COMPILER(mmd           "Enable compiler for Mermaid diagrams" ON)
 THRIFT_ADD_COMPILER(java          "Enable compiler for Java"   ON)
 THRIFT_ADD_COMPILER(javame        "Enable compiler for Java ME" ON)
 THRIFT_ADD_COMPILER(js            "Enable compiler for JavaScript" ON)
@@ -112,7 +113,6 @@ THRIFT_ADD_COMPILER(py            "Enable compiler for Python 2.0" ON)
 THRIFT_ADD_COMPILER(rb            "Enable compiler for Ruby" ON)
 THRIFT_ADD_COMPILER(rs            "Enable compiler for Rust" ON)
 THRIFT_ADD_COMPILER(st            "Enable compiler for Smalltalk" ON)
-THRIFT_ADD_COMPILER(swift         "Enable compiler for Cocoa Swift" ON)
 THRIFT_ADD_COMPILER(xml           "Enable compiler for XML" ON)
 THRIFT_ADD_COMPILER(xsd           "Enable compiler for XSD" ON)
 
@@ -143,4 +143,5 @@ install(TARGETS thrift-compiler DESTINATION bin)
 
 if(BUILD_TESTING)
     add_subdirectory(test)
+    add_subdirectory(tests)
 endif()

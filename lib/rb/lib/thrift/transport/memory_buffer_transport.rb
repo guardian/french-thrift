@@ -1,5 +1,6 @@
 # encoding: ascii-8bit
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -7,9 +8,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -70,6 +71,12 @@ module Thrift
       data
     end
 
+    def read_all(size)
+      raise TransportException.new(TransportException::NEGATIVE_SIZE, 'Negative size') unless size >= 0
+
+      read(size)
+    end
+
     def read_byte
       raise EOFError.new("Not enough bytes remain in buffer") if @index >= @buf.size
       val = Bytes.get_string_byte(@buf, @index)
@@ -112,16 +119,16 @@ module Thrift
         # if idx != 0
         #   out << " "
         # end
-      
+
         if idx == @index
           out << ">"
         end
-      
+
         out << @buf[idx].ord.to_s(16)
       end
       out.join(" ")
     end
-    
+
     def to_s
       "memory"
     end

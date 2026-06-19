@@ -273,6 +273,9 @@ string t_lua_generator::render_const_value(t_type* type, t_const_value* value) {
         out << value->get_double();
       }
       break;
+    case t_base_type::TYPE_UUID:
+      out << "TUUIDfromString(" << value->get_string() << ")";
+      break;
     default:
       throw "compiler error: no const of base type " + t_base_type::t_base_name(tbase);
     }
@@ -418,6 +421,9 @@ void t_lua_generator::generate_lua_struct_reader(ostream& out, t_struct* tstruct
   indent(out) << '\n' << '\n' << "function " << tstruct->get_name() << ":read(iprot)" << '\n';
   indent_up();
 
+  indent(out) << "iprot:incrementRecursionDepth()" << '\n';
+  indent(out) << "local ok, err = pcall(function()" << '\n';
+  indent_up();
   indent(out) << "iprot:readStructBegin()" << '\n';
 
   // while: Read in fields
@@ -457,6 +463,10 @@ void t_lua_generator::generate_lua_struct_reader(ostream& out, t_struct* tstruct
   indent_down();
   indent(out) << "end" << '\n';
   indent(out) << "iprot:readStructEnd()" << '\n';
+  indent_down();
+  indent(out) << "end)" << '\n';
+  indent(out) << "iprot:decrementRecursionDepth()" << '\n';
+  indent(out) << "if not ok then error(err, 0) end" << '\n';
 
   // end function
   indent_down();
@@ -475,6 +485,9 @@ void t_lua_generator::generate_lua_struct_writer(ostream& out, t_struct* tstruct
   indent(out) << '\n' << '\n' << "function " << tstruct->get_name() << ":write(oprot)" << '\n';
   indent_up();
 
+  indent(out) << "oprot:incrementRecursionDepth()" << '\n';
+  indent(out) << "local ok, err = pcall(function()" << '\n';
+  indent_up();
   indent(out) << "oprot:writeStructBegin('" << tstruct->get_name() << "')" << '\n';
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     // To check element of self whether nil or not.
@@ -494,6 +507,10 @@ void t_lua_generator::generate_lua_struct_writer(ostream& out, t_struct* tstruct
   }
   indent(out) << "oprot:writeFieldStop()" << '\n';
   indent(out) << "oprot:writeStructEnd()" << '\n';
+  indent_down();
+  indent(out) << "end)" << '\n';
+  indent(out) << "oprot:decrementRecursionDepth()" << '\n';
+  indent(out) << "if not ok then error(err, 0) end" << '\n';
 
   // end function
   indent_down();
@@ -727,6 +744,8 @@ void t_lua_generator::generate_process_function(ostream& out,
   if (!tfunction->is_oneway()) {
       out << indent() << "local result = " << resultname
           << ":new{}" << '\n';
+  } else {
+    out << indent() << "oprot.trans:flushOneway()" << '\n';
   }
 
   out <<  indent() << "local status, res = pcall(self.handler." << fn_name
@@ -844,6 +863,9 @@ void t_lua_generator::generate_deserialize_field(ostream& out,
         break;
       case t_base_type::TYPE_DOUBLE:
         out << "readDouble()";
+        break;
+      case t_base_type::TYPE_UUID:
+        out << "readUuid()";
         break;
       default:
         throw "compiler error: no PHP name for base type " + t_base_type::t_base_name(tbase);
@@ -1000,6 +1022,9 @@ void t_lua_generator::generate_serialize_field(ostream& out, t_field* tfield, st
       case t_base_type::TYPE_DOUBLE:
         out << "writeDouble(" << name << ")";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "writeUuid(" << name << ")";
+        break;
       default:
         throw "compiler error: no PHP name for base type " + t_base_type::t_base_name(tbase);
       }
@@ -1151,6 +1176,8 @@ string t_lua_generator::type_to_enum(t_type* type) {
       return "TType.I64";
     case t_base_type::TYPE_DOUBLE:
       return "TType.DOUBLE";
+    case t_base_type::TYPE_UUID:
+      return "TType.UUID";
     default:
       throw "compiler error: unhandled type";
     }

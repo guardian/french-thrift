@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -19,6 +20,8 @@
  *
  * @package thrift.processor
  */
+
+declare(strict_types=1);
 
 namespace Thrift;
 
@@ -51,21 +54,22 @@ use Thrift\Type\TMessageType;
 
 class TMultiplexedProcessor
 {
-    private $serviceProcessorMap_;
+    /**
+     * @var array<string, object>
+     */
+    private array $serviceProcessorMap = [];
 
     /**
      * 'Register' a service with this <code>TMultiplexedProcessor</code>.  This
      * allows us to broker requests to individual services by using the service
      * name to select them at request time.
      *
-     * @param serviceName Name of a service, has to be identical to the name
-     * declared in the Thrift IDL, e.g. "WeatherReport".
-     * @param processor Implementation of a service, usually referred to
-     * as "handlers", e.g. WeatherReportHandler implementing WeatherReport.Iface.
+     * @param string $serviceName Must match the name declared in the Thrift IDL, e.g. "WeatherReport".
+     * @param object $processor Service implementation, e.g. WeatherReportHandler implementing WeatherReport.Iface.
      */
-    public function registerProcessor($serviceName, $processor)
+    public function registerProcessor(string $serviceName, object $processor): void
     {
-        $this->serviceProcessorMap_[$serviceName] = $processor;
+        $this->serviceProcessorMap[$serviceName] = $processor;
     }
 
     /**
@@ -83,7 +87,7 @@ class TMultiplexedProcessor
      *                    the service name was not found in the message, or if the service
      *                    name was not found in the service map.
      */
-    public function process(TProtocol $input, TProtocol $output)
+    public function process(TProtocol $input, TProtocol $output): mixed
     {
         /*
             Use the actual underlying protocol (e.g. TBinaryProtocol) to read the
@@ -102,13 +106,13 @@ class TMultiplexedProcessor
                 "forget to use a TMultiplexProtocol in your client?");
         }
         list($serviceName, $messageName) = explode(':', $fname, 2);
-        if (!array_key_exists($serviceName, $this->serviceProcessorMap_)) {
+        if (!array_key_exists($serviceName, $this->serviceProcessorMap)) {
             throw new TException("Service name not found: {$serviceName}.  Did you forget " .
                 "to call registerProcessor()?");
         }
 
         // Dispatch processing to the stored processor
-        $processor = $this->serviceProcessorMap_[$serviceName];
+        $processor = $this->serviceProcessorMap[$serviceName];
 
         return $processor->process(
             new StoredMessageProtocol($input, $messageName, $mtype, $rseqid),

@@ -20,9 +20,12 @@
  *
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Protocol;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\Protocol\TBinaryProtocolAccelerated;
 use Thrift\Transport\TBufferedTransport;
 use Thrift\Transport\TMemoryBuffer;
@@ -30,9 +33,7 @@ use Thrift\Transport\TSocket;
 
 class TBinaryProtocolAcceleratedTest extends TestCase
 {
-    /**
-     * @dataProvider constructDataProvider
-     */
+    #[DataProvider('constructDataProvider')]
     public function testConstruct(
         $transport,
         $expectedTransport
@@ -41,7 +42,7 @@ class TBinaryProtocolAcceleratedTest extends TestCase
         $this->assertInstanceOf($expectedTransport, $protocol->getTransport());
     }
 
-    public function constructDataProvider()
+    public static function constructDataProvider()
     {
         yield 'not buffered transport' => [
             'transport' => new TMemoryBuffer(),
@@ -53,9 +54,7 @@ class TBinaryProtocolAcceleratedTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider strictParamsDataProvider
-     */
+    #[DataProvider('strictParamsDataProvider')]
     public function testStrictParams($strictRead, $strictWrite)
     {
         $protocol = new TBinaryProtocolAccelerated(new TMemoryBuffer(), $strictRead, $strictWrite);
@@ -63,7 +62,7 @@ class TBinaryProtocolAcceleratedTest extends TestCase
         $this->assertEquals($strictWrite, $protocol->isStrictWrite());
     }
 
-    public function strictParamsDataProvider()
+    public static function strictParamsDataProvider()
     {
         yield 'strict read and write' => [true, true];
         yield 'not strict read and write' => [false, false];

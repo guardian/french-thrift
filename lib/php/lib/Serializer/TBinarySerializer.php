@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -21,6 +22,8 @@
  * @author: rmarin (marin.radu@facebook.com)
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Serializer;
 
 use Thrift\Transport\TMemoryBuffer;
@@ -33,16 +36,18 @@ use Thrift\Type\TMessageType;
  */
 class TBinarySerializer
 {
+    private static ?bool $hasAcceleratedProtocol = null;
+
     // NOTE(rmarin): Because thrift_protocol_write_binary
     // adds a begin message prefix, you cannot specify
     // a transport in which to serialize an object. It has to
     // be a string. Otherwise we will break the compatibility with
     // normal deserialization.
-    public static function serialize($object)
+    public static function serialize(object $object): string
     {
         $transport = new TMemoryBuffer();
         $protocol = new TBinaryProtocolAccelerated($transport);
-        if (function_exists('thrift_protocol_write_binary')) {
+        if (self::hasAcceleratedProtocol()) {
             thrift_protocol_write_binary(
                 $protocol,
                 $object->getName(),
@@ -61,11 +66,14 @@ class TBinarySerializer
         return $transport->getBuffer();
     }
 
-    public static function deserialize($string_object, $class_name, $buffer_size = 8192)
+    /**
+     * @param class-string $class_name
+     */
+    public static function deserialize(string $string_object, string $class_name, int $buffer_size = 8192): object
     {
         $transport = new TMemoryBuffer();
         $protocol = new TBinaryProtocolAccelerated($transport);
-        if (function_exists('thrift_protocol_read_binary')) {
+        if (self::hasAcceleratedProtocol()) {
             // NOTE (t.heintz) TBinaryProtocolAccelerated internally wraps our TMemoryBuffer in a
             // TBufferedTransport, so we have to retrieve it again or risk losing data when writing
             // less than 512 bytes to the transport (see the comment there as well).
@@ -83,5 +91,12 @@ class TBinarySerializer
 
             return $object;
         }
+    }
+
+    private static function hasAcceleratedProtocol(): bool
+    {
+        return self::$hasAcceleratedProtocol ??=
+            function_exists('thrift_protocol_write_binary')
+            && function_exists('thrift_protocol_read_binary');
     }
 }

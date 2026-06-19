@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -23,7 +24,14 @@ module Thrift
       begin
         @server_transport.listen
         loop do
-          client = @server_transport.accept
+          begin
+            client = @server_transport.accept
+          rescue Errno::ECONNRESET, Errno::EPIPE
+            next
+          rescue => e
+            next if defined?(OpenSSL::SSL::SSLError) && e.is_a?(OpenSSL::SSL::SSLError)
+            raise
+          end
           trans = @transport_factory.get_transport(client)
           prot = @protocol_factory.get_protocol(trans)
           begin
@@ -39,7 +47,7 @@ module Thrift
         @server_transport.close
       end
     end
-    
+
     def to_s
       "simple(#{super.to_s})"
     end

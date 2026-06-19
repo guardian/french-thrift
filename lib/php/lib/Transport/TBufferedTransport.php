@@ -21,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * Buffered transport. Stores data to an internal buffer that it doesn't
@@ -36,76 +37,46 @@ use Thrift\Factory\TStringFuncFactory;
 class TBufferedTransport extends TTransport
 {
     /**
-     * The underlying transport
-     *
-     * @var TTransport
-     */
-    protected $transport_;
-
-    /**
-     * The receive buffer size
-     *
-     * @var int
-     */
-    protected $rBufSize_ = 512;
-
-    /**
-     * The write buffer size
-     *
-     * @var int
-     */
-    protected $wBufSize_ = 512;
-
-    /**
      * The write buffer.
-     *
-     * @var string
      */
-    protected $wBuf_ = '';
+    protected string $wBuf = '';
 
     /**
      * The read buffer.
-     *
-     * @var string
      */
-    protected $rBuf_ = '';
+    protected string $rBuf = '';
 
     /**
      * Constructor. Creates a buffered transport around an underlying transport
      */
-    public function __construct($transport, $rBufSize = 512, $wBufSize = 512)
-    {
-        $this->transport_ = $transport;
-        $this->rBufSize_ = $rBufSize;
-        $this->wBufSize_ = $wBufSize;
+    public function __construct(
+        protected TTransport $transport,
+        protected int $rBufSize = 512,
+        protected int $wBufSize = 512,
+    ) {
     }
 
-    public function isOpen()
+    public function isOpen(): bool
     {
-        return $this->transport_->isOpen();
+        return $this->transport->isOpen();
     }
 
-    /**
-     * @inheritdoc
-     *
-     * @throws TTransportException
-     */
-    public function open()
+    public function open(): void
     {
-        $this->transport_->open();
+        $this->transport->open();
     }
 
-    public function close()
+    public function close(): void
     {
-        $this->transport_->close();
+        $this->transport->close();
     }
 
-    public function putBack($data)
+    public function putBack(string $data): void
     {
-        if (TStringFuncFactory::create()->strlen($this->rBuf_) === 0) {
-            $this->rBuf_ = $data;
+        if (strlen($this->rBuf) === 0) {
+            $this->rBuf = $data;
         } else {
-            $this->rBuf_ = ($data . $this->rBuf_);
+            $this->rBuf = ($data . $this->rBuf);
         }
     }
 
@@ -117,91 +88,69 @@ class TBufferedTransport extends TTransport
      *
      * Therefore, use the readAll method of the wrapped transport inside
      * the buffered readAll.
-     *
-     * @throws TTransportException
      */
-    public function readAll($len)
+    public function readAll(int $len): string
     {
-        $have = TStringFuncFactory::create()->strlen($this->rBuf_);
+        $have = strlen($this->rBuf);
         if ($have == 0) {
-            $data = $this->transport_->readAll($len);
+            $data = $this->transport->readAll($len);
         } elseif ($have < $len) {
-            $data = $this->rBuf_;
-            $this->rBuf_ = '';
-            $data .= $this->transport_->readAll($len - $have);
+            $data = $this->rBuf;
+            $this->rBuf = '';
+            $data .= $this->transport->readAll($len - $have);
         } elseif ($have == $len) {
-            $data = $this->rBuf_;
-            $this->rBuf_ = '';
-        } elseif ($have > $len) {
-            $data = TStringFuncFactory::create()->substr($this->rBuf_, 0, $len);
-            $this->rBuf_ = TStringFuncFactory::create()->substr($this->rBuf_, $len);
+            $data = $this->rBuf;
+            $this->rBuf = '';
+        } else {
+            $data = substr($this->rBuf, 0, $len);
+            $this->rBuf = substr($this->rBuf, $len);
         }
 
         return $data;
     }
 
-    /**
-     * @inheritdoc
-     *
-     * @param int $len
-     * @return string
-     * @throws TTransportException
-     */
-    public function read($len)
+    public function read(int $len): string
     {
-        if (TStringFuncFactory::create()->strlen($this->rBuf_) === 0) {
-            $this->rBuf_ = $this->transport_->read($this->rBufSize_);
+        if (strlen($this->rBuf) === 0) {
+            $this->rBuf = $this->transport->read($this->rBufSize);
         }
 
-        if (TStringFuncFactory::create()->strlen($this->rBuf_) <= $len) {
-            $ret = $this->rBuf_;
-            $this->rBuf_ = '';
+        if (strlen($this->rBuf) <= $len) {
+            $ret = $this->rBuf;
+            $this->rBuf = '';
 
             return $ret;
         }
 
-        $ret = TStringFuncFactory::create()->substr($this->rBuf_, 0, $len);
-        $this->rBuf_ = TStringFuncFactory::create()->substr($this->rBuf_, $len);
+        $ret = substr($this->rBuf, 0, $len);
+        $this->rBuf = substr($this->rBuf, $len);
 
         return $ret;
     }
 
-    /**
-     * @inheritdoc
-     *
-     * @param string $buf
-     * @throws TTransportException
-     */
-    public function write($buf)
+    public function write(string $buf): void
     {
-        $this->wBuf_ .= $buf;
-        if (TStringFuncFactory::create()->strlen($this->wBuf_) >= $this->wBufSize_) {
-            $out = $this->wBuf_;
+        $this->wBuf .= $buf;
+        if (strlen($this->wBuf) >= $this->wBufSize) {
+            $out = $this->wBuf;
 
-            // Note that we clear the internal wBuf_ prior to the underlying write
-            // to ensure we're in a sane state (i.e. internal buffer cleaned)
-            // if the underlying write throws up an exception
-            $this->wBuf_ = '';
-            $this->transport_->write($out);
+            // Clear the buffer before writing so we stay in a sane state
+            // even if the underlying transport throws.
+            $this->wBuf = '';
+            $this->transport->write($out);
         }
     }
 
-    /**
-     * @inheritdoc
-     *
-     * @throws TTransportException
-     */
-    public function flush()
+    public function flush(): void
     {
-        if (TStringFuncFactory::create()->strlen($this->wBuf_) > 0) {
-            $out = $this->wBuf_;
+        if (strlen($this->wBuf) > 0) {
+            $out = $this->wBuf;
 
-            // Note that we clear the internal wBuf_ prior to the underlying write
-            // to ensure we're in a sane state (i.e. internal buffer cleaned)
-            // if the underlying write throws up an exception
-            $this->wBuf_ = '';
-            $this->transport_->write($out);
+            // Clear the buffer before writing so we stay in a sane state
+            // even if the underlying transport throws.
+            $this->wBuf = '';
+            $this->transport->write($out);
         }
-        $this->transport_->flush();
+        $this->transport->flush();
     }
 }

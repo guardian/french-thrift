@@ -44,15 +44,6 @@ if (NOT Boost_USE_STATIC_LIBS)
     add_definitions(-DBOOST_TEST_DYN_LINK)
 endif()
 
-# as3
-option(WITH_AS3 "Build ActionScript 3 Thrift Library" ON)
-if (WITH_AS3)
-    set(POSSIBLE_PATHS "${FLEX_HOME}/bin" "$ENV{FLEX_HOME}/bin")
-    find_program(HAVE_COMPC NAMES compc HINTS ${POSSIBLE_PATHS})
-endif ()
-CMAKE_DEPENDENT_OPTION(BUILD_AS3 "Build as3 library" ON
-                       "BUILD_LIBRARIES;WITH_AS3;HAVE_COMPC" OFF)
-
 # C++
 option(WITH_CPP "Build C++ Thrift library" ON)
 if(WITH_CPP)
@@ -87,7 +78,7 @@ CMAKE_DEPENDENT_OPTION(BUILD_C_GLIB "Build C (GLib) library" ON
 
 # OpenSSL
 if(WITH_CPP OR WITH_C_GLIB)
-    find_package(OpenSSL QUIET)
+    find_package(OpenSSL)
     CMAKE_DEPENDENT_OPTION(WITH_OPENSSL "Build with OpenSSL support" ON
                         "OPENSSL_FOUND" OFF)
 endif()
@@ -117,10 +108,13 @@ CMAKE_DEPENDENT_OPTION(BUILD_NODEJS "Build NodeJS library" ON
 
 # Python
 option(WITH_PYTHON "Build Python Thrift library" ON)
-find_package(PythonInterp QUIET) # for Python executable
-find_package(PythonLibs QUIET) # for Python.h
+find_package(Python3
+    COMPONENTS
+        Interpreter # for Python executable
+        Development # for Python.h
+    )
 CMAKE_DEPENDENT_OPTION(BUILD_PYTHON "Build Python library" ON
-                       "BUILD_LIBRARIES;WITH_PYTHON;PYTHONINTERP_FOUND;PYTHONLIBS_FOUND" OFF)
+                       "BUILD_LIBRARIES;WITH_PYTHON;Python3_Interpreter_FOUND;Python3_Development_FOUND" OFF)
 
 # Common library options
 # https://cmake.org/cmake/help/latest/variable/BUILD_SHARED_LIBS.html
@@ -168,10 +162,6 @@ message(STATUS "  Build type:                                 ${CMAKE_BUILD_TYPE
 message(STATUS)
 message(STATUS "Language libraries:")
 message(STATUS)
-message(STATUS "  Build as3 library:                          ${BUILD_AS3}")
-MESSAGE_DEP(WITH_AS3 "Disabled by WITH_AS3=OFF")
-MESSAGE_DEP(HAVE_COMPC "Adobe Flex compc was not found - did you set env var FLEX_HOME?")
-message(STATUS)
 message(STATUS "  Build with OpenSSL:                         ${WITH_OPENSSL}")
 if(WITH_OPENSSL)
     message(STATUS "    Version:                                  ${OPENSSL_VERSION}")
@@ -206,7 +196,11 @@ MESSAGE_DEP(WITH_NODEJS "Disabled by WITH_NODEJS=OFF")
 message(STATUS)
 message(STATUS "  Build Python library:                       ${BUILD_PYTHON}")
 MESSAGE_DEP(WITH_PYTHON "Disabled by WITH_PYTHON=OFF")
-MESSAGE_DEP(PYTHONLIBS_FOUND "Python libraries missing")
+MESSAGE_DEP(Python3_Interpreter_FOUND "Python interpreter missing")
+MESSAGE_DEP(Python3_Development_FOUND "Python libraries missing")
+if(BUILD_PYTHON)
+    message(STATUS "    Version:                                  ${Python3_VERSION}")
+endif()
 if(MSVC)
     message(STATUS "  Using static runtime library:               ${WITH_MT}")
 endif(MSVC)

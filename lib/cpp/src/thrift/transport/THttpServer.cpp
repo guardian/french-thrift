@@ -25,7 +25,7 @@
 #include <thrift/transport/THttpServer.h>
 #include <thrift/transport/TSocket.h>
 #if defined(_MSC_VER) || defined(__MINGW32__)
-  #include <Shlwapi.h>
+  #include <shlwapi.h>
 #endif
 
 using std::string;
@@ -34,7 +34,7 @@ namespace apache {
 namespace thrift {
 namespace transport {
 
-THttpServer::THttpServer(std::shared_ptr<TTransport> transport, std::shared_ptr<TConfiguration> config) 
+THttpServer::THttpServer(std::shared_ptr<TTransport> transport, std::shared_ptr<TConfiguration> config)
   : THttpTransport(transport, config) {
 
 }
@@ -140,6 +140,10 @@ void THttpServer::flush() {
   readHeaders_ = true;
 }
 
+void THttpServer::onewayComplete() {
+  flush();
+}
+
 std::string THttpServer::getHeader(uint32_t len) {
   std::ostringstream h;
   h << "HTTP/1.1 200 OK" << CRLF << "Date: " << getTimeRFC1123() << CRLF << "Server: Thrift/"
@@ -159,7 +163,8 @@ std::string THttpServer::getTimeRFC1123() {
   struct tm tmb;
   THRIFT_GMTIME(tmb, t);
 
-  sprintf(buff,
+  snprintf(buff,
+          sizeof(buff),
           "%s, %d %s %d %d:%d:%d GMT",
           Days[tmb.tm_wday],
           tmb.tm_mday,

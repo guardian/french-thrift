@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -20,7 +21,6 @@
 require 'spec_helper'
 
 describe 'Serializer' do
-
   describe Thrift::Serializer do
     it "should serialize structs to binary by default" do
       serializer = Thrift::Serializer.new(Thrift::BinaryProtocolAcceleratedFactory.new)

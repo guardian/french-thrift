@@ -18,6 +18,9 @@
 #
 AUTOMAKE_OPTIONS = subdir-objects serial-tests nostdinc
 
+SUBDIRS = .
+SUBDIRS += fuzz
+
 BUILT_SOURCES = gen-cpp/AnnotationTest_types.h \
                 gen-cpp/DebugProtoTest_types.h \
                 gen-cpp/EnumTest_types.h \
@@ -105,6 +108,7 @@ check_PROGRAMS = \
 	TFileTransportTest \
 	link_test \
 	OpenSSLManualInitTest \
+	TSSLSocketMatchNameTest \
 	EnumTest \
 	RenderedDoubleConstantsTest \
 	AnnotationTest
@@ -142,6 +146,7 @@ UnitTests_SOURCES = \
 
 UnitTests_LDADD = \
   libtestgencpp.la \
+  $(top_builddir)/lib/cpp/libthriftz.la \
   $(BOOST_TEST_LDADD) \
   $(BOOST_SYSTEM_LDADD) \
   $(BOOST_THREAD_LDADD)
@@ -410,6 +415,15 @@ OpenSSLManualInitTest_LDADD = \
 	$(OPENSSL_LDFLAGS) \
 	$(OPENSSL_LIBS)
 
+TSSLSocketMatchNameTest_SOURCES = \
+	TSSLSocketMatchNameTest.cpp
+
+TSSLSocketMatchNameTest_LDADD = \
+	$(top_builddir)/lib/cpp/libthrift.la \
+	$(BOOST_TEST_LDADD) \
+	$(OPENSSL_LDFLAGS) \
+	$(OPENSSL_LIBS)
+
 #
 # Common thrift code generation rules
 #
@@ -471,4 +485,6 @@ EXTRA_DIST = \
 	CMakeLists.txt \
 	DebugProtoTest_extras.cpp \
 	ThriftTest_extras.cpp \
-	OneWayTest.thrift
+	OneWayTest.thrift \
+	Thrift5272.thrift
+

@@ -63,7 +63,7 @@ inline int read_buffer(PyObject* buf, char** output, int len) {
   }
   return PycStringIO->cread(buf, output, len);
 }
-}
+} // namespace detail
 
 template <typename Impl>
 inline ProtocolBase<Impl>::~ProtocolBase() {
@@ -147,7 +147,7 @@ inline int read_buffer(PyObject* buf, char** output, int len) {
   buf2->pos = (std::min)(buf2->pos + static_cast<Py_ssize_t>(len), buf2->string_size);
   return static_cast<int>(buf2->pos - pos0);
 }
-}
+} // namespace detail
 
 template <typename Impl>
 inline ProtocolBase<Impl>::~ProtocolBase() {
@@ -207,6 +207,18 @@ DECLARE_OP_SCOPE(WriteStruct, writeStruct)
 DECLARE_OP_SCOPE(ReadStruct, readStruct)
 #undef DECLARE_OP_SCOPE
 
+template <typename Impl>
+struct RecursionGuard {
+  ProtocolBase<Impl>* proto;
+  bool valid;
+  explicit RecursionGuard(ProtocolBase<Impl>* p) : proto(p), valid(p->checkDepthLimit()) {}
+  ~RecursionGuard() {
+    if (valid)
+      proto->decrementDepth();
+  }
+  operator bool() const { return valid; }
+};
+
 inline bool check_ssize_t_32(Py_ssize_t len) {
   // error from getting the int
   if (INT_CONV_ERROR_OCCURRED(len)) {
@@ -218,7 +230,7 @@ inline bool check_ssize_t_32(Py_ssize_t len) {
   }
   return true;
 }
-}
+} // namespace detail
 
 template <typename T>
 bool parse_pyint(PyObject* o, T* ret, int32_t min, int32_t max) {
@@ -253,6 +265,31 @@ bool ProtocolBase<Impl>::checkLengthLimit(int32_t len, long limit) {
   }
   if (len > limit) {
     PyErr_Format(PyExc_OverflowError, "size exceeded specified limit: %ld", limit);
+    return false;
+  }
+  return true;
+}
+
+template <typename Impl>
+bool ProtocolBase<Impl>::checkDepthLimit() {
+  recursionDepth_++;
+  if (recursionDepth_ > kDefaultRecursionDepth) {
+    recursionDepth_--;
+    static PyObject* TProtocolExceptionCls = nullptr;
+    if (!TProtocolExceptionCls) {
+      PyObject* mod = PyImport_ImportModule("thrift.protocol.TProtocol");
+      if (!mod)
+        return false;
+      TProtocolExceptionCls = PyObject_GetAttrString(mod, "TProtocolException");
+      Py_DECREF(mod);
+      if (!TProtocolExceptionCls)
+        return false;
+    }
+    ScopedPyObject exc(
+        PyObject_CallFunction(TProtocolExceptionCls, "is", 6, "Maximum recursion depth exceeded"));
+    if (!exc)
+      return false;
+    PyErr_SetObject(TProtocolExceptionCls, exc.get());
     return false;
   }
   return true;
@@ -502,6 +539,11 @@ bool ProtocolBase<Impl>::encodeValue(PyObject* value, TType type, PyObject* type
       return false;
     }
 
+    detail::RecursionGuard<Impl> rec(this);
+    if (!rec) {
+      return false;
+    }
+
     Py_ssize_t nspec = PyTuple_Size(parsedargs.spec);
     if (nspec == -1) {
       PyErr_SetString(PyExc_TypeError, "spec is not a tuple");
@@ -542,10 +584,27 @@ bool ProtocolBase<Impl>::encodeValue(PyObject* value, TType type, PyObject* type
     return true;
   }
 
+  case T_UUID: {
+    ScopedPyObject instval(PyObject_GetAttr(value, INTERN_STRING(bytes)));
+    if (!instval) {
+      return false;
+    }
+
+    Py_ssize_t size;
+    char* buffer;
+    if (PyBytes_AsStringAndSize(instval.get(), &buffer, &size) < 0) {
+      return false;
+    }
+    if (size != 16) {
+      PyErr_SetString(PyExc_TypeError, "uuid.bytes must be exactly 16 bytes long");
+      return false;
+    }
+    impl()->writeUuid(buffer);
+    return true;
+  }
+
   case T_STOP:
   case T_VOID:
-  case T_UTF16:
-  case T_UTF8:
   case T_U64:
   default:
     PyErr_Format(PyExc_TypeError, "Unexpected TType for encodeValue: %d", type);
@@ -625,11 +684,12 @@ bool ProtocolBase<Impl>::skip(TType type) {
     }
     return true;
   }
+  case T_UUID: {
+    return impl()->skipUuid();
+  }
 
   case T_STOP:
   case T_VOID:
-  case T_UTF16:
-  case T_UTF8:
   case T_U64:
   default:
     PyErr_Format(PyExc_TypeError, "Unexpected TType for skip: %d", type);
@@ -816,10 +876,36 @@ PyObject* ProtocolBase<Impl>::decodeValue(TType type, PyObject* typeargs) {
     return readStruct(Py_None, parsedargs.klass, parsedargs.spec);
   }
 
+  case T_UUID: {
+    char* buf = nullptr;
+    if (!impl()->readUuid(&buf)) {
+      return nullptr;
+    }
+
+    if (!UuidModule) {
+      UuidModule = PyImport_ImportModule("uuid");
+      if (!UuidModule)
+        return nullptr;
+    }
+
+    ScopedPyObject cls(PyObject_GetAttr(UuidModule, INTERN_STRING(UUID)));
+    if (!cls) {
+      return nullptr;
+    }
+
+    ScopedPyObject pyBytes(PyBytes_FromStringAndSize(buf, 16));
+    if (!pyBytes) {
+      return nullptr;
+    }
+
+    ScopedPyObject args(PyTuple_New(0));
+    ScopedPyObject kwargs(Py_BuildValue("{O:O}", INTERN_STRING(bytes), pyBytes.get()));
+    ScopedPyObject ret(PyObject_Call(cls.get(), args.get(), kwargs.get()));
+    return ret.release();
+  }
+
   case T_STOP:
   case T_VOID:
-  case T_UTF16:
-  case T_UTF8:
   case T_U64:
   default:
     PyErr_Format(PyExc_TypeError, "Unexpected TType for decodeValue: %d", type);
@@ -830,18 +916,52 @@ PyObject* ProtocolBase<Impl>::decodeValue(TType type, PyObject* typeargs) {
 template <typename Impl>
 PyObject* ProtocolBase<Impl>::readStruct(PyObject* output, PyObject* klass, PyObject* spec_seq) {
   int spec_seq_len = PyTuple_Size(spec_seq);
-  bool immutable = output == Py_None;
+  bool immutable = false;
   ScopedPyObject kwargs;
+  ScopedPyObject created_output;
   if (spec_seq_len == -1) {
     return nullptr;
   }
 
-  if (immutable) {
-    kwargs.reset(PyDict_New());
-    if (!kwargs) {
-      PyErr_SetString(PyExc_TypeError, "failed to prepare kwargument storage");
-      return nullptr;
+  if (output == Py_None) {
+    static PyObject* TBaseModule = nullptr;
+    static PyObject* TFrozenBase = nullptr;
+    if (!TFrozenBase) {
+      if (!TBaseModule) {
+        TBaseModule = PyImport_ImportModule("thrift.protocol.TBase");
+      }
+      if (!TBaseModule) {
+        return nullptr;
+      }
+      TFrozenBase = PyObject_GetAttrString(TBaseModule, "TFrozenBase");
+      if (!TFrozenBase) {
+        return nullptr;
+      }
     }
+    // Immutable structs are produced by two codegen paths:
+    //   1. "frozen2" mode: classes inherit from TFrozenBase
+    //   2. "python.immutable" annotation: classes get a __setattr__ that raises TypeError
+    immutable = PyObject_IsSubclass(klass, TFrozenBase)
+                || reinterpret_cast<PyTypeObject*>(klass)->tp_setattro != PyObject_GenericSetAttr;
+
+    if (immutable) {
+      kwargs.reset(PyDict_New());
+      if (!kwargs) {
+        PyErr_SetString(PyExc_TypeError, "failed to prepare kwargument storage");
+        return nullptr;
+      }
+    } else {
+      created_output.reset(PyObject_CallObject(klass, nullptr));
+      if (!created_output) {
+        return nullptr;
+      }
+      output = created_output.get();
+    }
+  }
+
+  detail::RecursionGuard<Impl> rec(this);
+  if (!rec) {
+    return nullptr;
   }
 
   detail::ReadStructScope<Impl> scope = detail::readStructScope(this);
@@ -907,7 +1027,7 @@ PyObject* ProtocolBase<Impl>::readStruct(PyObject* output, PyObject* klass, PyOb
   Py_INCREF(output);
   return output;
 }
-}
-}
-}
+} // namespace py
+} // namespace thrift
+} // namespace apache
 #endif // THRIFT_PY_PROTOCOL_H

@@ -92,31 +92,28 @@ SUBDIRS += rs
 PRECROSS_TARGET += precross-rs
 endif
 
-if WITH_SWIFT
-SUBDIRS += swift
-PRECROSS_TARGET += precross-swift
-endif
-
 #
-# generate html for ThriftTest.thrift AND validate it!
+# generate html, graphviz, mermaid and markdown for ThriftTest.thrift
 #
-if WITH_NODEJS
 check-local:
 	$(top_builddir)/compiler/cpp/thrift --gen html -r $(top_srcdir)/test/ThriftTest.thrift
-	$(top_builddir)/node_modules/.bin/html-validator --file=gen-html/index.html --verbose
-	$(top_builddir)/node_modules/.bin/html-validator --file=gen-html/ThriftTest.html --verbose
-else
-check-local:
-	$(top_builddir)/compiler/cpp/thrift --gen html -r $(top_srcdir)/test/ThriftTest.thrift
-endif
+	$(top_builddir)/compiler/cpp/thrift --gen markdown -r $(top_srcdir)/test/ThriftTest.thrift
+	$(top_builddir)/compiler/cpp/thrift --gen gv -r $(top_srcdir)/test/ThriftTest.thrift
+	$(top_builddir)/compiler/cpp/thrift --gen mmd -r $(top_srcdir)/test/ThriftTest.thrift
 
 clean-local:
 	$(RM) -r $(top_srcdir)/test/gen-html/
+	$(RM) -r $(top_srcdir)/test/gen-markdown/
+	$(RM) -r $(top_srcdir)/test/gen-gv/
+	$(RM) -r $(top_srcdir)/test/gen-mmd/
 	find . -type d -name "__pycache__" | xargs rm -rf
 	find . -type f -name "*.pyc" | xargs rm -f
 
 dist-hook:
 	$(RM) -r $(distdir)/gen-html/
+	$(RM) -r $(distdir)/gen-markdown/
+	$(RM) -r $(distdir)/gen-gv/
+	$(RM) -r $(distdir)/gen-mmd/
 	find $(distdir) -type d -name "__pycache__" | xargs rm -rf
 	find $(distdir) -type f -name "*.pyc" | xargs rm -f
 
@@ -130,6 +127,7 @@ EXTRA_DIST = \
 	cpp \
 	crossrunner \
 	dart \
+	delphi \
 	erl \
 	keys \
 	lua \
@@ -141,51 +139,53 @@ EXTRA_DIST = \
 	py.twisted \
 	rb \
 	rs \
-	swift \
 	threads \
 	partial \
 	AnnotationTest.thrift \
 	BrokenConstants.thrift \
 	ConstantsDemo.thrift \
-	v0.16/ConstantsDemo.thrift \
 	DebugProtoTest.thrift \
-	v0.16/DebugProtoTest.thrift \
 	DenseLinkingTest.thrift \
 	DocTest.thrift \
 	DoubleConstantsTest.thrift \
 	EnumContainersTest.thrift \
 	EnumTest.thrift \
+	ExceptionStruct.thrift \
 	FullCamelTest.thrift \
-	Include.thrift \
+	FuzzTest.thrift \
 	Identifiers.thrift \
+	Include.thrift \
+	index.html \
 	Int64Test.thrift \
 	JsDeepConstructorTest.thrift \
+	keys/keygen/.gitignore \
+	known_failures_Linux.json \
 	ManyOptionals.thrift \
 	ManyTypedefs.thrift \
 	NameConflictTest.thrift \
-	v0.16/NameConflictTest.thrift \
 	OptionalRequiredTest.thrift \
+	partial/thrift_test_schema.thrift \
+	README.md \
+	rebuild_known_failures.sh \
 	Recursive.thrift \
+	result.js \
 	ReuseObjects.thrift \
+	Service.thrift \
 	SmallTest.thrift \
+	SpecificNameTest.thrift \
 	StressTest.thrift \
+	test.py \
+	tests.json \
 	ThriftTest.thrift \
-	v0.16/ThriftTest.thrift \
 	TypedefTest.thrift \
 	Types.thrift \
 	UnsafeTypes.thrift \
-	Service.thrift \
-	SpecificNameTest.thrift \
+	v0.16/ConstantsDemo.thrift \
+	v0.16/DebugProtoTest.thrift \
+	v0.16/FuzzTestNoUuid.thrift \
+	v0.16/NameConflictTest.thrift \
+	v0.16/ThriftTest.thrift \
 	VoidMethExceptionsTest.thrift \
-	partial/thrift_test_schema.thrift \
-	keys/keygen/.gitignore \
-	known_failures_Linux.json \
-	test.py \
-	tests.json \
-	rebuild_known_failures.sh \
-	result.js \
-	index.html \
-	README.md \
 	valgrind.suppress
 
 precross-%:

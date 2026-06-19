@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,16 +7,16 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 module Thrift
   class CompactProtocol < BaseProtocol
@@ -26,12 +27,14 @@ module Thrift
     TYPE_MASK = 0xE0
     TYPE_BITS = 0x07
     TYPE_SHIFT_AMOUNT = 5
+    MAX_VARINT32_BYTES = 5  # ceil(32/7); matches protobuf wire format
+    MAX_VARINT_BYTES = 10   # ceil(64/7); matches protobuf wire format
 
-    TSTOP = ["", Types::STOP, 0]
+    TSTOP = [nil, Types::STOP, 0]
 
-    # 
+    #
     # All of the on-wire type codes.
-    # 
+    #
     class CompactTypes
       BOOLEAN_TRUE   = 0x01
       BOOLEAN_FALSE  = 0x02
@@ -45,11 +48,12 @@ module Thrift
       SET            = 0x0A
       MAP            = 0x0B
       STRUCT         = 0x0C
-      
+      UUID           = 0x0D
+
       def self.is_bool_type?(b)
         (b & 0x0f) == BOOLEAN_TRUE || (b & 0x0f) == BOOLEAN_FALSE
       end
-      
+
       COMPACT_TO_TTYPE = {
         Types::STOP   => Types::STOP,
         BOOLEAN_FALSE => Types::BOOL,
@@ -63,7 +67,8 @@ module Thrift
         LIST          => Types::LIST,
         SET           => Types::SET,
         MAP           => Types::MAP,
-        STRUCT        => Types::STRUCT
+        STRUCT        => Types::STRUCT,
+        UUID          => Types::UUID
       }
 
       TTYPE_TO_COMPACT = {
@@ -78,15 +83,16 @@ module Thrift
         Types::LIST           => LIST,
         Types::SET            => SET,
         Types::MAP            => MAP,
-        Types::STRUCT         => STRUCT
+        Types::STRUCT         => STRUCT,
+        Types::UUID           => UUID
       }
-      
+
       def self.get_ttype(compact_type)
         val = COMPACT_TO_TTYPE[compact_type & 0x0f]
         raise "don't know what type: #{compact_type & 0x0f}" unless val
         val
       end
-      
+
       def self.get_compact_type(ttype)
         val = TTYPE_TO_COMPACT[ttype]
         raise "don't know what type: #{ttype & 0x0f}" unless val
@@ -107,7 +113,7 @@ module Thrift
     def write_message_begin(name, type, seqid)
       write_byte(PROTOCOL_ID)
       write_byte((VERSION & VERSION_MASK) | ((type << TYPE_SHIFT_AMOUNT) & TYPE_MASK))
-      write_varint32(seqid)
+      write_varint32(message_seqid_to_varint32(seqid))
       write_string(name)
       nil
     end
@@ -132,14 +138,14 @@ module Thrift
       nil
     end
 
-    # 
-    # The workhorse of writeFieldBegin. It has the option of doing a 
-    # 'type override' of the type header. This is used specifically in the 
+    #
+    # The workhorse of writeFieldBegin. It has the option of doing a
+    # 'type override' of the type header. This is used specifically in the
     # boolean field case.
-    # 
-    def write_field_begin_internal(type, id, type_override=nil)
+    #
+    def write_field_begin_internal(type, id, type_override = nil)
       last_id = @last_field.pop
-      
+
       # if there's a type override, use that.
       typeToWrite = type_override || CompactTypes.get_compact_type(type)
 
@@ -220,20 +226,25 @@ module Thrift
       @trans.write(buf)
     end
 
+    def write_uuid(uuid)
+      UUID.validate_uuid!(uuid)
+      trans.write(UUID.uuid_bytes(uuid))
+    end
+
     def read_message_begin
       protocol_id = read_byte()
       if protocol_id != PROTOCOL_ID
         raise ProtocolException.new("Expected protocol id #{PROTOCOL_ID} but got #{protocol_id}")
       end
-      
+
       version_and_type = read_byte()
       version = version_and_type & VERSION_MASK
       if (version != VERSION)
         raise ProtocolException.new("Expected version #{VERSION} but got #{version}");
       end
-      
+
       type = (version_and_type >> TYPE_SHIFT_AMOUNT) & TYPE_BITS
-      seqid = read_varint32()
+      seqid = message_seqid_from_varint32(read_varint32())
       messageName = read_string()
       [messageName, type, seqid]
     end
@@ -276,7 +287,7 @@ module Thrift
 
         # push the new field onto the field stack so we can keep the deltas going.
         @last_field.push(field_id)
-        ["", CompactTypes.get_ttype(type & 0x0f), field_id]
+        [nil, CompactTypes.get_ttype(type & 0x0f), field_id]
       end
     end
 
@@ -345,17 +356,21 @@ module Thrift
       size = read_varint32()
       trans.read_all(size)
     end
-    
+
+    def read_uuid
+      UUID.uuid_from_bytes(trans.read_all(16))
+    end
+
     def to_s
       "compact(#{super.to_s})"
     end
 
     private
-    
-    # 
-    # Abstract method for writing the start of lists and sets. List and sets on 
+
+    #
+    # Abstract method for writing the start of lists and sets. List and sets on
     # the wire differ only by the type indicator.
-    # 
+    #
     def write_collection_begin(elem_type, size)
       if size <= 14
         write_byte(size << 4 | CompactTypes.get_compact_type(elem_type))
@@ -387,7 +402,7 @@ module Thrift
 
     def write_varint64(n)
       while true
-        if (n & EVERYTHING_ELSE_MASK) == 0 #TODO need to find a way to make this into a long...
+        if (n & EVERYTHING_ELSE_MASK) == 0 # TODO need to find a way to make this into a long...
           write_byte(n)
           break
         else
@@ -396,38 +411,58 @@ module Thrift
         end
       end
     end
-    
+
     def read_varint32()
-      read_varint64()
+      shift = 0
+      result = 0
+      MAX_VARINT32_BYTES.times do
+        b = read_byte()
+        result |= (b & 0x7f) << shift
+        return result if (b & 0x80) != 0x80
+        shift += 7
+      end
+      raise ProtocolException.new(ProtocolException::INVALID_DATA, 'Variable-length int over 5 bytes.')
     end
-    
+
     def read_varint64()
       shift = 0
       result = 0
-      while true
+      MAX_VARINT_BYTES.times do
         b = read_byte()
         result |= (b & 0x7f) << shift
-        break if (b & 0x80) != 0x80
+        return result if (b & 0x80) != 0x80
         shift += 7
       end
-      result
+      raise ProtocolException.new(ProtocolException::INVALID_DATA, 'Variable-length int over 10 bytes.')
     end
-    
+
     def int_to_zig_zag(n)
       (n << 1) ^ (n >> 31)
     end
-    
+
     def long_to_zig_zag(l)
       # puts "zz encoded #{l} to #{(l << 1) ^ (l >> 63)}"
       (l << 1) ^ (l >> 63)
     end
-    
+
     def zig_zag_to_int(n)
       (n >> 1) ^ -(n & 1)
     end
-    
+
     def zig_zag_to_long(n)
       (n >> 1) ^ -(n & 1)
+    end
+
+    def message_seqid_to_varint32(seqid)
+      if seqid < -(2**31) || seqid > (2**31) - 1
+        raise RangeError, "seqid must be a signed int32"
+      end
+
+      seqid < 0 ? seqid + (2**32) : seqid
+    end
+
+    def message_seqid_from_varint32(seqid)
+      seqid > 0x7fffffff ? seqid - (2**32) : seqid
     end
   end
 
@@ -435,7 +470,7 @@ module Thrift
     def get_protocol(trans)
       CompactProtocol.new(trans)
     end
-    
+
     def to_s
       "compact"
     end

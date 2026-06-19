@@ -68,7 +68,14 @@ public:
     gen_jquery_ = false;
     gen_ts_ = false;
     gen_es6_ = false;
+    gen_esm_ = false;
     gen_episode_file_ = false;
+    gen_native_promise_ = true;
+    // Opt-in: when present (and `node` is also in the option list), int64
+    // values are emitted as native BigInt literals and the node-int64 import
+    // is omitted. Off by default so regenerated stubs stay byte-compatible
+    // with existing consumers.
+    gen_bigint_ = false;
 
     bool with_ns_ = false;
 
@@ -83,13 +90,30 @@ public:
         with_ns_ = true;
       } else if( iter->first.compare("es6") == 0) {
         gen_es6_ = true;
+      } else if ( iter->first.compare("esm") == 0) {
+        gen_esm_ = true;
       } else if( iter->first.compare("imports") == 0) {
         parse_imports(program, iter->second);
       } else if (iter->first.compare("thrift_package_output_directory") == 0) {
         parse_thrift_package_output_directory(iter->second);
+      } else if (iter->first.compare("native_promise") == 0) {
+        if (iter->second == "false" || iter->second == "0" || iter->second == "no") {
+          gen_native_promise_ = false;
+        } else {
+          gen_native_promise_ = true;
+        }
+      } else if (iter->first.compare("bigint") == 0) {
+        gen_bigint_ = true;
       } else {
         throw std::invalid_argument("unknown option js:" + iter->first);
       }
+    }
+
+    // BigInt-mode code generation is only meaningful for the node generator.
+    // Force it off for plain browser-JS so passing `js:bigint` alongside
+    // (or via shared option strings) doesn't affect plain `--gen js`.
+    if (!gen_node_) {
+      gen_bigint_ = false;
     }
 
     if (gen_es6_ && gen_jquery_) {
@@ -103,6 +127,10 @@ public:
 
     if (!gen_node_ && with_ns_) {
       throw std::invalid_argument("invalid switch: [-gen js:with_ns] is only valid when using node.js");
+    }
+
+    if (!gen_node_ && gen_esm_) {
+      throw std::invalid_argument("invalid switch: [-gen js:esm] is only valid when using node.js");
     }
 
     // Depending on the processing flags, we will update these to be ES6 compatible
@@ -186,7 +214,10 @@ public:
 
   void generate_deserialize_container(std::ostream& out, t_type* ttype, std::string prefix = "");
 
-  void generate_deserialize_set_element(std::ostream& out, t_set* tset, std::string prefix = "");
+  void generate_deserialize_set_element(std::ostream& out,
+                                        t_set* tset,
+                                        std::string prefix,
+                                        std::string seen);
 
   void generate_deserialize_map_element(std::ostream& out, t_map* tmap, std::string prefix = "");
 
@@ -219,6 +250,7 @@ public:
   std::string render_includes();
   std::string render_ts_includes();
   std::string get_import_path(t_program* program);
+  std::string get_import_path(t_service* service);
   std::string declare_field(t_field* tfield, bool init = false, bool obj = false);
   std::string function_signature(t_function* tfunction,
                                  std::string prefix = "",
@@ -274,13 +306,6 @@ public:
         return make_valid_nodeJs_identifier(p->get_name()) + "_ttypes.";
       }
       return "ttypes.";
-    }
-    return js_namespace(p);
-  }
-
-  std::string js_export_namespace(t_program* p) {
-    if (gen_node_) {
-      return "exports.";
     }
     return js_namespace(p);
   }
@@ -375,9 +400,28 @@ private:
   bool gen_es6_;
 
   /**
+   * True if we should generate ES modules, instead of CommonJS.
+   */
+  bool gen_esm_;
+
+  /**
+   * True if int64 values should be generated as native BigInt literals
+   * (opt-in via `js:bigint`). Off by default — when false, the generator
+   * emits the legacy `new Int64(...)` from node-int64. Only meaningful
+   * when gen_node_ is true.
+   */
+  bool gen_bigint_;
+
+  /**
    * True if we will generate an episode file.
    */
   bool gen_episode_file_;
+
+  /**
+   * True (default) if generated code should use native Promise; false to emit
+   * the legacy Q-based output (Q.fcall / Q.defer and imports from the 'q' package).
+   */
+  bool gen_native_promise_;
 
   /**
    * The name of the defined module(s), for TypeScript Definition Files.
@@ -452,7 +496,7 @@ void t_js_generator::init_generator() {
     f_episode_.open(f_episode_file_path);
   }
 
-  const auto f_types_name = outdir + program_->get_name() + "_types.js";
+  const auto f_types_name = outdir + program_->get_name() + "_types" + (gen_esm_ ? ".mjs" : ".js");
   f_types_.open(f_types_name.c_str());
   if (gen_episode_file_) {
     const auto types_module = program_->get_name() + "_types";
@@ -478,7 +522,13 @@ void t_js_generator::init_generator() {
   }
 
   if (gen_node_) {
-    f_types_ << js_const_type_ << "ttypes = module.exports = {};" << '\n';
+    if (gen_esm_) {
+      // Import the current module, so we can reference it as ttypes. This is
+      // fine in ESM, because it allows circular imports.
+      f_types_ << "import * as ttypes from './" + program_->get_name() + "_types.mjs';" << '\n';
+    } else {
+      f_types_ << js_const_type_ << "ttypes = module.exports = {};" << '\n';
+    }
   }
 
   string pns;
@@ -507,15 +557,44 @@ void t_js_generator::init_generator() {
  */
 string t_js_generator::js_includes() {
   if (gen_node_) {
-    string result = js_const_type_ + "thrift = require('thrift');\n"
-        + js_const_type_ + "Thrift = thrift.Thrift;\n";
-    if (!gen_es6_) {
-      result += js_const_type_ + "Q = thrift.Q;\n";
+    string result;
+
+    if (gen_esm_) {
+      if (gen_bigint_) {
+        // Bigint codegen references `thrift.toBigInt` / `thrift.fromBigInt`
+        // at deserialize / serialize sites, so the ESM include path needs a
+        // namespace binding alongside the named `Thrift` import.
+        result += "import * as thrift from 'thrift';\n";
+        result += "const { Thrift } = thrift;\n";
+      } else {
+        result += "import { Thrift } from 'thrift';\n";
+      }
+    } else {
+      result += js_const_type_ + "thrift = require('thrift');\n"
+          + js_const_type_ + "Thrift = thrift.Thrift;\n";
     }
-    result += js_const_type_ + "Int64 = require('node-int64');\n";
+    if (!gen_native_promise_ && !gen_es6_) {
+      if (gen_esm_) {
+        result += "import Q from 'q';\n";
+      } else {
+        result += js_const_type_ + "Q = require('q');\n";
+      }
+    }
+    if (gen_esm_) {
+      if (!gen_bigint_) {
+        result += "import Int64 from 'node-int64';\n";
+      }
+      result += "import { v4 as uuid } from 'uuid';";
+    } else {
+      if (!gen_bigint_) {
+        result += js_const_type_ + "Int64 = require('node-int64');\n";
+      }
+      result += js_const_type_ + "uuid = require('uuid').v4;\n";
+    }
     return result;
   }
   string result = "if (typeof Int64 === 'undefined' && typeof require === 'function') {\n  " + js_const_type_ + "Int64 = require('node-int64');\n}\n";
+  result += "if (typeof uuid === 'undefined' && typeof require === 'function') {\n  " + js_const_type_ + "uuid = require('uuid').v4;\n}\n";
   return result;
 }
 
@@ -524,13 +603,24 @@ string t_js_generator::js_includes() {
  */
 string t_js_generator::ts_includes() {
   if (gen_node_) {
-    return string(
+    string result =
         "import thrift = require('thrift');\n"
-        "import Thrift = thrift.Thrift;\n"
-        "import Q = thrift.Q;\n"
-        "import Int64 = require('node-int64');");
+        "import Thrift = thrift.Thrift;\n";
+    if (!gen_native_promise_) {
+      result += "import Q = require('q');\n";
+    }
+    if (!gen_bigint_) {
+      result += "import Int64 = require('node-int64');\n";
+    }
+    result +=
+        "import { v4 as uuid } from 'uuid';\n"
+        "type uuid = string;";
+    return result;
   }
-  return string("import Int64 = require('node-int64');");
+  return string(
+    "import Int64 = require('node-int64');\n"
+    "import { v4 as uuid } from 'uuid';\n"
+    "type uuid = string;");
 }
 
 /**
@@ -538,11 +628,16 @@ string t_js_generator::ts_includes() {
  */
 string t_js_generator::ts_service_includes() {
   if (gen_node_) {
-    return string(
+    string result =
         "import thrift = require('thrift');\n"
-        "import Thrift = thrift.Thrift;\n"
-        "import Q = thrift.Q;\n"
-        "import Int64 = require('node-int64');");
+        "import Thrift = thrift.Thrift;";
+    if (!gen_native_promise_) {
+      result += "\nimport Q = require('q');";
+    }
+    if (!gen_bigint_) {
+      result += "\nimport Int64 = require('node-int64');";
+    }
+    return result;
   }
   return string("import Int64 = require('node-int64');");
 }
@@ -556,7 +651,11 @@ string t_js_generator::render_includes() {
   if (gen_node_) {
     const vector<t_program*>& includes = program_->get_includes();
     for (auto include : includes) {
-      result += js_const_type_ + make_valid_nodeJs_identifier(include->get_name()) + "_ttypes = require('" + get_import_path(include) + "');\n";
+      if (gen_esm_) {
+        result += "import * as " + make_valid_nodeJs_identifier(include->get_name()) + "_ttypes from '" + get_import_path(include) + "';\n";
+      } else {
+        result += js_const_type_ + make_valid_nodeJs_identifier(include->get_name()) + "_ttypes = require('" + get_import_path(include) + "');\n";
+      }
     }
     if (includes.size() > 0) {
       result += "\n";
@@ -590,17 +689,28 @@ string t_js_generator::render_ts_includes() {
 
 string t_js_generator::get_import_path(t_program* program) {
   const string import_file_name(program->get_name() + "_types");
+  const string import_file_name_with_extension = import_file_name + (gen_esm_ ? ".mjs" : ".js");
+
   if (program->get_recursive()) {
-    return "./" + import_file_name;
+    return "./" + import_file_name_with_extension;
   }
 
-  const string import_file_name_with_extension = import_file_name + ".js";
+  auto module_name_and_import_path_iterator = module_name_2_import_path.find(import_file_name);
+  if (module_name_and_import_path_iterator != module_name_2_import_path.end()) {
+    return module_name_and_import_path_iterator->second;
+  }
+  return "./" + import_file_name_with_extension;
+}
 
-    auto module_name_and_import_path_iterator = module_name_2_import_path.find(import_file_name);
-    if (module_name_and_import_path_iterator != module_name_2_import_path.end()) {
-      return module_name_and_import_path_iterator->second;
-    }
-    return "./" + import_file_name;
+string t_js_generator::get_import_path(t_service* service) {
+  const string import_file_name(service->get_name());
+  const string import_file_name_with_extension = import_file_name + (gen_esm_ ? ".mjs" : ".js");
+
+  auto module_name_and_import_path_iterator = module_name_2_import_path.find(import_file_name);
+  if (module_name_and_import_path_iterator != module_name_2_import_path.end()) {
+    return module_name_and_import_path_iterator->second;
+  }
+  return "./" + import_file_name_with_extension;
 }
 
 /**
@@ -638,7 +748,11 @@ void t_js_generator::generate_typedef(t_typedef* ttypedef) {
  * @param tenum The enumeration
  */
 void t_js_generator::generate_enum(t_enum* tenum) {
-  f_types_ << js_type_namespace(tenum->get_program()) << tenum->get_name() << " = {" << '\n';
+  if (gen_esm_) {
+    f_types_ << "export const " << tenum->get_name() << " = {" << '\n';
+  } else {
+    f_types_ << js_type_namespace(tenum->get_program()) << tenum->get_name() << " = {" << '\n';
+  }
 
   if (gen_ts_) {
     f_types_ts_ << ts_print_doc(tenum) << ts_indent() << ts_declare() << "enum "
@@ -680,7 +794,11 @@ void t_js_generator::generate_const(t_const* tconst) {
   string name = tconst->get_name();
   t_const_value* value = tconst->get_value();
 
-  f_types_ << js_type_namespace(program_) << name << " = ";
+  if (gen_esm_) {
+    f_types_ << "export const " << name << " = ";
+  } else {
+    f_types_ << js_type_namespace(program_) << name << " = ";
+  }
   f_types_ << render_const_value(type, value) << ";" << '\n';
 
   if (gen_ts_) {
@@ -705,6 +823,9 @@ string t_js_generator::render_const_value(t_type* type, t_const_value* value) {
     case t_base_type::TYPE_STRING:
       out << "'" << get_escaped_string(value) << "'";
       break;
+    case t_base_type::TYPE_UUID:
+      out << "'" << value << "'";
+      break;
     case t_base_type::TYPE_BOOL:
       out << (value->get_integer() > 0 ? "true" : "false");
       break;
@@ -716,7 +837,10 @@ string t_js_generator::render_const_value(t_type* type, t_const_value* value) {
     case t_base_type::TYPE_I64:
       {
         int64_t const& integer_value = value->get_integer();
-        if (integer_value <= max_safe_integer && integer_value >= min_safe_integer) {
+        if (gen_bigint_) {
+          // Native BigInt literal — handles the full signed 64-bit range.
+          out << integer_value << "n";
+        } else if (integer_value <= max_safe_integer && integer_value >= min_safe_integer) {
           out << "new Int64(" << integer_value << ")";
         } else {
           out << "new Int64('" << std::hex << integer_value << std::dec << "')";
@@ -859,9 +983,18 @@ void t_js_generator::generate_js_struct_definition(ostream& out,
   vector<t_field*>::const_iterator m_iter;
 
   if (gen_node_) {
+    string commonjs_export = "";
+
+    if (is_exported) {
+      if (gen_esm_) {
+        out << "export ";
+      } else {
+        commonjs_export = " = module.exports." + tstruct->get_name();
+      }
+    }
+
     string prefix = has_js_namespace(tstruct->get_program()) ? js_namespace(tstruct->get_program()) : js_const_type_;
-    out << prefix << tstruct->get_name() <<
-      (is_exported ? " = module.exports." + tstruct->get_name() : "");
+    out << prefix << tstruct->get_name() << commonjs_export;
     if (gen_ts_) {
       f_types_ts_ << ts_print_doc(tstruct) << ts_indent() << ts_declare() << "class "
                   << tstruct->get_name() << (is_exception ? " extends Thrift.TException" : "")
@@ -893,7 +1026,8 @@ void t_js_generator::generate_js_struct_definition(ostream& out,
   // Call super() method on inherited Error class
   if (gen_node_ && is_exception) {
     if (gen_es6_) {
-      indent(out) << "super(args);" << '\n';
+      indent(out) << "super(\"" << js_namespace(tstruct->get_program())
+        << tstruct->get_name() << "\");" << '\n';
     } else {
       indent(out) << "Thrift.TException.call(this, \"" << js_namespace(tstruct->get_program())
         << tstruct->get_name() << "\");" << '\n';
@@ -1069,6 +1203,10 @@ void t_js_generator::generate_js_struct_reader(ostream& out, t_struct* tstruct) 
 
   indent_up();
 
+  indent(out) << "input.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
+
   indent(out) << "input.readStructBegin();" << '\n';
 
   // Loop over reading in fields
@@ -1131,6 +1269,13 @@ void t_js_generator::generate_js_struct_reader(ostream& out, t_struct* tstruct) 
 
   indent(out) << "input.readStructEnd();" << '\n';
 
+  indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "input.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
+
   indent(out) << "return;" << '\n';
 
   indent_down();
@@ -1159,6 +1304,10 @@ void t_js_generator::generate_js_struct_writer(ostream& out, t_struct* tstruct) 
 
   indent_up();
 
+  indent(out) << "output.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
+
   indent(out) << "output.writeStructBegin('" << name << "');" << '\n';
 
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
@@ -1182,6 +1331,13 @@ void t_js_generator::generate_js_struct_writer(ostream& out, t_struct* tstruct) 
   out << indent() << "output.writeFieldStop();" << '\n' << indent() << "output.writeStructEnd();"
       << '\n';
 
+  indent_down();
+  out << indent() << "} finally {" << '\n';
+  indent_up();
+  out << indent() << "output.decrementRecursionDepth();" << '\n';
+  indent_down();
+  out << indent() << "}" << '\n';
+
   out << indent() << "return;" << '\n';
 
   indent_down();
@@ -1198,7 +1354,7 @@ void t_js_generator::generate_js_struct_writer(ostream& out, t_struct* tstruct) 
  * @param tservice The service definition
  */
 void t_js_generator::generate_service(t_service* tservice) {
-  string f_service_name = get_out_dir() + service_name_ + ".js";
+  string f_service_name = get_out_dir() + service_name_ + (gen_esm_ ? ".mjs" : ".js");
   f_service_.open(f_service_name.c_str());
   if (gen_episode_file_) {
     f_episode_ << service_name_ << ":" << thrift_package_output_directory_ << "/" << service_name_ << '\n';
@@ -1218,7 +1374,9 @@ void t_js_generator::generate_service(t_service* tservice) {
   f_service_ << js_includes() << '\n' << render_includes() << '\n';
 
   if (gen_ts_) {
-    if (tservice->get_extends() != nullptr) {
+    if ((tservice->get_extends() != nullptr)
+        && (module_name_2_import_path.find(tservice->get_extends()->get_name()) == module_name_2_import_path.end())) {
+      // Only add the reference if the service does not come from the episode
       f_service_ts_ << "/// <reference path=\"" << tservice->get_extends()->get_name()
                     << ".d.ts\" />" << '\n';
     }
@@ -1271,18 +1429,22 @@ void t_js_generator::generate_service(t_service* tservice) {
 
   if (gen_node_) {
     if (tservice->get_extends() != nullptr) {
-      f_service_ << js_const_type_ <<  tservice->get_extends()->get_name() << " = require('./"
-                 << tservice->get_extends()->get_name() << "');" << '\n' << js_const_type_
+      f_service_ << js_const_type_ <<  tservice->get_extends()->get_name() << " = require('"
+                 << get_import_path(tservice->get_extends()) << "');" << '\n' << js_const_type_
                  << tservice->get_extends()->get_name()
                  << "Client = " << tservice->get_extends()->get_name() << ".Client;" << '\n'
                  << js_const_type_ << tservice->get_extends()->get_name()
                  << "Processor = " << tservice->get_extends()->get_name() << ".Processor;" << '\n';
 
-      f_service_ts_ << "import " << tservice->get_extends()->get_name() << " = require('./"
-                    << tservice->get_extends()->get_name() << "');" << '\n';
+      f_service_ts_ << "import " << tservice->get_extends()->get_name() << " = require('"
+                    << get_import_path(tservice->get_extends()) << "');" << '\n';
     }
 
-    f_service_ << js_const_type_ << "ttypes = require('./" + program_->get_name() + "_types');" << '\n';
+    if (gen_esm_) {
+      f_service_ << "import * as ttypes from './" + program_->get_name() + "_types.mjs';" << '\n';
+    } else {
+      f_service_ << js_const_type_ << "ttypes = require('./" + program_->get_name() + "_types');" << '\n';
+    }
   }
 
   generate_service_helpers(tservice);
@@ -1317,27 +1479,28 @@ void t_js_generator::generate_service_processor(t_service* tservice) {
   vector<t_function*> functions = tservice->get_functions();
   vector<t_function*>::iterator f_iter;
 
-  if (gen_node_) {
-    string prefix = has_js_namespace(tservice->get_program()) ? js_namespace(tservice->get_program()) : js_const_type_;
-    f_service_ << prefix << service_name_ << "Processor = " << "exports.Processor";
-    if (gen_ts_) {
-      f_service_ts_ << '\n' << "declare class Processor ";
-      if (tservice->get_extends() != nullptr) {
-        f_service_ts_ << "extends " << tservice->get_extends()->get_name() << ".Processor ";
-      }
-      f_service_ts_ << "{" << '\n';
-      indent_up();
-
-      if(tservice->get_extends() == nullptr) {
-        f_service_ts_ << ts_indent() << "private _handler: object;" << '\n' << '\n';
-      }
-      f_service_ts_ << ts_indent() << "constructor(handler: object);" << '\n';
-      f_service_ts_ << ts_indent() << "process(input: thrift.TProtocol, output: thrift.TProtocol): void;" << '\n';
-      indent_down();
-    }
+  std::string service_var;
+  if (!gen_node_ || has_js_namespace(tservice->get_program())) {
+    service_var = js_namespace(tservice->get_program()) + service_name_ + "Processor";
+    f_service_ << service_var;
   } else {
-    f_service_ << js_namespace(tservice->get_program()) << service_name_ << "Processor = "
-             << "exports.Processor";
+    service_var = service_name_ + "Processor";
+    f_service_ << js_const_type_ << service_var;
+  };
+  if (gen_node_ && gen_ts_) {
+    f_service_ts_ << '\n' << "declare class Processor ";
+    if (tservice->get_extends() != nullptr) {
+      f_service_ts_ << "extends " << tservice->get_extends()->get_name() << ".Processor ";
+    }
+    f_service_ts_ << "{" << '\n';
+    indent_up();
+
+    if(tservice->get_extends() == nullptr) {
+      f_service_ts_ << ts_indent() << "private _handler: object;" << '\n' << '\n';
+    }
+    f_service_ts_ << ts_indent() << "constructor(handler: object);" << '\n';
+    f_service_ts_ << ts_indent() << "process(input: thrift.TProtocol, output: thrift.TProtocol): void;" << '\n';
+    indent_down();
   }
 
   bool is_subclass_service = tservice->get_extends() != nullptr;
@@ -1419,6 +1582,12 @@ void t_js_generator::generate_service_processor(t_service* tservice) {
   if (gen_node_ && gen_ts_) {
     f_service_ts_ << "}" << '\n';
   }
+
+  if(gen_esm_) {
+    f_service_ << "export { " << service_var << " as Processor };" << '\n';
+  } else {
+    f_service_ << "exports.Processor = " << service_var << ";" << '\n';
+  }
 }
 
 /**
@@ -1486,6 +1655,10 @@ void t_js_generator::generate_process_function(t_service* tservice, t_function* 
 
   if (gen_es6_) {
     indent(f_service_) << "new Promise((resolve) => resolve(this._handler." << tfunction->get_name() << ".bind(this._handler)(" << '\n';
+  } else if (gen_native_promise_) {
+    // Non-ES6 native Promise: use function expression with explicit `this`
+    // binding so we don't rely on arrow-function lexical `this`.
+    indent(f_service_) << "new Promise(function(resolve) { resolve(this._handler." << tfunction->get_name() << ".bind(this._handler)(" << '\n';
   } else {
     string maybeComma = (fields.size() > 0 ? "," : "");
     indent(f_service_) << "Q.fcall(this._handler." << tfunction->get_name() << ".bind(this._handler)"
@@ -1501,6 +1674,8 @@ void t_js_generator::generate_process_function(t_service* tservice, t_function* 
 
   if (gen_es6_) {
     indent(f_service_) << "))).then(result => {" << '\n';
+  } else if (gen_native_promise_) {
+    indent(f_service_) << ")); }.bind(this)).then(function(result) {" << '\n';
   } else {
     indent(f_service_) << ").then(function(result) {" << '\n';
   }
@@ -1702,9 +1877,10 @@ void t_js_generator::generate_service_client(t_service* tservice) {
 
   bool is_subclass_service = tservice->get_extends() != nullptr;
 
+  string client_var = js_namespace(tservice->get_program()) + service_name_ + "Client";
   if (gen_node_) {
-    string prefix = has_js_namespace(tservice->get_program()) ? js_namespace(tservice->get_program()) : js_const_type_;
-    f_service_ << prefix << service_name_ << "Client = " << "exports.Client";
+    string prefix = has_js_namespace(tservice->get_program()) ? "" : js_const_type_;
+    f_service_ << prefix << client_var;
     if (gen_ts_) {
       f_service_ts_ << ts_print_doc(tservice) << ts_indent() << ts_declare() << "class "
                     << "Client ";
@@ -1714,8 +1890,7 @@ void t_js_generator::generate_service_client(t_service* tservice) {
       f_service_ts_ << "{" << '\n';
     }
   } else {
-    f_service_ << js_namespace(tservice->get_program()) << service_name_
-               << "Client";
+    f_service_ << client_var;
     if (gen_ts_) {
       f_service_ts_ << ts_print_doc(tservice) << ts_indent() << ts_declare() << "class "
                     << service_name_ << "Client ";
@@ -1865,22 +2040,44 @@ void t_js_generator::generate_service_client(t_service* tservice) {
       f_service_ << indent() << "this._seqid = this.new_seqid();" << '\n' << indent()
                  << "if (callback === undefined) {" << '\n';
       indent_up();
-      f_service_ << indent() << js_const_type_ << "_defer = Q.defer();" << '\n' << indent()
-                 << "this._reqs[this.seqid()] = function(error, result) {" << '\n';
-      indent_up();
-      indent(f_service_) << "if (error) {" << '\n';
-      indent_up();
-      indent(f_service_) << "_defer.reject(error);" << '\n';
-      indent_down();
-      indent(f_service_) << "} else {" << '\n';
-      indent_up();
-      indent(f_service_) << "_defer.resolve(result);" << '\n';
-      indent_down();
-      indent(f_service_) << "}" << '\n';
-      indent_down();
-      indent(f_service_) << "};" << '\n';
-      f_service_ << indent() << "this.send_" << funname << "(" << arglist << ");" << '\n'
-                 << indent() << "return _defer.promise;" << '\n';
+      if (gen_native_promise_) {
+        f_service_ << indent() << js_const_type_ << "self = this;" << '\n' << indent()
+                   << "return new Promise(function(resolve, reject) {" << '\n';
+        indent_up();
+        f_service_ << indent() << "self._reqs[self.seqid()] = function(error, result) {" << '\n';
+        indent_up();
+        indent(f_service_) << "if (error) {" << '\n';
+        indent_up();
+        indent(f_service_) << "reject(error);" << '\n';
+        indent_down();
+        indent(f_service_) << "} else {" << '\n';
+        indent_up();
+        indent(f_service_) << "resolve(result);" << '\n';
+        indent_down();
+        indent(f_service_) << "}" << '\n';
+        indent_down();
+        indent(f_service_) << "};" << '\n';
+        f_service_ << indent() << "self.send_" << funname << "(" << arglist << ");" << '\n';
+        indent_down();
+        indent(f_service_) << "});" << '\n';
+      } else {
+        f_service_ << indent() << js_const_type_ << "_defer = Q.defer();" << '\n' << indent()
+                   << "this._reqs[this.seqid()] = function(error, result) {" << '\n';
+        indent_up();
+        indent(f_service_) << "if (error) {" << '\n';
+        indent_up();
+        indent(f_service_) << "_defer.reject(error);" << '\n';
+        indent_down();
+        indent(f_service_) << "} else {" << '\n';
+        indent_up();
+        indent(f_service_) << "_defer.resolve(result);" << '\n';
+        indent_down();
+        indent(f_service_) << "}" << '\n';
+        indent_down();
+        indent(f_service_) << "};" << '\n';
+        f_service_ << indent() << "this.send_" << funname << "(" << arglist << ");" << '\n'
+                   << indent() << "return _defer.promise;" << '\n';
+      }
       indent_down();
       indent(f_service_) << "} else {" << '\n';
       indent_up();
@@ -2204,6 +2401,12 @@ void t_js_generator::generate_service_client(t_service* tservice) {
     indent_down();
     f_service_ << "};" << '\n';
   }
+
+  if(gen_esm_) {
+    f_service_ << "export { " << client_var << " as Client };" << '\n';
+  } else if(gen_node_) {
+    f_service_ << "exports.Client = " << client_var << ";" << '\n';
+  }
 }
 
 std::string t_js_generator::render_recv_throw(std::string var) {
@@ -2243,7 +2446,18 @@ void t_js_generator::generate_deserialize_field(ostream& out,
   } else if (type->is_container()) {
     generate_deserialize_container(out, type, name);
   } else if (type->is_base_type() || type->is_enum()) {
-    indent(out) << name << " = input.";
+    // In bigint mode the protocol still returns a node-int64 Int64; wrap
+    // the read site in `thrift.toBigInt(...)` so the assigned value matches
+    // the generated `bigint` type. gen_bigint_ is only true when gen_node_
+    // is true, so the `.value` branch below is never reached in this mode.
+    bool wrap_i64_bigint = gen_bigint_ && type->is_base_type() &&
+        ((t_base_type*)type)->get_base() == t_base_type::TYPE_I64;
+
+    indent(out) << name << " = ";
+    if (wrap_i64_bigint) {
+      out << "thrift.toBigInt(";
+    }
+    out << "input.";
 
     if (type->is_base_type()) {
       t_base_type::t_base tbase = ((t_base_type*)type)->get_base();
@@ -2253,6 +2467,9 @@ void t_js_generator::generate_deserialize_field(ostream& out,
         break;
       case t_base_type::TYPE_STRING:
         out << (type->is_binary() ? "readBinary()" : "readString()");
+        break;
+      case t_base_type::TYPE_UUID:
+        out << "readUuid()";
         break;
       case t_base_type::TYPE_BOOL:
         out << "readBool()";
@@ -2277,6 +2494,10 @@ void t_js_generator::generate_deserialize_field(ostream& out,
       }
     } else if (type->is_enum()) {
       out << "readI32()";
+    }
+
+    if (wrap_i64_bigint) {
+      out << ")";
     }
 
     if (!gen_node_) {
@@ -2305,6 +2526,7 @@ void t_js_generator::generate_deserialize_struct(ostream& out, t_struct* tstruct
 void t_js_generator::generate_deserialize_container(ostream& out, t_type* ttype, string prefix) {
   string size = tmp("_size");
   string rtmp3 = tmp("_rtmp3");
+  string seen; // populated only for sets; gives O(1) per-element dedup
 
   t_field fsize(g_type_i32, size);
 
@@ -2316,8 +2538,10 @@ void t_js_generator::generate_deserialize_container(ostream& out, t_type* ttype,
     out << indent() << js_const_type_ << size << " = " << rtmp3 << ".size || 0;" << '\n';
 
   } else if (ttype->is_set()) {
+    seen = tmp("_seen");
 
     out << indent() << prefix << " = [];" << '\n'
+        << indent() << js_const_type_ << seen << " = new Set();" << '\n'
         << indent() << js_const_type_ << rtmp3 << " = input.readSetBegin();" << '\n'
         << indent() << js_const_type_ << size << " = " << rtmp3 << ".size || 0;" << '\n';
 
@@ -2344,7 +2568,7 @@ void t_js_generator::generate_deserialize_container(ostream& out, t_type* ttype,
 
     generate_deserialize_map_element(out, (t_map*)ttype, prefix);
   } else if (ttype->is_set()) {
-    generate_deserialize_set_element(out, (t_set*)ttype, prefix);
+    generate_deserialize_set_element(out, (t_set*)ttype, prefix, seen);
   } else if (ttype->is_list()) {
     generate_deserialize_list_element(out, (t_list*)ttype, prefix);
   }
@@ -2379,7 +2603,10 @@ void t_js_generator::generate_deserialize_map_element(ostream& out, t_map* tmap,
   indent(out) << prefix << "[" << key << "] = " << val << ";" << '\n';
 }
 
-void t_js_generator::generate_deserialize_set_element(ostream& out, t_set* tset, string prefix) {
+void t_js_generator::generate_deserialize_set_element(ostream& out,
+                                                      t_set* tset,
+                                                      string prefix,
+                                                      string seen) {
   string elem = tmp("elem");
   t_field felem(tset->get_elem_type(), elem);
 
@@ -2387,7 +2614,15 @@ void t_js_generator::generate_deserialize_set_element(ostream& out, t_set* tset,
 
   generate_deserialize_field(out, &felem);
 
+  // O(1) dedup against a parallel Set, allocated once in the container header.
+  // SameValueZero on Set matches indexOf-with-=== for primitives and is
+  // equivalent (reference equality) for complex element types.
+  indent(out) << "if (!" << seen << ".has(" << elem << ")) {" << '\n';
+  indent_up();
+  indent(out) << seen << ".add(" << elem << ");" << '\n';
   indent(out) << prefix << ".push(" << elem << ");" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
 }
 
 void t_js_generator::generate_deserialize_list_element(ostream& out,
@@ -2440,6 +2675,9 @@ void t_js_generator::generate_serialize_field(ostream& out, t_field* tfield, str
       case t_base_type::TYPE_STRING:
         out << (type->is_binary() ? "writeBinary(" : "writeString(") << name << ")";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "writeUuid(" << name << ")";
+        break;
       case t_base_type::TYPE_BOOL:
         out << "writeBool(" << name << ")";
         break;
@@ -2453,7 +2691,14 @@ void t_js_generator::generate_serialize_field(ostream& out, t_field* tfield, str
         out << "writeI32(" << name << ")";
         break;
       case t_base_type::TYPE_I64:
-        out << "writeI64(" << name << ")";
+        // In bigint mode the generated field holds a `bigint`; convert
+        // back to a node-int64 Int64 before handing to `writeI64`, which
+        // expects either an Int64 or a Number.
+        if (gen_bigint_) {
+          out << "writeI64(thrift.fromBigInt(" << name << "))";
+        } else {
+          out << "writeI64(" << name << ")";
+        }
         break;
       case t_base_type::TYPE_DOUBLE:
         out << "writeDouble(" << name << ")";
@@ -2494,6 +2739,7 @@ void t_js_generator::generate_serialize_container(ostream& out, t_type* ttype, s
                 << type_to_enum(((t_map*)ttype)->get_val_type()) << ", "
                 << "Thrift.objectLength(" << prefix << "));" << '\n';
   } else if (ttype->is_set()) {
+    indent(out) << "Thrift.checkSetUniqueness(" << prefix << ");" << '\n';
     indent(out) << "output.writeSetBegin(" << type_to_enum(((t_set*)ttype)->get_elem_type()) << ", "
                 << prefix << ".length);" << '\n';
 
@@ -2598,6 +2844,7 @@ string t_js_generator::declare_field(t_field* tfield, bool init, bool obj) {
       case t_base_type::TYPE_VOID:
         break;
       case t_base_type::TYPE_STRING:
+      case t_base_type::TYPE_UUID:
       case t_base_type::TYPE_BOOL:
       case t_base_type::TYPE_I8:
       case t_base_type::TYPE_I16:
@@ -2689,6 +2936,8 @@ string t_js_generator::type_to_enum(t_type* type) {
       throw std::runtime_error("NO T_VOID CONSTRUCT");
     case t_base_type::TYPE_STRING:
       return "Thrift.Type.STRING";
+    case t_base_type::TYPE_UUID:
+      return "Thrift.Type.UUID";
     case t_base_type::TYPE_BOOL:
       return "Thrift.Type.BOOL";
     case t_base_type::TYPE_I8:
@@ -2702,7 +2951,7 @@ string t_js_generator::type_to_enum(t_type* type) {
     case t_base_type::TYPE_DOUBLE:
       return "Thrift.Type.DOUBLE";
     default:
-      throw "compiler error: unhandled type";
+      throw "compiler error: unhandled js type";
     }
   } else if (type->is_enum()) {
     return "Thrift.Type.I32";
@@ -2735,6 +2984,9 @@ string t_js_generator::ts_get_type(t_type* type) {
     case t_base_type::TYPE_STRING:
       ts_type = type->is_binary() ? "Buffer" : "string";
       break;
+    case t_base_type::TYPE_UUID:
+      ts_type = "uuid";
+      break;
     case t_base_type::TYPE_BOOL:
       ts_type = "boolean";
       break;
@@ -2747,13 +2999,13 @@ string t_js_generator::ts_get_type(t_type* type) {
       ts_type = "number";
       break;
     case t_base_type::TYPE_I64:
-      ts_type = "Int64";
+      ts_type = gen_bigint_ ? "bigint" : "Int64";
       break;
     case t_base_type::TYPE_VOID:
       ts_type = "void";
       break;
     default:
-      throw "compiler error: unhandled type";
+      throw "compiler error: unhandled js type";
     }
   } else if (type->is_enum() || type->is_struct() || type->is_xception()) {
     std::string type_name;
@@ -2792,6 +3044,11 @@ string t_js_generator::ts_get_type(t_type* type) {
 
     if (ktype == "number" || ktype == "string" ) {
       ts_type = "{ [k: " + ktype + "]: " + vtype + "; }";
+    } else if (ktype == "bigint") {
+      // TS index signatures only support string / number / symbol — JS
+      // coerces object keys to strings at runtime, so a `map<i64, …>` is
+      // really a string-keyed object even in bigint mode.
+      ts_type = "{ [k: string /*bigint*/]: " + vtype + "; }";
     } else if ((((t_map*)type)->get_key_type())->is_enum()) {
       // Not yet supported (enum map): https://github.com/Microsoft/TypeScript/pull/2652
       //ts_type = "{ [k: " + ktype + "]: " + vtype + "; }";
@@ -3013,6 +3270,9 @@ THRIFT_REGISTER_GENERATOR(js,
                           "    ts:              Generate TypeScript definition files.\n"
                           "    with_ns:         Create global namespace objects when using node.js\n"
                           "    es6:             Create ES6 code with Promises\n"
+                          "    native_promise=[true|false]:\n"
+                          "                     Use native Promise (default true). Set to false to\n"
+                          "                     emit legacy Q-based output (requires the 'q' package).\n"
                           "    thrift_package_output_directory=<path>:\n"
                           "                     Generate episode file and use the <path> as prefix\n"
                           "    imports=<paths_to_modules>:\n"

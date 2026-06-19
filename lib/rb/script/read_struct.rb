@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -38,6 +39,6 @@ if cpts == Fixtures::COMPACT_PROTOCOL_TEST_STRUCT
   puts "Object verified successfully!"
 else
   puts "Object failed verification! Expected #{Fixtures::COMPACT_PROTOCOL_TEST_STRUCT.inspect} but got #{cpts.inspect}"
-  
+
   puts cpts.differences(Fixtures::COMPACT_PROTOCOL_TEST_STRUCT)
 end

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * Base interface for a transport agent.
@@ -32,47 +34,29 @@ use Thrift\Factory\TStringFuncFactory;
  */
 abstract class TTransport
 {
-    /**
-     * Whether this transport is open.
-     *
-     * @return boolean true if open
-     */
-    abstract public function isOpen();
+    abstract public function isOpen(): bool;
 
     /**
-     * Open the transport for reading/writing
-     *
      * @throws TTransportException if cannot open
      */
-    abstract public function open();
+    abstract public function open(): void;
+
+    abstract public function close(): void;
 
     /**
-     * Close the transport.
-     */
-    abstract public function close();
-
-    /**
-     * Read some data into the array.
-     *
-     * @param int $len How much to read
-     * @return string The data that has been read
      * @throws TTransportException if cannot read any more data
      */
-    abstract public function read($len);
+    abstract public function read(int $len): string;
 
     /**
      * Guarantees that the full amount of data is read.
      *
-     * @return string The data, of exact length
      * @throws TTransportException if cannot read data
      */
-    public function readAll($len)
+    public function readAll(int $len): string
     {
-        // return $this->read($len);
-
         $data = '';
-        $got = 0;
-        while (($got = TStringFuncFactory::create()->strlen($data)) < $len) {
+        while (($got = strlen($data)) < $len) {
             $data .= $this->read($len - $got);
         }
 
@@ -80,19 +64,14 @@ abstract class TTransport
     }
 
     /**
-     * Writes the given data out.
-     *
-     * @param string $buf The data to write
      * @throws TTransportException if writing fails
      */
-    abstract public function write($buf);
+    abstract public function write(string $buf): void;
 
     /**
-     * Flushes any pending data out of a buffer
-     *
      * @throws TTransportException if a writing error occurs
      */
-    public function flush()
+    public function flush(): void
     {
     }
 }

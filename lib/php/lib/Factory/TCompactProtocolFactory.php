@@ -21,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Protocol\TCompactProtocol;
@@ -31,11 +33,7 @@ use Thrift\Transport\TTransport;
  */
 class TCompactProtocolFactory implements TProtocolFactory
 {
-    /**
-     * @param TTransport $trans
-     * @return TCompactProtocol
-     */
-    public function getProtocol($trans)
+    public function getProtocol(TTransport $trans): TCompactProtocol
     {
         return new TCompactProtocol($trans);
     }

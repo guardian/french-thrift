@@ -62,7 +62,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 
 use crate::transport::{TReadTransport, TWriteTransport};
-use crate::{ProtocolError, ProtocolErrorKind};
+use crate::{ProtocolError, ProtocolErrorKind, TConfiguration};
 
 #[cfg(test)]
 macro_rules! assert_eq_written_bytes {
@@ -208,7 +208,8 @@ pub trait TInputProtocol {
             TType::I32 => self.read_i32().map(|_| ()),
             TType::I64 => self.read_i64().map(|_| ()),
             TType::Double => self.read_double().map(|_| ()),
-            TType::String => self.read_string().map(|_| ()),
+            TType::String => self.read_bytes().map(|_| ()),
+            TType::Uuid => self.read_uuid().map(|_| ()),
             TType::Struct => {
                 self.read_struct_begin()?;
                 loop {
@@ -262,6 +263,15 @@ pub trait TInputProtocol {
     ///
     /// This method should **never** be used in generated code.
     fn read_byte(&mut self) -> crate::Result<u8>;
+
+    /// Get the minimum number of bytes a type will consume on the wire.
+    /// This picks the minimum possible across all protocols (so currently matches the compact protocol).
+    ///
+    /// This is used for pre-allocation size checks.
+    /// The actual data may be larger (e.g., for strings, lists, etc.).
+    fn min_serialized_size(&self, field_type: TType) -> usize {
+        self::compact::compact_protocol_min_serialized_size(field_type)
+    }
 }
 
 /// Converts Thrift identifiers, primitives, containers or structs into a
@@ -444,6 +454,10 @@ where
     fn read_byte(&mut self) -> crate::Result<u8> {
         (**self).read_byte()
     }
+
+    fn min_serialized_size(&self, field_type: TType) -> usize {
+        (**self).min_serialized_size(field_type)
+    }
 }
 
 impl<P> TOutputProtocol for Box<P>
@@ -565,7 +579,7 @@ where
 /// let protocol = factory.create(Box::new(channel));
 /// ```
 pub trait TInputProtocolFactory {
-    // Create a `TInputProtocol` that reads bytes from `transport`.
+    /// Create a `TInputProtocol` that reads bytes from `transport`.
     fn create(&self, transport: Box<dyn TReadTransport + Send>) -> Box<dyn TInputProtocol + Send>;
 }
 
@@ -920,6 +934,69 @@ pub fn verify_required_field_exists<T>(field_name: &str, field: &Option<T>) -> c
     }
 }
 
+/// Common container size validation used by all protocols.
+///
+/// Checks that:
+/// - Container size is not negative
+/// - Container size doesn't exceed configured maximum
+/// - Container size * element size doesn't overflow
+/// - Container memory requirements don't exceed message size limit
+pub(crate) fn check_container_size(
+    config: &TConfiguration,
+    container_size: i32,
+    element_size: usize,
+) -> crate::Result<()> {
+    // Check for negative size
+    if container_size < 0 {
+        return Err(crate::Error::Protocol(ProtocolError::new(
+            ProtocolErrorKind::NegativeSize,
+            format!("Negative container size: {}", container_size),
+        )));
+    }
+
+    let size_as_usize = container_size as usize;
+
+    // Check against configured max container size
+    if let Some(max_size) = config.max_container_size() {
+        if size_as_usize > max_size {
+            return Err(crate::Error::Protocol(ProtocolError::new(
+                ProtocolErrorKind::SizeLimit,
+                format!(
+                    "Container size {} exceeds maximum allowed size of {}",
+                    container_size, max_size
+                ),
+            )));
+        }
+    }
+
+    // Check for potential overflow
+    if let Some(min_bytes_needed) = size_as_usize.checked_mul(element_size) {
+        // TODO: When Rust trait specialization stabilizes, we can add more precise checks
+        // for transports that track exact remaining bytes. For now, we use the message
+        // size limit as a best-effort check.
+        if let Some(max_message_size) = config.max_message_size() {
+            if min_bytes_needed > max_message_size {
+                return Err(crate::Error::Protocol(ProtocolError::new(
+                    ProtocolErrorKind::SizeLimit,
+                    format!(
+                        "Container would require {} bytes, exceeding message size limit of {}",
+                        min_bytes_needed, max_message_size
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    } else {
+        Err(crate::Error::Protocol(ProtocolError::new(
+            ProtocolErrorKind::SizeLimit,
+            format!(
+                "Container size {} with element size {} bytes would result in overflow",
+                container_size, element_size
+            ),
+        )))
+    }
+}
+
 /// Extract the field id from a Thrift field identifier.
 ///
 /// `field_ident` must *not* have `TFieldIdentifier.field_type` of type `TType::Stop`.
@@ -982,5 +1059,78 @@ mod tests {
         W: TOutputProtocol,
     {
         t.flush().unwrap();
+    }
+
+    // Test unknown binary fields are skipped without error (THRIFT-5928)
+
+    fn build_struct_with_unknown_binary_field(payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0x0A); // field 1: TType::I64
+        buf.extend_from_slice(&1_i16.to_be_bytes());
+        buf.extend_from_slice(&42_i64.to_be_bytes());
+        buf.push(0x0B); // field 99: TType::String (same wire type for binary)
+        buf.extend_from_slice(&99_i16.to_be_bytes());
+        buf.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+        buf.extend_from_slice(payload);
+        buf.push(0x00); // stop
+        buf
+    }
+
+    fn read_struct_skipping_unknown(data: &[u8]) -> crate::Result<i64> {
+        let cursor = Cursor::new(data.to_vec());
+        let mut proto = TBinaryInputProtocol::new(cursor, true);
+        proto.read_struct_begin()?;
+        let mut known_value: Option<i64> = None;
+        loop {
+            let field = proto.read_field_begin()?;
+            if field.field_type == TType::Stop {
+                break;
+            }
+            match field.id {
+                Some(1) if field.field_type == TType::I64 => {
+                    known_value = Some(proto.read_i64()?);
+                }
+                _ => {
+                    proto.skip(field.field_type)?;
+                }
+            }
+            proto.read_field_end()?;
+        }
+        proto.read_struct_end()?;
+        known_value.ok_or_else(|| {
+            crate::Error::Protocol(crate::ProtocolError {
+                kind: crate::ProtocolErrorKind::InvalidData,
+                message: "missing known field".to_string(),
+            })
+        })
+    }
+
+    #[test]
+    fn must_skip_binary_field_with_non_utf8_bytes() {
+        let non_utf8: Vec<u8> = vec![
+            0x04, 0xFF, 0xFE, 0x80, 0x90, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE,
+            0xBA, 0xBE,
+        ];
+        assert!(String::from_utf8(non_utf8.clone()).is_err());
+        let data = build_struct_with_unknown_binary_field(&non_utf8);
+        let result = read_struct_skipping_unknown(&data);
+        assert!(
+            result.is_ok(),
+            "skip() failed on non-UTF-8 binary: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn must_skip_valid_utf8_string_field() {
+        let data = build_struct_with_unknown_binary_field(b"hello world");
+        assert_eq!(read_struct_skipping_unknown(&data).unwrap(), 42);
+    }
+
+    #[test]
+    fn must_skip_empty_binary_field() {
+        let data = build_struct_with_unknown_binary_field(&[]);
+        assert_eq!(read_struct_skipping_unknown(&data).unwrap(), 42);
     }
 }

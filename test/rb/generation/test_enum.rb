@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -25,7 +26,7 @@ class TestEnumGeneration < Test::Unit::TestCase
   def test_enum_valid_values
     assert_equal(Numberz::VALID_VALUES, Set.new([Numberz::ONE, Numberz::TWO, Numberz::THREE, Numberz::FIVE, Numberz::SIX, Numberz::EIGHT]))
   end
-  
+
   def test_enum_hash
     Numberz::VALID_VALUES.each do |value|
       assert_equal(Numberz.const_get(Numberz::VALUE_MAP[value].to_sym), value)

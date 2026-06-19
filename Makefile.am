@@ -78,7 +78,7 @@ empty :=
 space := $(empty) $(empty)
 comma := ,
 
-CROSS_LANGS = @MAYBE_CPP@ @MAYBE_C_GLIB@ @MAYBE_CL@ @MAYBE_D@ @MAYBE_JAVA@ @MAYBE_PYTHON@ @MAYBE_PY3@ @MAYBE_RUBY@ @MAYBE_PERL@ @MAYBE_PHP@ @MAYBE_GO@ @MAYBE_NODEJS@ @MAYBE_DART@ @MAYBE_ERLANG@ @MAYBE_LUA@ @MAYBE_RS@ @MAYBE_NETSTD@ @MAYBE_NODETS@ @MAYBE_KOTLIN@ @MAYBE_SWIFT@
+CROSS_LANGS = @MAYBE_CPP@ @MAYBE_C_GLIB@ @MAYBE_CL@ @MAYBE_D@ @MAYBE_JAVA@ @MAYBE_PYTHON@ @MAYBE_PY3@ @MAYBE_RUBY@ @MAYBE_PERL@ @MAYBE_PHP@ @MAYBE_GO@ @MAYBE_NODEJS@ @MAYBE_DART@ @MAYBE_ERLANG@ @MAYBE_LUA@ @MAYBE_RS@ @MAYBE_NETSTD@ @MAYBE_NODETS@ @MAYBE_KOTLIN@
 CROSS_LANGS_COMMA_SEPARATED = $(subst $(space),$(comma),$(CROSS_LANGS))
 
 if WITH_PY3
@@ -139,8 +139,6 @@ EXTRA_DIST = \
 	.clang-format \
 	.dockerignore \
 	.editorconfig \
-	.eslintignore \
-	.eslintrc.json \
 	.flake8 \
 	.gitattributes \
 	.gitignore \
@@ -150,12 +148,15 @@ EXTRA_DIST = \
 	.github/workflows/build.yml \
 	.github/workflows/cmake.yml \
 	.github/workflows/pypi.yml \
+	.github/workflows/release_rust.yml \
 	.travis.yml \
 	ApacheThrift.nuspec \
+	AGENTS.md \
 	appveyor.yml \
 	bootstrap.sh \
 	bower.json \
 	build \
+	CLAUDE.md \
 	CHANGES.md \
 	CMakeLists.txt \
 	composer.json \
@@ -165,6 +166,8 @@ EXTRA_DIST = \
 	doap.rdf \
 	doc \
 	dub.json \
+	eslint.config.mjs \
+	FUZZING.md \
 	go.mod \
 	jitpack.yml \
 	LANGUAGES.md \
