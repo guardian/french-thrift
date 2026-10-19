@@ -32,15 +32,18 @@ class TJsonProtocol extends TProtocol {
 
   static const Utf8Codec utf8Codec = Utf8Codec();
 
-  _BaseContext _context;
-  _BaseContext _rootContext;
-  _LookaheadReader _reader;
+  late _BaseContext _context;
+  late _BaseContext _rootContext;
+  late _LookaheadReader _reader;
 
   final List<_BaseContext> _contextStack = [];
   final Uint8List _tempBuffer = Uint8List(4);
 
-  TJsonProtocol(TTransport transport) : super(transport) {
+  TJsonProtocol(TTransport transport,
+      {int maxStringSize = defaultMaxStringSize})
+      : super(transport, maxStringSize: maxStringSize) {
     _rootContext = _BaseContext(this);
+    _context = _rootContext;
     _reader = _LookaheadReader(this);
     _resetContext();
   }
@@ -122,8 +125,6 @@ class TJsonProtocol extends TProtocol {
   }
 
   void _writeJsonInteger(int i) {
-    if (i == null) i = 0;
-
     _context.write();
     String str = i.toString();
 
@@ -137,8 +138,6 @@ class TJsonProtocol extends TProtocol {
   }
 
   void _writeJsonDouble(double d) {
-    if (d == null) d = 0.0;
-
     _context.write();
     String str = d.toString();
     bool escapeNumbers = d.isNaN || d.isInfinite || _context.escapeNumbers;
@@ -267,7 +266,6 @@ class TJsonProtocol extends TProtocol {
 
   @override
   void writeBool(bool b) {
-    if (b == null) b = false;
     _writeJsonInteger(b ? 1 : 0);
   }
 
@@ -298,7 +296,7 @@ class TJsonProtocol extends TProtocol {
 
   @override
   void writeString(String s) {
-    var bytes = s != null ? utf8Codec.encode(s) : Uint8List.fromList([]);
+    var bytes = utf8Codec.encode(s);
     _writeJsonString(bytes);
   }
 
@@ -311,6 +309,17 @@ class TJsonProtocol extends TProtocol {
 
   bool _isLowSurrogate(int b) => b >= 0xDC00 && b <= 0xDFFF;
 
+  /// A JSON string or number carries no length, so its size is whatever the
+  /// peer sends. It is held to the same maximum the binary and compact
+  /// protocols apply, checked against the running byte count as the value is
+  /// read.
+  void _checkStringSize(int size) {
+    if (size > maxStringSize) {
+      throw TProtocolError(TProtocolErrorType.SIZE_LIMIT,
+          'Length ($size) larger than max length ($maxStringSize)');
+    }
+  }
+
   /// read
   Uint8List _readJsonString({bool skipContext = false}) {
     List<int> bytes = [];
@@ -322,6 +331,7 @@ class TJsonProtocol extends TProtocol {
 
     _readJsonSyntaxChar(_Constants.QUOTE_BYTES[0]);
     while (true) {
+      _checkStringSize(bytes.length);
       int byte = _reader.read();
       if (byte == _Constants.QUOTE_BYTES[0]) {
         break;
@@ -384,6 +394,7 @@ class TJsonProtocol extends TProtocol {
   String _readJsonNumericChars() {
     StringBuffer buffer = StringBuffer();
     while (true) {
+      _checkStringSize(buffer.length);
       if (!_Constants.isJsonNumeric(_reader.peek())) {
         break;
       }
@@ -418,7 +429,7 @@ class TJsonProtocol extends TProtocol {
       Uint8List bytes = _readJsonString(skipContext: true);
       double d;
       try {
-        d = double.tryParse(utf8Codec.decode(bytes));
+        d = double.parse(utf8Codec.decode(bytes));
       } catch (_) {
         throw TProtocolError(TProtocolErrorType.INVALID_DATA,
             "Bad data encounted in numeric data");
@@ -675,7 +686,7 @@ class _Constants {
           TProtocolErrorType.NOT_IMPLEMENTED, "Unrecognized type");
     }
 
-    return _TYPE_ID_TO_NAME_BYTES[typeId];
+    return _TYPE_ID_TO_NAME_BYTES[typeId]!;
   }
 
   static final Map<String, int> _NAME_TO_TYPE_ID = Map.unmodifiable({
@@ -699,7 +710,7 @@ class _Constants {
           TProtocolErrorType.NOT_IMPLEMENTED, "Unrecognized type");
     }
 
-    return _NAME_TO_TYPE_ID[name];
+    return _NAME_TO_TYPE_ID[name]!;
   }
 
   static final Set<int> _JSON_NUMERICS = Set.from([

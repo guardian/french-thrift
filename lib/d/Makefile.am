@@ -41,9 +41,7 @@ d_asyncdir = $(d_thriftdir)/async
 d_async_DATA = $(addprefix src/, $(addsuffix .d, $(d_asyncmodules)))
 
 d_codegenmodules = $(addprefix thrift/codegen/, async_client \
-	async_client_pool base client client_pool processor)
-#d_codegenmodules = $(addprefix thrift/codegen/, async_client \
-#	async_client_pool base client client_pool idlgen processor)
+	async_client_pool base client client_pool idlgen processor)
 
 d_codegendir = $(d_thriftdir)/codegen
 d_codegen_DATA = $(addprefix src/, $(addsuffix .d, $(d_codegenmodules)))
@@ -64,7 +62,7 @@ d_servertransport_DATA = $(addprefix src/, $(addsuffix .d, \
 	$(d_servertransportmodules)))
 
 d_transportmodules = $(addprefix thrift/transport/, base buffered file \
-	framed http memory piped range socket ssl zlib)
+	framed http memory piped range socket ssl websocket zlib)
 d_transportdir = $(d_thriftdir)/transport
 d_transport_DATA = $(addprefix src/, $(addsuffix .d, $(d_transportmodules)))
 
@@ -97,7 +95,7 @@ d_main_modules = $(filter-out $(d_libevent_dependent_modules) \
 	$(d_openssl_dependent_modules),$(d_modules))
 
 
-d_lib_flags = -w -wi -Isrc -lib -version=use_openssl_1_0_x
+d_lib_flags = -w -wi -Isrc -lib -version=$(DMD_OPENSSL_VERSION_ID)
 all_targets =
 
 #
@@ -153,7 +151,7 @@ clean-local:
 #
 # Unit tests (built both in debug and release mode).
 #
-d_test_flags = -unittest -w -wi -I$(top_srcdir)/lib/d/src -version=use_openssl_1_0_x
+d_test_flags = -unittest -w -wi -I$(top_srcdir)/lib/d/src -version=$(DMD_OPENSSL_VERSION_ID)
 
 # There just must be some way to reassign a variable without warnings in
 # Automake...

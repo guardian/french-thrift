@@ -24,9 +24,20 @@ THttpTransport = TTransportBase:new{
   path = '/',
   wBuf = '',
   rBuf = '',
+  -- How much of the body in rBuf read() has handed out so far
+  rPos = 0,
   CRLF = '\r\n',
   VERSION = version,
-  isServer = true
+  isServer = true,
+  -- The largest header block that will be accumulated, in bytes. The block
+  -- grows because the peer has not sent the blank line that ends it yet, so
+  -- how far it grows is the peer's choice unless something bounds it.
+  maxHeaderSize = 64 * 1024,
+
+  -- Content-Length is a number the peer chose, and the body read below will
+  -- keep going until it has that many bytes. Held to the same maximum a frame
+  -- is; override per transport.
+  maxBodySize = DEFAULT_MAX_SIZE
 }
 
 function THttpTransport:new(obj)
@@ -40,6 +51,15 @@ function THttpTransport:new(obj)
   end
 
   return TTransportBase.new(self, obj)
+end
+
+local function THttpHeaders()
+    local data = {}
+    return setmetatable({}, {
+        __index = function(_, key) return data[string.lower(key)] end,
+        __newindex = function(_, key, value) data[string.lower(key)] = value end,
+        __pairs = function() return pairs(data) end
+    })
 end
 
 function THttpTransport:isOpen()
@@ -62,21 +82,36 @@ function THttpTransport:read(len)
   if string.len(self.rBuf) == 0 then
     self:_readMsg()
   end
-  if len > string.len(self.rBuf) then
-    local val = self.rBuf
-    self.rBuf = ''
-    return val
-  end
 
-  local val = string.sub(self.rBuf, 0, len)
-  self.rBuf = string.sub(self.rBuf, len+1)
+  local val = string.sub(self.rBuf, self.rPos + 1, self.rPos + len)
+  self.rPos = self.rPos + string.len(val)
+  if self.rPos >= string.len(self.rBuf) then
+    self.rBuf = ''
+    self.rPos = 0
+  end
   return val
 end
 
 function THttpTransport:_readMsg()
+  local delimiter = self.CRLF .. self.CRLF
   while true do
+    local had = string.len(self.rBuf)
     self.rBuf = self.rBuf .. self.trans:read(4)
-    if string.find(self.rBuf, self.CRLF .. self.CRLF) then
+    local have = string.len(self.rBuf)
+    if have == had then
+      error('THttpTransport: no end of headers before the peer stopped sending')
+    end
+    if have > self.maxHeaderSize then
+      error('THttpTransport: headers larger than the maximum of ' ..
+            self.maxHeaderSize .. ' bytes')
+    end
+    -- Only the tail can hold a delimiter that was not there last time round,
+    -- so do not rescan the whole block on every pass.
+    local from = had - string.len(delimiter) + 2
+    if from < 1 then
+      from = 1
+    end
+    if string.find(self.rBuf, delimiter, from, true) then
       break
     end
   end
@@ -93,12 +128,16 @@ function THttpTransport:_readMsg()
 
   local length = tonumber(headers["Content-Length"])
   if length then
+    self:checkDeclaredSize(length, self.maxBodySize)
     length = length - string.len(self.rBuf)
-    self.rBuf = self.rBuf .. self.trans:readAll(length)
+    if length > 0 then
+      self.rBuf = self.rBuf .. self.trans:readAll(length)
+    end
   end
   if self.rBuf == nil then
     self.rBuf = ""
   end
+  self.rPos = 0
 end
 
 function THttpTransport:getLine()
@@ -112,19 +151,32 @@ function THttpTransport:getLine()
 end
 
 function THttpTransport:_parseHeaders()
-  local headers = {}
+  local headers = THttpHeaders()
 
   repeat
     local line = self:getLine()
-    for key, val in string.gmatch(line, "([%w%-]+)%s*:%s*(.+)") do
-      if headers[key] then
-        local delimiter = ", "
-        if key == "Set-Cookie" then
-          delimiter = "; "
+    -- Split the line at the first ':' with a plain search, so the work stays
+    -- linear in the length of the line. The field name is the leading run of
+    -- name characters (surrounding whitespace ignored); the value is the rest
+    -- of the line with its leading whitespace removed. The two matches are
+    -- anchored so neither scans the line more than once.
+    local colon = string.find(line, ':', 1, true)
+    if colon then
+      local key, rest = string.match(string.sub(line, 1, colon - 1),
+                                     "^%s*([%w%-]+)(.*)")
+      if key and string.find(rest, "^%s*$") then
+        local val = string.match(line, "^%s*(.+)", colon + 1)
+        if val then
+          if headers[key] then
+            local delimiter = ", "
+            if string.lower(key) == "set-cookie" then
+              delimiter = "; "
+            end
+            headers[key] = headers[key] .. delimiter .. tostring(val)
+          else
+            headers[key] = tostring(val)
+          end
         end
-        headers[key] = headers[key] .. delimiter .. tostring(val)
-      else
-        headers[key] = tostring(val)
       end
     end
   until string.find(line, "^%s*$")
@@ -160,12 +212,21 @@ function THttpTransport:writeHttpHeader(content_len)
   end
 end
 
+function THttpTransport:flushOneway()
+  self.wBuf = ''
+  self:writeHttpHeader(0)
+  self.trans:flush()
+end
+
 function THttpTransport:flush()
   -- If the write fails we still want wBuf to be clear
   local tmp = self.wBuf
   self.wBuf = ''
-  self:writeHttpHeader(string.len(tmp))
-  self.trans:write(tmp)
+  local dataLen = string.len(tmp)
+  self:writeHttpHeader(dataLen)
+  if dataLen > 0 then
+    self.trans:write(tmp)
+  end
   self.trans:flush()
 end
 

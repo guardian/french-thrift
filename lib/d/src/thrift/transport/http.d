@@ -18,7 +18,7 @@
  */
 
 /**
- * HTTP tranpsort implementation, modelled after the C++ one.
+ * HTTP transport implementation, modelled after the C++ one.
  *
  * Unfortunately, libcurl is quite heavyweight and supports only client-side
  * applications. This is an implementation of the basic HTTP/1.1 parts
@@ -26,12 +26,13 @@
  */
 module thrift.transport.http;
 
-import std.algorithm : canFind, countUntil, endsWith, findSplit, min, startsWith;
+import core.stdc.string : memmove;
+import std.algorithm : canFind, countUntil, endsWith, equal, findSplit, min;
 import std.ascii : toLower;
 import std.array : empty;
-import std.conv : parse, to;
+import std.conv : to;
 import std.datetime : Clock, UTC;
-import std.string : stripLeft;
+import std.string : strip;
 import thrift.base : VERSION;
 import thrift.transport.base;
 import thrift.transport.memory;
@@ -118,9 +119,39 @@ abstract class THttpTransport : TBaseTransport {
 
   /**
    * The size of the buffer to read HTTP requests into, in bytes. Will expand
-   * as required.
+   * as required, up to maxHttpBufferSize.
    */
   enum HTTP_BUFFER_SIZE = 1024;
+
+  /**
+   * The default value for maxHttpBufferSize, matching the frame size limit
+   * used consistently across the Thrift libraries.
+   */
+  enum DEFAULT_MAX_HTTP_BUFFER_SIZE = 16384000;
+
+  /**
+   * The largest the read buffer will grow to, in bytes.
+   *
+   * The buffer only has to hold one line at a time; it grows because the peer
+   * has not sent a CRLF yet, so how far it grows is the peer's choice unless
+   * something bounds it.
+   */
+  size_t maxHttpBufferSize = DEFAULT_MAX_HTTP_BUFFER_SIZE;
+
+  /**
+   * The default value for maxBodySize, matching the frame size limit used
+   * consistently across the Thrift libraries.
+   */
+  enum DEFAULT_MAX_BODY_SIZE = 16384000;
+
+  /**
+   * The largest message body that will be read, in bytes.
+   *
+   * The declared content length, and the number of chunks in a chunked body,
+   * are numbers the peer chooses. The body does not pass through the line
+   * buffer, so maxHttpBufferSize does not bound it.
+   */
+  size_t maxBodySize = DEFAULT_MAX_BODY_SIZE;
 
 protected:
   abstract string getHeader(size_t dataLength);
@@ -137,15 +168,106 @@ protected:
       return toLower(cast(char)a) == toLower(cast(char)b);
     }
 
-    if (startsWith!compToLower(split[0], cast(ubyte[])"transfer-encoding")) {
+    // A header name is the whole token before the colon (RFC 9110 5.1), so it
+    // is compared in full: startsWith() accepted every name that merely began
+    // with one of these, and a transport that reads "Content-Length-Foo" as
+    // "Content-Length" disagrees with every other party on the connection
+    // about where the message ends.
+    if (equal!compToLower(split[0], cast(ubyte[])"transfer-encoding")) {
       if (endsWith!compToLower(split[2], cast(ubyte[])"chunked")) {
         chunked_ = true;
       }
-    } else if (startsWith!compToLower(split[0], cast(ubyte[])"content-length")) {
+    } else if (equal!compToLower(split[0], cast(ubyte[])"content-length")) {
       chunked_ = false;
-      auto lengthString = stripLeft(cast(const(char)[])split[2]);
-      contentLength_ = parse!size_t(lengthString);
+      contentLength_ = parseContentLength(split[2]);
     }
+  }
+
+  /**
+   * Reads a Content-Length header value.
+   *
+   * Content-Length is 1*DIGIT (RFC 9110 8.6), which leaves no room for a sign,
+   * for trailing text, or for a value size_t cannot hold. parse!size_t stops
+   * at the first character it cannot use without saying that anything was left
+   * over, and what it throws otherwise is a std.conv exception rather than a
+   * transport one.
+   *
+   * Throws: TTransportException if the value is not such a number.
+   */
+  static size_t parseContentLength(const(ubyte)[] value) {
+    // Optional whitespace surrounds a field value without being part of it
+    // (RFC 9110 5.5).
+    auto digits = strip(cast(const(char)[])value);
+
+    if (digits.empty) {
+      throw new TTransportException("Bad Content-Length: " ~ to!string(value),
+        TTransportException.Type.CORRUPTED_DATA);
+    }
+
+    size_t result;
+    foreach (c; digits) {
+      if (c < '0' || c > '9') {
+        throw new TTransportException("Bad Content-Length: " ~ to!string(digits),
+          TTransportException.Type.CORRUPTED_DATA);
+      }
+      immutable digit = cast(size_t)(c - '0');
+      if (result > (size_t.max - digit) / 10) {
+        throw new TTransportException("Bad Content-Length: " ~ to!string(digits),
+          TTransportException.Type.CORRUPTED_DATA);
+      }
+      result = result * 10 + digit;
+    }
+    return result;
+  }
+
+  /**
+   * Reads a chunk size.
+   *
+   * chunk-size is 1*HEXDIG, optionally followed by chunk extensions
+   * introduced with a semicolon (RFC 9112 7.1). parse!size_t with a radix
+   * returns zero for a line that holds no hexadecimal digit at all instead of
+   * throwing, so the handler that was meant to reject a bad chunk size never
+   * saw the commonest malformed one, and "zz" was read as the chunk that ends
+   * the body.
+   *
+   * Throws: TTransportException if the line is not such a number.
+   */
+  static size_t parseChunkSize(const(ubyte)[] line) {
+    // Nothing in the grammar allows whitespace here, but a peer that pads the
+    // line was understood before and still is.
+    auto digits = strip(cast(const(char)[])line);
+
+    size_t result;
+    size_t count;
+    foreach (c; digits) {
+      // The extensions are not interpreted, but they do end the number.
+      if (c == ';') break;
+
+      size_t value;
+      if (c >= '0' && c <= '9') {
+        value = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        value = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        value = c - 'A' + 10;
+      } else {
+        throw new TTransportException("Invalid chunk size: " ~ to!string(digits),
+          TTransportException.Type.CORRUPTED_DATA);
+      }
+
+      if (result > (size_t.max - value) / 16) {
+        throw new TTransportException("Invalid chunk size: " ~ to!string(digits),
+          TTransportException.Type.CORRUPTED_DATA);
+      }
+      result = result * 16 + value;
+      ++count;
+    }
+
+    if (count == 0) {
+      throw new TTransportException("Invalid chunk size: " ~ to!string(digits),
+        TTransportException.Type.CORRUPTED_DATA);
+    }
+    return result;
   }
 
 private:
@@ -158,14 +280,22 @@ private:
         if (httpBufRemaining_.empty) {
           httpBufRemaining_ = httpBuf_[0 .. 0];
         } else {
-          httpBuf_[0 .. httpBufRemaining_.length] = httpBufRemaining_;
-          httpBufRemaining_ = httpBuf_[0 .. httpBufRemaining_.length];
+          // Source and destination overlap whenever anything is left over,
+          // which a slice assignment does not allow.
+          auto length = httpBufRemaining_.length;
+          memmove(httpBuf_.ptr, httpBufRemaining_.ptr, length);
+          httpBufRemaining_ = httpBuf_[0 .. length];
         }
 
         if (!refill()) {
-          auto buf = httpBufRemaining_;
-          httpBufRemaining_ = httpBufRemaining_[$ - 1 .. $ - 1];
-          return buf;
+          // The peer stopped in the middle of a line. What was here instead
+          // returned the partial line and set httpBufRemaining_ to
+          // httpBufRemaining_[$ - 1 .. $ - 1], which reads one element before
+          // the start of an empty slice; and readHeaders() cannot tell a
+          // partial line from a real one, so it kept asking for another. A
+          // line that never ends is the end of the stream.
+          throw new TTransportException("Unexpected end of stream while reading an HTTP line",
+            TTransportException.Type.END_OF_FILE);
         }
       } else {
         // Set the remaining buffer to the part after \r\n and return the part
@@ -178,6 +308,7 @@ private:
 
   void readHeaders() {
     // Initialize headers state variables
+    bodyBytesRead_ = 0;
     contentLength_ = 0;
     chunked_ = false;
     chunkedDone_ = false;
@@ -213,15 +344,7 @@ private:
   size_t readChunked() {
     size_t length;
 
-    auto line = readLine();
-    size_t chunkSize;
-    try {
-      auto charLine = cast(char[])line;
-      chunkSize = parse!size_t(charLine, 16);
-    } catch (Exception e) {
-      throw new TTransportException("Invalid chunk size: " ~ to!string(line),
-        TTransportException.Type.CORRUPTED_DATA);
-    }
+    auto chunkSize = parseChunkSize(readLine());
 
     if (chunkSize == 0) {
       readChunkedFooters();
@@ -245,6 +368,8 @@ private:
   }
 
   size_t readContent(size_t size) {
+    chargeBodyBytes(size);
+
     auto need = size;
     while (need > 0) {
       if (httpBufRemaining_.length == 0) {
@@ -261,13 +386,33 @@ private:
     return size;
   }
 
+  /**
+   * Charges size bytes of body against maxBodySize, refusing the message once
+   * it would exceed it.
+   *
+   * Throws: TTransportException if the message is over its allowance.
+   */
+  void chargeBodyBytes(size_t size) {
+    // bodyBytesRead_ never passes maxBodySize, so the difference cannot wrap.
+    if (size > maxBodySize - bodyBytesRead_) {
+      throw new TTransportException("HTTP body exceeds the maximum body size",
+        TTransportException.Type.CORRUPTED_DATA);
+    }
+    bodyBytesRead_ += size;
+  }
+
   bool refill() {
     // Is there a nicer way to do this?
     auto indexBegin = httpBufRemaining_.ptr - httpBuf_.ptr;
     auto indexEnd = indexBegin + httpBufRemaining_.length;
 
     if (httpBuf_.length - indexEnd <= (httpBuf_.length / 4)) {
-      httpBuf_.length *= 2;
+      if (httpBuf_.length >= maxHttpBufferSize) {
+        throw new TTransportException("HTTP line does not fit in the maximum buffer size",
+          TTransportException.Type.CORRUPTED_DATA);
+      }
+      httpBuf_.length = (httpBuf_.length > maxHttpBufferSize / 2) ?
+        maxHttpBufferSize : httpBuf_.length * 2;
     }
 
     // Read more data.
@@ -284,6 +429,7 @@ private:
 
   bool readHeaders_;
   bool chunked_;
+  size_t bodyBytesRead_;
   bool chunkedDone_;
   size_t chunkSize_;
   size_t contentLength_;
@@ -455,5 +601,333 @@ private {
     import std.exception;
     enforce(capMemberName(Foo.bar) == "Bar");
     enforce(capMemberName(Foo.bAZ) == "BAZ");
+  }
+}
+
+unittest {
+  import std.array : replicate;
+  import thrift.transport.memory;
+
+  // A header line longer than the buffer the transport starts with, so that
+  // readLine() has to shift what it has and grow.
+  {
+    auto wire = cast(ubyte[])("POST / HTTP/1.1\r\nX-Filler: " ~ replicate("A", 20_000)
+      ~ "\r\nContent-Length: 5\r\n\r\nhello");
+    auto http = new TServerHttpTransport(new TMemoryBuffer(wire));
+    ubyte[5] buf;
+    assert(http.read(buf) == 5);
+    assert(cast(string)buf[] == "hello");
+  }
+
+  // A header line that never ends. The buffer used to double for as long as
+  // the peer kept sending.
+  {
+    auto wire = cast(ubyte[])("POST / HTTP/1.1\r\nX-Filler: " ~ replicate("A", 200_000));
+    auto http = new TServerHttpTransport(new TMemoryBuffer(wire));
+    http.maxHttpBufferSize = 16 * 1024;
+
+    ubyte[16] buf;
+    bool threw;
+    try {
+      http.read(buf);
+    } catch (TTransportException) {
+      threw = true;
+    }
+    assert(threw, "a header line without a CRLF was read without limit");
+    assert(http.httpBuf_.length <= http.maxHttpBufferSize,
+      "the read buffer grew past the maximum");
+  }
+}
+
+unittest {
+  import std.exception : assertThrown;
+  import thrift.transport.memory;
+
+  // Reads one message off a server transport fed the given wire bytes, and
+  // returns what the transport handed out as the body.
+  static string readBody(string wire) {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(cast(ubyte[])wire.dup));
+    ubyte[64] buf;
+    return cast(string)buf[0 .. http.read(buf)].idup;
+  }
+
+  enum request = "POST / HTTP/1.1\r\n";
+
+  // A header name is the whole token before the colon (RFC 9110 5.1). The
+  // names below all begin with one the transport knows and are not it, so the
+  // body they frame is the peer's choice and not the one any other party on
+  // the connection sees.
+  assert(readBody(request ~ "Content-Length: 5\r\n\r\nhello") == "hello");
+  assert(readBody(request ~ "content-length: 5\r\n\r\nhello") == "hello");
+  assert(readBody(request ~ "Content-Length-Foo: 5\r\n\r\nhello") == "");
+  assert(readBody(request ~ "Content-LengthX: 5\r\n\r\nhello") == "");
+  assert(readBody(request ~ "Content-Lengths: 5\r\n\r\nhello") == "");
+
+  // The same name arriving twice, the second one abbreviated: a parser that
+  // follows the grammar frames five bytes here, and so must this one.
+  assert(readBody(request ~ "Content-Length: 5\r\nContent-Length-Foo: 2\r\n\r\nhello")
+    == "hello");
+
+  // Transfer-Encoding, both directions.
+  assert(readBody(request ~ "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+    == "hello");
+  assert(readBody(request ~ "Transfer-Encoding-Foo: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+    == "");
+
+  // Content-Length is 1*DIGIT (RFC 9110 8.6): no sign, no trailing text, and
+  // nothing that does not fit. parse!size_t stops at the first character it
+  // cannot use and says nothing about the rest, and what it throws on a sign
+  // or an overflow is a std.conv exception rather than a transport one.
+  assertThrown!TTransportException(readBody(request ~ "Content-Length: -1\r\n\r\nhello"));
+  assertThrown!TTransportException(readBody(request ~ "Content-Length: +5\r\n\r\nhello"));
+  assertThrown!TTransportException(readBody(request ~ "Content-Length: 5abc\r\n\r\nhello"));
+  assertThrown!TTransportException(readBody(request ~ "Content-Length: 0x10\r\n\r\nhello"));
+  assertThrown!TTransportException(readBody(request ~ "Content-Length: \r\n\r\nhello"));
+  assertThrown!TTransportException(
+    readBody(request ~ "Content-Length: 99999999999999999999999999\r\n\r\nhello"));
+
+  // Optional whitespace around the value is not part of it (RFC 9110 5.5)...
+  assert(readBody(request ~ "Content-Length:5\r\n\r\nhello") == "hello");
+  assert(readBody(request ~ "Content-Length:   5   \r\n\r\nhello") == "hello");
+
+  // ... but none is allowed between the name and the colon, so the name here
+  // is "Content-Length " and not one the transport knows.
+  assert(readBody(request ~ "Content-Length : 5\r\n\r\nhello") == "");
+
+  // A chunk size is 1*HEXDIG with optional extensions after a semicolon
+  // (RFC 9112 7.1). parse!size_t given a radix returns zero for a line with no
+  // hexadecimal digit in it rather than throwing, so a line the grammar does
+  // not allow was read as the chunk that ends the body and the message quietly
+  // came out empty.
+  static string readChunkedBody(string chunks) {
+    return readBody(request ~ "Transfer-Encoding: chunked\r\n\r\n" ~ chunks);
+  }
+
+  assert(readChunkedBody("5\r\nhello\r\n0\r\n\r\n") == "hello");
+  assert(readChunkedBody("5;ext=1\r\nhello\r\n0\r\n\r\n") == "hello");
+  assert(readChunkedBody("5 \r\nhello\r\n0\r\n\r\n") == "hello");
+  assert(readChunkedBody("A\r\nhelloworld\r\n0\r\n\r\n") == "helloworld");
+  assert(readChunkedBody("a\r\nhelloworld\r\n0\r\n\r\n") == "helloworld");
+
+  assertThrown!TTransportException(readChunkedBody("zz\r\nhello\r\n0\r\n\r\n"));
+  assertThrown!TTransportException(readChunkedBody("hello\r\nhello\r\n0\r\n\r\n"));
+  assertThrown!TTransportException(readChunkedBody("-5\r\nhello\r\n0\r\n\r\n"));
+  assertThrown!TTransportException(readChunkedBody("5xyz\r\nhello\r\n0\r\n\r\n"));
+  assertThrown!TTransportException(readChunkedBody(";ext=1\r\nhello\r\n0\r\n\r\n"));
+  assertThrown!TTransportException(
+    readChunkedBody("1ffffffffffffffff\r\nhello\r\n0\r\n\r\n"));
+}
+
+version (unittest) {
+  /**
+   * Serves a fixed header block and then a body, counting the body bytes it
+   * was asked for. Asking whether a read threw is not enough to tell a bounded
+   * transport from an unbounded one -- an over-declared body runs the peer out
+   * and throws either way -- so the tests below count what the peer was asked
+   * to send.
+   */
+  private final class TCountingTransport : TBaseTransport {
+    this(string headers, string content) {
+      headers_ = cast(ubyte[])headers.dup;
+      body_ = cast(ubyte[])content.dup;
+    }
+
+    override bool isOpen() @property { return true; }
+    override bool peek() { return true; }
+    override void open() {}
+    override void close() {}
+
+    override size_t read(ubyte[] buf) {
+      import std.algorithm : min;
+      if (headerPos_ < headers_.length) {
+        auto n = min(buf.length, headers_.length - headerPos_);
+        buf[0 .. n] = headers_[headerPos_ .. headerPos_ + n];
+        headerPos_ += n;
+        return n;
+      }
+      if (bodyPos_ >= body_.length) return 0;
+      auto n = min(buf.length, body_.length - bodyPos_);
+      buf[0 .. n] = body_[bodyPos_ .. bodyPos_ + n];
+      bodyPos_ += n;
+      return n;
+    }
+
+    /// How many body bytes the transport asked this peer for.
+    size_t bodyServed() const { return bodyPos_; }
+
+  private:
+    ubyte[] headers_;
+    ubyte[] body_;
+    size_t headerPos_;
+    size_t bodyPos_;
+  }
+}
+
+unittest {
+  import std.array : replicate;
+  import thrift.transport.memory;
+
+  enum maxBody = 64 * 1024;
+  enum overLong = 4 * maxBody;
+
+  // A declared length larger than the maximum is refused before anything is
+  // read on account of it. The declared number itself costs nothing -- nothing
+  // is allocated up front -- so what it buys is the licence to keep reading,
+  // and that is what has to be refused.
+  {
+    auto peer = new TCountingTransport(
+      "POST / HTTP/1.1\r\nContent-Length: " ~ to!string(overLong) ~ "\r\n\r\n",
+      replicate("x", overLong));
+    auto http = new TServerHttpTransport(peer);
+    http.maxBodySize = maxBody;
+
+    ubyte[64] buf;
+    bool threw;
+    try { http.read(buf); } catch (TTransportException) { threw = true; }
+    assert(threw, "an over-long declared body was read");
+    assert(peer.bodyServed() == 0,
+      "bytes were read on account of a length that was already too large");
+  }
+
+  // The largest size_t there is, which is what a peer sends when it wants the
+  // reading to simply not stop.
+  {
+    auto peer = new TCountingTransport(
+      "POST / HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n",
+      replicate("x", overLong));
+    auto http = new TServerHttpTransport(peer);
+    http.maxBodySize = maxBody;
+
+    ubyte[64] buf;
+    bool threw;
+    try { http.read(buf); } catch (TTransportException) { threw = true; }
+    assert(threw, "a body declared as size_t.max was read");
+    assert(peer.bodyServed() == 0, "bytes were read on account of size_t.max");
+  }
+
+  // A chunked body declares no total at all: it runs until the peer stops.
+  {
+    enum chunkSize = 4096;
+    string chunks;
+    foreach (i; 0 .. overLong / chunkSize) {
+      chunks ~= "1000\r\n" ~ replicate("y", chunkSize) ~ "\r\n";
+    }
+    chunks ~= "0\r\n\r\n";
+
+    auto peer = new TCountingTransport(
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", chunks);
+    auto http = new TServerHttpTransport(peer);
+    http.maxBodySize = maxBody;
+
+    ubyte[64] buf;
+    bool threw;
+    try {
+      http.read(buf);
+      http.readEnd();
+    } catch (TTransportException) { threw = true; }
+    assert(threw, "a chunked body was read without limit");
+    // Every chunk is charged, so the peer runs out of allowance a little past
+    // the maximum -- the chunk framing is served too -- and nowhere near the
+    // four times as much it was holding.
+    assert(peer.bodyServed() <= maxBody + 1024,
+      "more than the maximum was read from a chunked body");
+  }
+
+  // A body inside the maximum still arrives, ...
+  {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(
+      cast(ubyte[])("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")));
+    http.maxBodySize = maxBody;
+    ubyte[16] buf;
+    assert(http.read(buf) == 5);
+    assert(cast(string)buf[0 .. 5] == "hello");
+  }
+
+  // ... and so does the next one on the same connection: the allowance is per
+  // message, not per connection.
+  {
+    enum big = maxBody - 1024;
+    auto one = "POST / HTTP/1.1\r\nContent-Length: " ~ to!string(big) ~ "\r\n\r\n"
+      ~ replicate("z", big);
+    auto http = new TServerHttpTransport(new TMemoryBuffer(cast(ubyte[])(one ~ one)));
+    http.maxBodySize = maxBody;
+
+    auto buf = new ubyte[big];
+    foreach (message; 0 .. 2) {
+      size_t have;
+      while (have < big) {
+        auto got = http.read(buf[have .. $]);
+        assert(got > 0, "a second message on the connection was refused");
+        have += got;
+      }
+      assert(have == big);
+    }
+  }
+}
+
+unittest {
+  import std.exception : assertThrown;
+  import thrift.transport.memory;
+
+  // Everything a peer can send that stops in the middle of the header block.
+  // readLine() has nothing left and no CRLF, and what it did with that was to
+  // take an empty slice from one element before its own start.
+  static void readOne(string wire) {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(cast(ubyte[])wire.dup));
+    ubyte[64] buf;
+    http.read(buf);
+  }
+
+  assertThrown!TTransportException(readOne("POST / HTTP/1.1\r\n"));
+  assertThrown!TTransportException(readOne("POST / HTTP/1.1\r\nContent-Length: 5\r\n"));
+  assertThrown!TTransportException(readOne("POST / HTTP/1.1"));
+
+  // A blank first line and then nothing: parseStatusLine never runs, so the
+  // header loop is still waiting for a status line and asks readLine() for
+  // another one every time round.
+  assertThrown!TTransportException(readOne("\r\n"));
+  assertThrown!TTransportException(readOne("\r\n\r\n\r\n"));
+
+  // A chunked body that stops before its terminating chunk. The first chunk
+  // arrives, so it is readEnd() draining the rest that runs out of stream; the
+  // second case stops while the footers are being read, which read() reaches
+  // on its own.
+  {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(
+      cast(ubyte[])"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"));
+    ubyte[64] buf;
+    assert(http.read(buf) == 5);
+    assertThrown!TTransportException(http.readEnd());
+  }
+  assertThrown!TTransportException(
+    readOne("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n"));
+
+  // A peer that closes between messages rather than inside one is not an
+  // error: read() says there is nothing more.
+  {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(cast(ubyte[])""));
+    ubyte[64] buf;
+    assert(http.read(buf) == 0);
+  }
+
+  // A complete header block whose body never arrives is a different case and
+  // is left as it is: the body does not go through readLine(), and
+  // readContent() reports a short read by returning fewer bytes than were
+  // declared rather than by throwing. Pinned here so that the boundary of the
+  // change above is visible.
+  {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(
+      cast(ubyte[])"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n"));
+    ubyte[64] buf;
+    assert(http.read(buf) == 0);
+  }
+
+  // And a complete request still reads.
+  {
+    auto http = new TServerHttpTransport(new TMemoryBuffer(
+      cast(ubyte[])"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"));
+    ubyte[16] buf;
+    assert(http.read(buf) == 5);
+    assert(cast(string)buf[0 .. 5] == "hello");
   }
 }

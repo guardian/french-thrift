@@ -91,6 +91,10 @@ thrift_memory_buffer_read (ThriftTransport *transport, gpointer buf,
     give = t->buf->len;
   }
 
+  if (give == 0) {
+    return -1;
+  }
+
   memcpy (buf, t->buf->data, give);
   g_byte_array_remove_range (t->buf, 0, give);
 
@@ -170,6 +174,8 @@ thrift_memory_buffer_finalize (GObject *object)
     g_byte_array_unref (t->buf);
   }
   t->buf = NULL;
+
+  G_OBJECT_CLASS (thrift_memory_buffer_parent_class)->finalize (object);
 }
 
 /* property accessor */

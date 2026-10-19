@@ -31,7 +31,6 @@ from thrift.protocol.TBinaryProtocol import TBinaryProtocolFactory
 from thrift.protocol.TBinaryProtocol import TBinaryProtocolAcceleratedFactory
 from thrift.protocol.TCompactProtocol import TCompactProtocolFactory
 from thrift.protocol.TCompactProtocol import TCompactProtocolAcceleratedFactory
-from thrift.transport import TTransport
 from thrift.TSerialization import serialize, deserialize
 from TestServer.ttypes import Message
 
@@ -56,15 +55,11 @@ class TestSerializer(unittest.TestCase):
         self.assertRaises(EOFError, deserialize, Message(), b'', factory)
 
     def test_TBinaryProtocol(self):
-        buf = TTransport.TMemoryBuffer()
-        transport = TTransport.TBufferedTransportFactory().getTransport(buf)
-        factory = TBinaryProtocolFactory(transport)
+        factory = TBinaryProtocolFactory()
         self.verify(self.binary_serialized, factory)
 
     def test_TBinaryProtocolAccelerated(self):
-        buf = TTransport.TMemoryBuffer()
-        transport = TTransport.TBufferedTransportFactory().getTransport(buf)
-        factory = TBinaryProtocolAcceleratedFactory(transport)
+        factory = TBinaryProtocolAcceleratedFactory()
         self.verify(self.binary_serialized, factory)
 
     def test_TCompactProtocol(self):
@@ -74,6 +69,17 @@ class TestSerializer(unittest.TestCase):
     def test_TCompactProtocolAccelerated(self):
         factory = TCompactProtocolAcceleratedFactory()
         self.verify(self.compact_serialized, factory)
+
+    def test_TCompactProtocolAccelerated_unicode_matches_python(self):
+        message = Message(u"\u00e9", 42)
+        expected = serialize(message, TCompactProtocolFactory())
+        actual = serialize(message, TCompactProtocolAcceleratedFactory())
+
+        self.assertEqual(expected, actual)
+        self.assertEqual(
+            message.body,
+            deserialize(Message(), actual, TCompactProtocolAcceleratedFactory()).body,
+        )
 
 
 if __name__ == "__main__":

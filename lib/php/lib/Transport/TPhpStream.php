@@ -21,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * Php stream transport. Reads to and writes from the php standard streams
@@ -34,61 +35,63 @@ use Thrift\Factory\TStringFuncFactory;
  */
 class TPhpStream extends TTransport
 {
-    const MODE_R = 1;
-    const MODE_W = 2;
+    public const MODE_R = 1;
+    public const MODE_W = 2;
 
-    private $inStream_ = null;
+    /** @var resource|null */
+    private $inStream = null;
 
-    private $outStream_ = null;
+    /** @var resource|null */
+    private $outStream = null;
 
-    private $read_ = false;
+    private bool $read = false;
 
-    private $write_ = false;
+    private bool $write = false;
 
-    public function __construct($mode)
+    public function __construct(int $mode)
     {
-        $this->read_ = $mode & self::MODE_R;
-        $this->write_ = $mode & self::MODE_W;
+        $this->read = (bool) ($mode & self::MODE_R);
+        $this->write = (bool) ($mode & self::MODE_W);
     }
 
-    public function open()
+    public function open(): void
     {
-        if ($this->read_) {
-            $this->inStream_ = @fopen($this->inStreamName(), 'r');
-            if (!is_resource($this->inStream_)) {
+        if ($this->read) {
+            $this->inStream = @fopen($this->inStreamName(), 'r');
+            if (!is_resource($this->inStream)) {
                 throw new TException('TPhpStream: Could not open php://input');
             }
         }
-        if ($this->write_) {
-            $this->outStream_ = @fopen('php://output', 'w');
-            if (!is_resource($this->outStream_)) {
+        if ($this->write) {
+            $this->outStream = @fopen('php://output', 'w');
+            if (!is_resource($this->outStream)) {
                 throw new TException('TPhpStream: Could not open php://output');
             }
         }
     }
 
-    public function close()
+    public function close(): void
     {
-        if ($this->read_) {
-            @fclose($this->inStream_);
-            $this->inStream_ = null;
+        if ($this->read) {
+            @fclose($this->inStream);
+            $this->inStream = null;
         }
-        if ($this->write_) {
-            @fclose($this->outStream_);
-            $this->outStream_ = null;
+        if ($this->write) {
+            @fclose($this->outStream);
+            $this->outStream = null;
         }
     }
 
-    public function isOpen()
+    public function isOpen(): bool
     {
         return
-            (!$this->read_ || is_resource($this->inStream_)) &&
-            (!$this->write_ || is_resource($this->outStream_));
+            (!$this->read || is_resource($this->inStream)) &&
+            (!$this->write || is_resource($this->outStream));
     }
 
-    public function read($len)
+    public function read(int $len): string
     {
-        $data = @fread($this->inStream_, $len);
+        $data = @fread($this->inStream, $len);
         if ($data === false || $data === '') {
             throw new TException('TPhpStream: Could not read ' . $len . ' bytes');
         }
@@ -96,25 +99,25 @@ class TPhpStream extends TTransport
         return $data;
     }
 
-    public function write($buf)
+    public function write(string $buf): void
     {
-        while (TStringFuncFactory::create()->strlen($buf) > 0) {
-            $got = @fwrite($this->outStream_, $buf);
+        while (strlen($buf) > 0) {
+            $got = @fwrite($this->outStream, $buf);
             if ($got === 0 || $got === false) {
                 throw new TException(
-                    'TPhpStream: Could not write ' . TStringFuncFactory::create()->strlen($buf) . ' bytes'
+                    'TPhpStream: Could not write ' . strlen($buf) . ' bytes'
                 );
             }
-            $buf = TStringFuncFactory::create()->substr($buf, $got);
+            $buf = substr($buf, $got);
         }
     }
 
-    public function flush()
+    public function flush(): void
     {
-        @fflush($this->outStream_);
+        @fflush($this->outStream);
     }
 
-    private function inStreamName()
+    private function inStreamName(): string
     {
         if (php_sapi_name() == 'cli') {
             return 'php://stdin';

@@ -29,7 +29,7 @@ using std::string;
 
 static string byte_to_hex(const uint8_t byte) {
   char buf[3];
-  int ret = std::sprintf(buf, "%02x", (int)byte);
+  int ret = std::snprintf(buf, sizeof(buf), "%02x", (int)byte);
   THRIFT_UNUSED_VARIABLE(ret);
   assert(ret == 2);
   assert(buf[2] == '\0');
@@ -388,7 +388,7 @@ uint32_t TDebugProtocol::writeBinary(const string& str) {
 }
 
 uint32_t TDebugProtocol::writeUUID(const TUuid& uuid) {
-  size_t size = writePlain("{\n");
+  uint32_t size = writePlain("{\n");
   indentUp();
   size += writeIndented("[raw] = ");
   size += writeString(std::string(std::begin(uuid), std::end(uuid)));

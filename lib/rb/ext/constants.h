@@ -29,6 +29,7 @@ extern int TTYPE_MAP;
 extern int TTYPE_SET;
 extern int TTYPE_LIST;
 extern int TTYPE_STRUCT;
+extern int TTYPE_UUID;
 
 extern ID validate_method_id;
 extern ID write_struct_begin_method_id;
@@ -49,6 +50,7 @@ extern ID write_list_begin_method_id;
 extern ID write_list_end_method_id;
 extern ID write_set_begin_method_id;
 extern ID write_set_end_method_id;
+extern ID write_uuid_method_id;
 extern ID read_bool_method_id;
 extern ID read_byte_method_id;
 extern ID read_i16_method_id;
@@ -63,6 +65,7 @@ extern ID read_list_begin_method_id;
 extern ID read_list_end_method_id;
 extern ID read_set_begin_method_id;
 extern ID read_set_end_method_id;
+extern ID read_uuid_method_id;
 extern ID read_struct_begin_method_id;
 extern ID read_struct_end_method_id;
 extern ID read_field_begin_method_id;
@@ -74,14 +77,17 @@ extern ID skip_method_id;
 extern ID write_method_id;
 extern ID read_all_method_id;
 extern ID read_into_buffer_method_id;
+extern ID reset_message_size_method_id;
 extern ID force_binary_encoding_id;
 extern ID convert_to_utf8_byte_buffer_id;
 extern ID convert_to_string_id;
 
 extern ID fields_const_id;
 extern ID transport_ivar_id;
+extern ID reset_message_size_ivar_id;
 extern ID strict_read_ivar_id;
 extern ID strict_write_ivar_id;
+extern ID max_string_size_ivar_id;
 
 extern VALUE type_sym;
 extern VALUE name_sym;
@@ -97,3 +103,12 @@ extern VALUE thrift_types_module;
 extern VALUE thrift_bytes_module;
 extern VALUE class_thrift_protocol;
 extern VALUE protocol_exception_class;
+
+// protocol errors
+extern int PROTOERR_UNKNOWN;
+extern int PROTOERR_INVALID_DATA;
+extern int PROTOERR_NEGATIVE_SIZE;
+extern int PROTOERR_SIZE_LIMIT;
+extern int PROTOERR_BAD_VERSION;
+extern int PROTOERR_NOT_IMPLEMENTED;
+extern int PROTOERR_DEPTH_LIMIT;

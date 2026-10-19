@@ -21,6 +21,7 @@
 #define THRIFT_PY_PROTOCOL_H
 
 #include "ext/types.h"
+#include <algorithm>
 #include <limits>
 #include <stdint.h>
 
@@ -35,6 +36,7 @@ public:
   ProtocolBase()
     : stringLimit_((std::numeric_limits<int32_t>::max)()),
       containerLimit_((std::numeric_limits<int32_t>::max)()),
+      recursionDepth_(0),
       output_(nullptr) {}
   inline virtual ~ProtocolBase();
 
@@ -54,6 +56,14 @@ public:
   long containerLimit() const { return containerLimit_; }
   void setContainerLengthLimit(long limit) { containerLimit_ = limit; }
 
+  static const int32_t kDefaultRecursionDepth = 64;
+  bool checkDepthLimit();
+  void decrementDepth() { recursionDepth_--; }
+
+  // Ceiling on the initial container allocation when the decode buffer cannot
+  // say how much input is left, which is the case for Python 2's cStringIO.
+  static const int32_t kMaxInitialContainerSize = 1024;
+
 protected:
   bool readBytes(char** output, int len);
 
@@ -66,7 +76,7 @@ protected:
     return true;
   }
 
-  bool writeBuffer(char* data, size_t len);
+  bool writeBuffer(const char* data, size_t len);
 
   void writeByte(uint8_t val) { writeBuffer(reinterpret_cast<char*>(&val), 1); }
 
@@ -76,6 +86,7 @@ protected:
 
   inline bool checkType(TType got, TType expected);
   inline bool checkLengthLimit(int32_t len, long limit);
+  inline int32_t initialContainerSize(int32_t declared);
 
   inline bool isUtf8(PyObject* typeargs);
 
@@ -84,12 +95,13 @@ private:
 
   long stringLimit_;
   long containerLimit_;
+  int32_t recursionDepth_;
   EncodeBuffer* output_;
   DecodeBuffer input_;
 };
-}
-}
-}
+} // namespace py
+} // namespace thrift
+} // namespace apache
 
 #include "ext/protocol.tcc"
 

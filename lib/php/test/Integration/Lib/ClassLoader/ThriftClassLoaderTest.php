@@ -19,10 +19,13 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Integration\Lib\ClassLoader;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Thrift\ClassLoader\ThriftClassLoader;
 
 /***
@@ -33,9 +36,7 @@ class ThriftClassLoaderTest extends TestCase
 {
     use PHPMock;
 
-    /**
-     * @dataProvider registerDefinitionDataProvider
-     */
+    #[DataProvider('registerDefinitionDataProvider')]
     public function testRegisterDefinition(
         $definitions,
         $class,
@@ -44,12 +45,12 @@ class ThriftClassLoaderTest extends TestCase
         $apcuPrefix = null
     ) {
         $this->getFunctionMock('Thrift\ClassLoader', 'apcu_fetch')
-             ->expects($useApcu ? $this->any() : $this->never())
+             ->expects($useApcu ? $this->once() : $this->never())
              ->with($apcuPrefix . $class)
              ->willReturn(false);
 
         $this->getFunctionMock('Thrift\ClassLoader', 'apcu_store')
-            ->expects($useApcu ? $this->any() : $this->never())
+            ->expects($useApcu ? $this->once() : $this->never())
              ->with($apcuPrefix . $class, $this->anything())
              ->willReturn(true);
 
@@ -67,7 +68,7 @@ class ThriftClassLoaderTest extends TestCase
         }
     }
 
-    public function registerDefinitionDataProvider()
+    public static function registerDefinitionDataProvider()
     {
         yield 'loadType' => [
             'definitions' => [

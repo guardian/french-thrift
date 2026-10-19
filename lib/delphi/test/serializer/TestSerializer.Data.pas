@@ -27,6 +27,8 @@ uses
   ComObj,
   Thrift.Protocol,
   Thrift.Collections,
+  test.ExceptionStruct,
+  test.SimpleException,
   DebugProtoTest;
 
 
@@ -37,6 +39,8 @@ type
     class function CreateNesting : INesting;
     class function CreateHolyMoley : IHolyMoley;
     class function CreateCompactProtoTestStruct : ICompactProtoTestStruct;
+    class function CreateBatchGetResponse : IBatchGetResponse;
+    class function CreateSimpleException : IError;
 
   // These byte arrays are serialized versions of the above structs.
   // They were serialized in binary protocol using thrift 0.6.x and are used to
@@ -197,9 +201,7 @@ begin
 
   result.Rfc4122_uuid := TGuid.Create('{00112233-4455-6677-8899-aabbccddeeff}');
 
-  {$IF cDebugProtoTest_Option_AnsiStr_Binary}
-  result.SetBase64('base64');
-  {$ELSEIF cDebugProtoTest_Option_COM_Types}
+  {$IF cDebugProtoTest_Option_COM_Types}
   result.SetBase64( TThriftBytesImpl.Create( TEncoding.UTF8.GetBytes('base64')));
   {$ELSE}
   result.SetBase64( TEncoding.UTF8.GetBytes('base64'));
@@ -349,9 +351,7 @@ begin
   result.Field5000 := 5000;
   result.Field20000 := 20000;
 
-  {$IF cDebugProtoTest_Option_AnsiStr_Binary}
-  result.A_binary := AnsiString( #0#1#2#3#4#5#6#7#8);
-  {$ELSEIF cDebugProtoTest_Option_COM_Types}
+  {$IF cDebugProtoTest_Option_COM_Types}
   result.A_binary := TThriftBytesImpl.Create( TEncoding.UTF8.GetBytes( #0#1#2#3#4#5#6#7#8));
   {$ELSE}
   result.A_binary := TEncoding.UTF8.GetBytes( #0#1#2#3#4#5#6#7#8);
@@ -359,6 +359,51 @@ begin
 end;
 
 
+class function Fixtures.CreateBatchGetResponse : IBatchGetResponse;
+var
+  data : IGetRequest;
+  error : ISomeException;
+const
+  REQUEST_ID = '123';
+begin
+  data := TGetRequestImpl.Create;
+  data.Id := REQUEST_ID;
+  data.Data := TThriftBytesImpl.Create( TEncoding.UTF8.GetBytes( #0#1#2#3#4#5#6#7#8));
+
+  error := TSomeExceptionImpl.Create;
+  error.Error := TErrorCode.GenericError;
+
+  result := TBatchGetResponseImpl.Create;
+  result.Responses := TThriftDictionaryImpl<WideString, IGetRequest>.Create;
+  result.Responses.Add( REQUEST_ID, data);
+  result.Errors := TThriftDictionaryImpl<WideString, ISomeException>.Create;
+  result.Errors.Add( REQUEST_ID, error);
+end;
+
+
+class function Fixtures.CreateSimpleException : IError;
+var i : Integer;
+    inner : IError;
+    guid : TGuid;
+const
+  IDL_GUID_VALUE : TGuid = '{00000000-4444-CCCC-ffff-0123456789ab}';
+begin
+  result := nil;
+  for i := 0 to 4 do begin
+    inner := result;
+    result := TErrorImpl.Create;
+
+    // validate const values set in IDL
+    ASSERT( result.ErrorCode = 42);  // IDL default value
+    ASSERT( IsEqualGUID( result.ExceptionData, IDL_GUID_VALUE));
+
+    // set fresh, but reproducible values
+    FillChar( guid, SizeOf(guid), i);
+    result.ErrorCode := i;
+    result.ExceptionData := guid;
+    result.InnerException := inner;
+  end;
+end;
 
 
 end.

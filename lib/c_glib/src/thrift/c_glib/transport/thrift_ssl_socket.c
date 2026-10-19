@@ -164,42 +164,42 @@ static
 void thrift_ssl_socket_get_ssl_error(ThriftSSLSocket *socket, const gchar *error_msg, guint thrift_error_no, int ssl_error, GError **error)
 {
   unsigned long error_code;
-  char buffer[1024];
-  int buffer_size=1024;
+  GString *message = g_string_new ("");
   gboolean first_error = TRUE;
   int ssl_error_type = SSL_get_error(socket->ssl, ssl_error);
   if(ssl_error_type>0){
       switch(ssl_error_type){
 	case SSL_ERROR_SSL:
-	  buffer_size-=snprintf(buffer, buffer_size, "SSL %s: ", error_msg);
-	  while ((error_code = ERR_get_error()) != 0 && buffer_size>1) {
+	  g_string_append_printf (message, "SSL %s: ", error_msg);
+	  while ((error_code = ERR_get_error()) != 0) {
 	      const char* reason = ERR_reason_error_string(error_code);
 	      if(reason!=NULL){
 		  if(!first_error) {
-		      buffer_size-=snprintf(buffer+(1024-buffer_size), buffer_size, "\n\t");
-		      first_error=FALSE;
+		      g_string_append (message, "\n\t");
 		  }
-		  buffer_size-=snprintf(buffer+(1024-buffer_size), buffer_size, "%lX(%s) -> %s", error_code, reason, SSL_state_string(socket->ssl));
+		  g_string_append_printf (message, "%lX(%s) -> %s", error_code, reason, SSL_state_string(socket->ssl));
+		  first_error = FALSE;
 	      }
 	  }
 	  break;
 	case SSL_ERROR_SYSCALL:
-	  buffer_size-=snprintf(buffer, buffer_size, "%s: ", error_msg);
-	  buffer_size-=snprintf(buffer+(1024-buffer_size), buffer_size, "%X -> %s", errno, strerror(errno));
+	  g_string_append_printf (message, "%s: ", error_msg);
+	  g_string_append_printf (message, "%X -> %s", errno, strerror(errno));
 	  break;
 	case SSL_ERROR_WANT_READ:
-	  buffer_size-=snprintf(buffer, buffer_size, "%s: ", error_msg);
-	  buffer_size-=snprintf(buffer+(1024-buffer_size), buffer_size, "%X -> %s", ssl_error_type, "Error while reading from underlaying layer");
+	  g_string_append_printf (message, "%s: ", error_msg);
+	  g_string_append_printf (message, "%X -> %s", ssl_error_type, "Error while reading from underlaying layer");
 	  break;
 	case SSL_ERROR_WANT_WRITE:
-	  buffer_size-=snprintf(buffer, buffer_size, "%s: ", error_msg);
-	  buffer_size-=snprintf(buffer+(1024-buffer_size), buffer_size, "%X -> %s", ssl_error_type, "Error while writting to underlaying layer");
+	  g_string_append_printf (message, "%s: ", error_msg);
+	  g_string_append_printf (message, "%X -> %s", ssl_error_type, "Error while writting to underlaying layer");
 	  break;
 
       }
       g_set_error (error, THRIFT_TRANSPORT_ERROR,
-		   thrift_error_no, "%s", buffer);
+		   thrift_error_no, "%s", message->str);
   }
+  g_string_free (message, TRUE);
 }
 
 /**
@@ -285,7 +285,12 @@ thrift_ssl_socket_close (ThriftTransport *transport, GError **error)
       SSL_shutdown(ssl_socket->ssl);
       SSL_free(ssl_socket->ssl);
       ssl_socket->ssl = NULL;
+      /* ERR_remove_state() has been an empty stub since OpenSSL 1.1.0 and was
+         removed altogether in 4.0. LibreSSL reports OPENSSL_VERSION_NUMBER as
+         0x20000000L but still implements it, so it keeps the call. */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
       ERR_remove_state(0);
+#endif
   }
   return thrift_socket_close(transport, error);
 }
@@ -307,10 +312,24 @@ thrift_ssl_socket_read (ThriftTransport *transport, gpointer buf,
   }
   g_return_val_if_fail (socket->sd != THRIFT_INVALID_SOCKET && ssl_socket->ssl!=NULL, FALSE);
 
+  if (len == 0) {
+      return 0;
+  }
+
   for (retries=0; retries < maxRecvRetries_; retries++) {
       bytes = SSL_read(ssl_socket->ssl, buf, len);
-      if (bytes >= 0)
+      if (bytes > 0)
 	break;
+      if (bytes == 0) {
+	  /* The session was shut down.  Zero bytes is not a short read the caller
+	     can continue from, so report it rather than hand back a count that
+	     says no progress was made. */
+	  g_set_error (error, THRIFT_TRANSPORT_ERROR,
+		       THRIFT_TRANSPORT_ERROR_RECEIVE,
+		       "failed to read %u bytes - the peer closed the connection",
+		       len);
+	  return -1;
+      }
       int errno_copy = THRIFT_GET_SOCKET_ERROR;
       if (SSL_get_error(ssl_socket->ssl, bytes) == SSL_ERROR_SYSCALL) {
 	  if (ERR_get_error() == 0 && errno_copy == THRIFT_EINTR) {
@@ -351,7 +370,9 @@ thrift_ssl_socket_write (ThriftTransport *transport, const gpointer buf,
   while (sent < len)
     {
       ret = SSL_write (ssl_socket->ssl, (guint8 *)buf + sent, len - sent);
-      if (ret < 0)
+      /* SSL_write() reports a failed write with a value <= 0.  A 0 has written
+         nothing, and asking again cannot make progress. */
+      if (ret <= 0)
 	{
 	  thrift_ssl_socket_get_ssl_error(ssl_socket, (const guchar*)"Send error",
 					  THRIFT_SSL_SOCKET_ERROR_SSL, ret, error);
@@ -422,6 +443,11 @@ thrift_ssl_socket_handle_handshake(ThriftTransport * transport, GError **error)
       if(ssl_socket->server){
 	  rc = SSL_accept(ssl_socket->ssl);
       }else{
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	  if (socket->hostname != NULL) {
+	      SSL_set1_host(ssl_socket->ssl, socket->hostname);
+	  }
+#endif
 	  rc = SSL_connect(ssl_socket->ssl);
       }
       if (rc <= 0) {
@@ -705,7 +731,10 @@ void thrift_ssl_socket_finalize_openssl(void)
   ERR_free_strings();
   EVP_cleanup();
   CRYPTO_cleanup_all_ex_data();
+  /* See thrift_ssl_socket_close() for why this is version-gated. */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
   ERR_remove_state(0);
+#endif
 }
 
 
@@ -826,6 +855,54 @@ SSL_CTX*
 thrift_ssl_socket_context_initialize(ThriftSSLSocketProtocol ssl_protocol, GError **error)
 {
   SSL_CTX* context = NULL;
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+  /* OpenSSL 4.0 removed the single-version SSLv3_method() / TLSv1_method() /
+     TLSv1_1_method() / TLSv1_2_method() family. The documented replacement is
+     TLS_method() pinned to one version with SSL_CTX_set_min_proto_version()
+     and SSL_CTX_set_max_proto_version(), both available since 1.1.0. This
+     mirrors the C++ binding in lib/cpp/src/thrift/transport/TSSLSocket.cpp. */
+  const SSL_METHOD* method = TLS_method();
+  int version = 0;
+  switch(ssl_protocol){
+    case SSLTLS:
+      /* Version-flexible: the protocol floor is set through
+         SSL_CTX_set_options() below, as it was before. */
+      break;
+#if !defined(OPENSSL_NO_SSL3) && OPENSSL_VERSION_NUMBER < 0x40000000L
+    case SSLv3:
+      /* SSLv3_method() is only gone in 4.0, which removes SSLv3 altogether, so
+         below that it is kept rather than expressed as a TLS_method() window:
+         SSL_CTX_set_min_proto_version() honours the security level and would
+         refuse SSL3_VERSION at the default level, where SSLv3_method() does
+         not. See the C++ binding for the same reasoning. */
+      method = SSLv3_method();
+      break;
+#endif
+    case TLSv1_0:
+      version = TLS1_VERSION;
+      break;
+    case TLSv1_1:
+      version = TLS1_1_VERSION;
+      break;
+    case TLSv1_2:
+      version = TLS1_2_VERSION;
+      break;
+    default:
+      g_set_error (error, THRIFT_TRANSPORT_ERROR,
+		   THRIFT_SSL_SOCKET_ERROR_CIPHER_NOT_AVAILABLE,
+		   "The SSL protocol is unknown for %d", ssl_protocol);
+      return NULL;
+  }
+
+  context = SSL_CTX_new(method);
+  if (context != NULL && version != 0
+      && (SSL_CTX_set_min_proto_version(context, version) != 1
+          || SSL_CTX_set_max_proto_version(context, version) != 1)) {
+      /* The requested version is not available in this build of the library. */
+      SSL_CTX_free(context);
+      context = NULL;
+  }
+#else
   switch(ssl_protocol){
     case SSLTLS:
       context = SSL_CTX_new(SSLv23_method());
@@ -851,6 +928,7 @@ thrift_ssl_socket_context_initialize(ThriftSSLSocketProtocol ssl_protocol, GErro
       return NULL;
       break;
   }
+#endif
 
   if (context == NULL) {
       thrift_ssl_socket_get_error((const guchar*)"No cipher overlay", THRIFT_SSL_SOCKET_ERROR_CIPHER_NOT_AVAILABLE, error);
@@ -859,12 +937,16 @@ thrift_ssl_socket_context_initialize(ThriftSSLSocketProtocol ssl_protocol, GErro
   SSL_CTX_set_mode(context, SSL_MODE_AUTO_RETRY);
 
   /* Disable horribly insecure SSLv2 and SSLv3 protocols but allow a handshake
-     with older clients so they get a graceful denial. */
+     with older clients so they get a graceful denial. On the auto-negotiating
+     default, also decline the superseded TLS 1.0 and 1.1 so the floor matches
+     the modern default other bindings follow; an explicitly selected protocol
+     is left untouched. */
   if (ssl_protocol == SSLTLS) {
       SSL_CTX_set_options(context, SSL_OP_NO_SSLv2);
       SSL_CTX_set_options(context, SSL_OP_NO_SSLv3);   /* THRIFT-3164 */
+      SSL_CTX_set_options(context, SSL_OP_NO_TLSv1);
+      SSL_CTX_set_options(context, SSL_OP_NO_TLSv1_1);
   }
 
   return context;
 }
-

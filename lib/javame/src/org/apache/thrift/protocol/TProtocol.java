@@ -38,6 +38,16 @@ public abstract class TProtocol {
    */
   protected TTransport trans_;
 
+  /** Current recursion depth during struct serialization */
+  private int recursionDepth_ = 0;
+
+  /**
+   * How far a read will follow nesting the peer, rather than the IDL, chose the
+   * shape of. Shared with TProtocolUtil.skip(), which draws on the same budget:
+   * skipping an unknown field descends exactly the way reading it would.
+   */
+  public static final int DEFAULT_RECURSION_DEPTH = 64;
+
   /**
    * Constructor
    */
@@ -50,6 +60,24 @@ public abstract class TProtocol {
    */
   public TTransport getTransport() {
     return trans_;
+  }
+
+  /**
+   * Increment recursion depth, checking against the limit.
+   *
+   * @throws TProtocolException with DEPTH_LIMIT if the limit is exceeded
+   */
+  public void incrementRecursionDepth() throws TProtocolException {
+    if (recursionDepth_ >= DEFAULT_RECURSION_DEPTH) {
+      throw new TProtocolException(
+          TProtocolException.DEPTH_LIMIT, "Maximum recursion depth exceeded");
+    }
+    ++recursionDepth_;
+  }
+
+  /** Decrement recursion depth. Must be called in a finally block. */
+  public void decrementRecursionDepth() {
+    --recursionDepth_;
   }
 
   /**

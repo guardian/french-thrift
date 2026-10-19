@@ -34,6 +34,9 @@
 #endif
 
 using apache::thrift::transport::TSSLServerSocket;
+using apache::thrift::transport::SSLContext;
+using apache::thrift::transport::SSLContextFactory;
+using apache::thrift::transport::TSSLException;
 using apache::thrift::transport::TServerTransport;
 using apache::thrift::transport::TSSLSocket;
 using apache::thrift::transport::TSSLSocketFactory;
@@ -226,6 +229,154 @@ struct SecurityFixture
 
 BOOST_FIXTURE_TEST_SUITE(BOOST_TEST_MODULE, SecurityFixture)
 
+BOOST_AUTO_TEST_CASE(default_ssl_context_options)
+{
+    apache::thrift::transport::SSLContext context;
+    const auto options = SSL_CTX_get_options(context.get());
+
+    if (SSL_OP_NO_SSLv2 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_SSLv2) != 0);
+    }
+    if (SSL_OP_NO_SSLv3 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_SSLv3) != 0);
+    }
+    if (SSL_OP_NO_TLSv1 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_TLSv1) != 0);
+    }
+    if (SSL_OP_NO_TLSv1_1 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_TLSv1_1) != 0);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(custom_ssl_context_options)
+{
+    class CustomSSLContext : public apache::thrift::transport::SSLContext
+    {
+    public:
+        CustomSSLContext() : SSLContext()
+        {
+            SSL_CTX_clear_options(get(), SSL_OP_NO_TLSv1_1);
+        }
+    };
+
+    std::shared_ptr<apache::thrift::transport::SSLContext> context;
+    TSSLSocketFactory factory([&context]() {
+        context = std::make_shared<CustomSSLContext>();
+        return context;
+    });
+    const auto options = SSL_CTX_get_options(context->get());
+
+    if (SSL_OP_NO_TLSv1 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_TLSv1) != 0);
+    }
+    if (SSL_OP_NO_TLSv1_1 != 0) {
+        BOOST_CHECK((options & SSL_OP_NO_TLSv1_1) == 0);
+    }
+    context.reset();
+}
+
+BOOST_AUTO_TEST_CASE(wrapped_ssl_context)
+{
+    SSL_CTX* raw = SSL_CTX_new(TLS_method());
+    BOOST_REQUIRE(raw != nullptr);
+    SSL_CTX_set_mode(raw, SSL_MODE_AUTO_RETRY);
+
+    std::shared_ptr<SSLContext> context;
+    TSSLSocketFactory factory([&context, raw]() {
+        context = std::make_shared<SSLContext>(raw);
+        return context;
+    });
+    BOOST_CHECK(context->get() == raw);
+    context.reset();
+}
+
+BOOST_AUTO_TEST_CASE(wrapped_ssl_context_null)
+{
+    try
+    {
+        (void)std::make_shared<SSLContext>(nullptr);
+        BOOST_FAIL("Expected null SSL_CTX to throw");
+    }
+    catch (const TSSLException& ex)
+    {
+        BOOST_CHECK_EQUAL("SSLContext: ctx must not be null", std::string(ex.what()));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(custom_ssl_context_factory_validation)
+{
+    try
+    {
+        SSLContextFactory contextFactory;
+        TSSLSocketFactory factory(contextFactory);
+        BOOST_FAIL("Expected empty SSLContextFactory to throw");
+    }
+    catch (const TSSLException& ex)
+    {
+        BOOST_CHECK_EQUAL("SSLContextFactory must not be empty", std::string(ex.what()));
+    }
+
+    try
+    {
+        TSSLSocketFactory factory([]() {
+            return std::shared_ptr<apache::thrift::transport::SSLContext>();
+        });
+        BOOST_FAIL("Expected null SSLContextFactory result to throw");
+    }
+    catch (const TSSLException& ex)
+    {
+        BOOST_CHECK_EQUAL("SSLContextFactory must not return null", std::string(ex.what()));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(explicit_protocol_version_window)
+{
+    // An explicitly requested protocol has to pin the context to exactly that
+    // version, the way the per-version TLSv1_x_method() functions it replaces
+    // did. Checking the window rather than just "a context came back" is what
+    // catches a remapping that silently leaves the floor to the library
+    // default, which would make an explicit request laxer than SSLTLS.
+    //
+    // SSL_CTX_get_min_proto_version() and SSL_CTX_get_max_proto_version() were
+    // added in OpenSSL 1.1.1a.
+#if OPENSSL_VERSION_NUMBER >= 0x1010101fL && !defined(LIBRESSL_VERSION_NUMBER)
+    struct Expectation
+    {
+        apache::thrift::transport::SSLProtocol protocol;
+        const char* name;
+        int version;
+    };
+
+    const Expectation expectations[] = {
+        { apache::thrift::transport::TLSv1_0, "TLSv1_0", TLS1_VERSION   },
+        { apache::thrift::transport::TLSv1_1, "TLSv1_1", TLS1_1_VERSION },
+        { apache::thrift::transport::TLSv1_2, "TLSv1_2", TLS1_2_VERSION },
+        { apache::thrift::transport::LATEST,  "LATEST",  TLS1_2_VERSION }
+    };
+
+    for (const auto& expected : expectations)
+    {
+        BOOST_TEST_MESSAGE(boost::format("TEST: protocol = %1%") % expected.name);
+        apache::thrift::transport::SSLContext context(expected.protocol);
+        BOOST_CHECK_EQUAL(expected.version, SSL_CTX_get_min_proto_version(context.get()));
+        BOOST_CHECK_EQUAL(expected.version, SSL_CTX_get_max_proto_version(context.get()));
+    }
+#endif
+
+#if defined(OPENSSL_NO_SSL3) || OPENSSL_VERSION_NUMBER >= 0x40000000L
+    // SSLv3 is not available in this build of the library. That has to be
+    // reported rather than quietly satisfied with some other version.
+    try
+    {
+        apache::thrift::transport::SSLContext context(apache::thrift::transport::SSLv3);
+        BOOST_FAIL("Expected unavailable SSLv3 to throw");
+    }
+    catch (const TSSLException&)
+    {
+    }
+#endif
+}
+
 BOOST_AUTO_TEST_CASE(ssl_security_matrix)
 {
     try
@@ -236,11 +387,11 @@ BOOST_AUTO_TEST_CASE(ssl_security_matrix)
         {
     //   server    = SSLTLS   SSLv2    SSLv3    TLSv1_0  TLSv1_1  TLSv1_2
     // client
-    /* SSLTLS  */  { true,    false,   false,   true,    true,    true    },
+    /* SSLTLS  */  { true,    false,   false,   false,   false,   true    },
     /* SSLv2   */  { false,   false,   false,   false,   false,   false   },
     /* SSLv3   */  { false,   false,   true,    false,   false,   false   },
-    /* TLSv1_0 */  { true,    false,   false,   true,    false,   false   },
-    /* TLSv1_1 */  { true,    false,   false,   false,   true,    false   },
+    /* TLSv1_0 */  { false,   false,   false,   true,    false,   false   },
+    /* TLSv1_1 */  { false,   false,   false,   false,   true,    false   },
     /* TLSv1_2 */  { true,    false,   false,   false,   false,   true    }
         };
 
@@ -254,7 +405,7 @@ BOOST_AUTO_TEST_CASE(ssl_security_matrix)
                     continue;
                 }
 
-#ifdef OPENSSL_NO_SSL3
+#if defined(OPENSSL_NO_SSL3) || OPENSSL_VERSION_NUMBER >= 0x40000000L
                 if (si == 2 || ci == 2)
                 {
                     // Skip all SSLv3 cases - protocol not supported

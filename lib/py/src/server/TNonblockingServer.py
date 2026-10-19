@@ -32,7 +32,7 @@ import struct
 import threading
 
 from collections import deque
-from six.moves import queue
+import queue
 
 from thrift.transport import TTransport
 from thrift.protocol.TBinaryProtocol import TBinaryProtocolFactory
@@ -116,18 +116,20 @@ class Connection(object):
                         of answer).
         CLOSED --- socket was closed and connection should be deleted.
     """
-    def __init__(self, new_socket, wake_up):
+    def __init__(self, new_socket, wake_up, max_frame_size=TTransport.DEFAULT_MAX_FRAME_SIZE):
         self.socket = new_socket
         self.socket.setblocking(False)
         self.status = WAIT_LEN
         self.len = 0
         self.received = deque()
         self._reading = Message(0, 4, True)
-        self._rbuf = b''
+        # A bytearray grows in place; appending to bytes would copy
+        # everything received so far on every read.
+        self._rbuf = bytearray()
         self._wbuf = b''
         self.lock = threading.Lock()
         self.wake_up = wake_up
-        self.remaining = False
+        self.max_frame_size = max_frame_size
 
     @socket_exception
     def read(self):
@@ -155,18 +157,27 @@ class Connection(object):
                         logger.error('could not read the head from frame')
                         self.close()
                         break
+                    # Refuse the size before collecting the frame: the bytes
+                    # are buffered as they arrive, for as long as the declared
+                    # length allows.
+                    if mlen > self.max_frame_size:
+                        logger.error('frame size %d is larger than the maximum %d',
+                                     mlen, self.max_frame_size)
+                        self.close()
+                        break
                     self._reading = Message(self._reading.end, mlen, False)
                     self.status = WAIT_MESSAGE
                 else:
-                    self._reading.buffer = self._rbuf
+                    # The message gets a copy of exactly its own frame; what
+                    # follows stays in the buffer for the next one.
+                    self._reading.buffer = bytes(self._rbuf[:self._reading.end])
                     self.received.append(self._reading)
-                    self._rbuf = self._rbuf[self._reading.end:]
+                    del self._rbuf[:self._reading.end]
                     self._reading = Message(0, 4, True)
             first = False
             if self.received:
                 self.status = WAIT_PROCESS
                 break
-        self.remaining = not done
 
     @socket_exception
     def write(self):
@@ -242,12 +253,17 @@ class TNonblockingServer(object):
                  lsocket,
                  inputProtocolFactory=None,
                  outputProtocolFactory=None,
-                 threads=10):
+                 threads=10,
+                 max_frame_size=TTransport.DEFAULT_MAX_FRAME_SIZE):
+        if not 0 < max_frame_size <= TTransport.HARD_MAX_FRAME_SIZE:
+            raise ValueError(
+                "max_frame_size should be > 0 and <= %d" % TTransport.HARD_MAX_FRAME_SIZE)
         self.processor = processor
         self.socket = lsocket
         self.in_protocol = inputProtocolFactory or TBinaryProtocolFactory()
         self.out_protocol = outputProtocolFactory or self.in_protocol
         self.threads = int(threads)
+        self.max_frame_size = max_frame_size
         self.clients = {}
         self.tasks = queue.Queue()
         self._read, self._write = socket.socketpair()
@@ -308,7 +324,7 @@ class TNonblockingServer(object):
         for i, connection in list(self.clients.items()):
             if connection.is_readable():
                 readable.append(connection.fileno())
-                if connection.remaining or connection.received:
+                if connection.received:
                     remaining.append(connection.fileno())
             if connection.is_writeable():
                 writable.append(connection.fileno())
@@ -329,7 +345,7 @@ class TNonblockingServer(object):
         for i, connection in list(self.clients.items()):
             if connection.is_readable():
                 self.poll.register(connection.fileno(), select.POLLIN | select.POLLRDNORM | select.POLLERR | select.POLLHUP | select.POLLNVAL)
-                if connection.remaining or connection.received:
+                if connection.received:
                     remaining.append(connection.fileno())
             if connection.is_writeable():
                 self.poll.register(connection.fileno(), select.POLLOUT | select.POLLWRNORM)
@@ -375,7 +391,8 @@ class TNonblockingServer(object):
                     client = self.socket.accept()
                     if client:
                         self.clients[client.handle.fileno()] = Connection(client.handle,
-                                                                          self.wake_up)
+                                                                          self.wake_up,
+                                                                          self.max_frame_size)
                 except socket.error:
                     logger.debug('error while accepting', exc_info=True)
             else:

@@ -2,12 +2,24 @@
 
 Thrift client library for Microsoft .NET Standard 
 
+# NuGet packages
+
+The library ships as two packages so that non-web projects no longer pull in the ASP.NET Core stack:
+
+- **`ApacheThrift`** – the core library (protocols, transports, processors and the
+  `TSimpleAsyncServer`/`TThreadPoolAsyncServer` servers). It only depends on
+  `Microsoft.Extensions.Logging.Abstractions` and has no ASP.NET Core dependency.
+- **`ApacheThrift.AspNetCore`** – the ASP.NET Core HTTP server middleware
+  (`THttpServerTransport`, namespace `Thrift.Transport.Server`). Reference this package
+  *in addition to* `ApacheThrift` only when you host Thrift over ASP.NET Core. Existing code
+  keeps compiling unchanged once the package reference is added.
+
 # Build the library
 
 ## How to build on Windows
 - Get Thrift IDL compiler executable, add to some folder and add path to this folder into PATH variable. 
 - Alternatively, build from source by using the cmake target "copy-thrift-compiler", which places the binary to a suitable place.
-- Open the Thrift.sln project with Visual Studio and build.
+- Open the Thrift.slnx project with Visual Studio and build.
 or 
 - Build with scripts
 
@@ -53,3 +65,71 @@ Because of the different environment requirements, migration from C# takes sligh
 - In case you are using Thrift server event handlers: the `SetEventHandler` method now starts with an uppercase letter
 - and you will also have to revise the method names of all `TServerEventHandler` descendants you have in your code
 
+# Fuzzing
+
+We use [SharpFuzz](https://github.com/Metalnem/sharpfuzz) (and its libfuzzer variant) to fuzz the Thrift protocol parsers. This is **not** integrated with oss-fuzz, so all fuzzing must be run locally. **Supported platform: Linux only.**
+
+`make check` compiles the 12 fuzzer variants without SharpFuzz IL
+instrumentation, so changes that break the fuzzer build will fail CI.
+Full, instrumented builds suitable for actually running a fuzzer remain
+opt-in: run `make build-fuzzers` (or `./buildfuzzers.sh`), which
+additionally requires the SharpFuzz.CommandLine global tool and the
+`libfuzzer-dotnet` native driver as described below.
+
+## Prerequisites
+
+1. A .NET 10 SDK (same one used for the rest of `lib/netstd`).
+
+2. The SharpFuzz IL-rewriter CLI, installed as a .NET global tool:
+
+   ```bash
+   dotnet tool install --global SharpFuzz.CommandLine
+   export PATH="$PATH:$HOME/.dotnet/tools"
+   ```
+
+   Add the `PATH` export to your shell rc if you want it to persist.
+
+3. The native `libfuzzer-dotnet` driver binary. Grab a prebuilt release from the
+   [Metalnem/libfuzzer-dotnet releases page](https://github.com/Metalnem/libfuzzer-dotnet/releases)
+   (or build it from source). Place it in a directory of your choice and point
+   `SHARPFUZZ_DIR` at that directory:
+
+   ```bash
+   export SHARPFUZZ_DIR=/path/to/libfuzzer-dotnet-dir
+   ```
+
+   `buildfuzzers.sh` and `runfuzzer.sh` expect to find `$SHARPFUZZ_DIR/libfuzzer-dotnet`.
+
+## A temporary note on `DOTNET_ROLL_FORWARD`
+
+As of SharpFuzz.CommandLine 2.2.0, the global tool's `runtimeconfig.json` pins the
+tool to .NET 9, which prevents it from running under a .NET 10-only host. Both
+`buildfuzzers.sh` and `runfuzzer.sh` therefore export `DOTNET_ROLL_FORWARD=Major`
+at the top of the script as a workaround. Upstream fix:
+[SharpFuzz PR #72](https://github.com/Metalnem/sharpfuzz/pull/72) (merged, pending
+release as SharpFuzz 2.3.0). Once that release ships, remove the `DOTNET_ROLL_FORWARD`
+exports from both shell drivers and update the SharpFuzz package pin in
+`Tests/Thrift.FuzzTests/Thrift.FuzzTests.csproj`.
+
+## Running the fuzzers
+
+Build all twelve fuzzer assemblies (3 protocols x 2 fuzzer types x 2 engines) and
+instrument them with SharpFuzz:
+
+```bash
+./buildfuzzers.sh
+```
+
+Run one fuzzer:
+
+```bash
+./runfuzzer.sh <fuzzer-name> <engine> [extra-fuzzer-args...]
+```
+
+Where `<fuzzer-name>` is one of `binary`, `compact`, `json`, `binary-roundtrip`,
+`compact-roundtrip`, `json-roundtrip`, and `<engine>` is `libfuzzer` or `afl`.
+Any additional arguments are passed through to the underlying fuzzer engine, e.g.:
+
+```bash
+./runfuzzer.sh binary libfuzzer -runs=10000
+```

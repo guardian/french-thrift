@@ -22,6 +22,9 @@ SUBDIRS = .
 all-local:
 	$(DOTNETCORE) build -c Release
 
+check-local:
+	DOTNET="$(DOTNETCORE)" bash ./smoketest.sh
+
 clean-local:
 	$(RM) Interfaces.dll
 	$(RM) -r Client/bin
@@ -34,12 +37,19 @@ clean-local:
 distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
 
+# The projects ship as whole directories; strip the generated code and build
+# output a built tree leaves behind, keeping the tracked project scaffolding.
+dist-hook:
+	rm -rf $(distdir)/Interfaces/shared $(distdir)/Interfaces/tutorial
+	find $(distdir) -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+
 EXTRA_DIST = \
 	Client \
 	Interfaces \
 	README.md \
 	Server \
-	Tutorial.sln \
+	Tutorial.slnx \
 	build.cmd \
-	build.sh
+	build.sh \
+	smoketest.sh
 			 

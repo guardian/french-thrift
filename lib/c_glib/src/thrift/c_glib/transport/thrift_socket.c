@@ -45,6 +45,28 @@ enum _ThriftSocketProperties
 
 G_DEFINE_TYPE(ThriftSocket, thrift_socket, THRIFT_TYPE_TRANSPORT)
 
+static gboolean
+thrift_socket_path_fits_unix_addr (const gchar *path, GError **error)
+{
+  const size_t path_len = strlen (path);
+  const size_t sun_path_len = sizeof (((struct sockaddr_un *) 0)->sun_path);
+
+  if (path_len >= sun_path_len)
+  {
+    if (error != NULL)
+    {
+      g_set_error (error,
+                   THRIFT_TRANSPORT_ERROR,
+                   THRIFT_TRANSPORT_ERROR_SOCKET,
+                   "unix socket path is too long (%zu bytes, max %zu)",
+                   path_len, sun_path_len - 1);
+    }
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 /* implements thrift_transport_is_open */
 gboolean
 thrift_socket_is_open (ThriftTransport *transport)
@@ -135,8 +157,13 @@ thrift_socket_open (ThriftTransport *transport, GError **error)
 
   ThriftSocket *tsocket = THRIFT_SOCKET (transport);
   g_return_val_if_fail (tsocket->sd == THRIFT_INVALID_SOCKET, FALSE);
-  
+
   if (tsocket->path) {
+    if (!thrift_socket_path_fits_unix_addr (tsocket->path, error))
+    {
+      return FALSE;
+    }
+
     /* create a socket structure */
     struct sockaddr_un pin;
     memset (&pin, 0, sizeof(pin));
@@ -275,6 +302,15 @@ thrift_socket_write (ThriftTransport *transport, const gpointer buf,
                    "failed to send %d bytes - %s", len, strerror(errno));
       return FALSE;
     }
+    /* send() sent nothing.  Asking again cannot make progress, so report it
+       rather than retry without end. */
+    if (ret == 0)
+    {
+      g_set_error (error, THRIFT_TRANSPORT_ERROR,
+                   THRIFT_TRANSPORT_ERROR_SEND,
+                   "failed to send %u bytes - send() returned 0", len);
+      return FALSE;
+    }
     sent += ret;
   }
 
@@ -331,6 +367,8 @@ thrift_socket_finalize (GObject *object)
     close (socket->sd);
   }
   socket->sd = THRIFT_INVALID_SOCKET;
+
+  G_OBJECT_CLASS (thrift_socket_parent_class)->finalize (object);
 }
 
 /* property accessor */

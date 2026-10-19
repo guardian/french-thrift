@@ -20,7 +20,7 @@
 AC_PREREQ(2.65)
 AC_CONFIG_MACRO_DIR([./aclocal])
 
-AC_INIT([thrift], [0.21.0])
+AC_INIT([thrift], [0.26.0])
 
 AC_CONFIG_AUX_DIR([.])
 
@@ -95,6 +95,18 @@ AC_PROG_MKDIR_P
 AC_PROG_AWK
 AC_PROG_RANLIB
 
+# Check if we're using Clang
+AC_MSG_CHECKING([whether we are using Clang])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([], [[
+    #ifndef __clang__
+      not clang
+    #endif
+  ]])],
+  [CLANG=yes], [CLANG=no])
+AC_MSG_RESULT([$CLANG])
+AM_CONDITIONAL([USING_CLANG], [test "x$CLANG" = "xyes"])
+
 AC_LANG([C++])
 AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
 
@@ -131,7 +143,6 @@ if test "$enable_libs" = "no"; then
   with_nodets="no"
   with_lua="no"
   with_rs="no"
-  with_swift="no"
 fi
 
 AX_THRIFT_LIB(cpp, [C++], yes)
@@ -142,7 +153,12 @@ if test "$with_cpp" = "yes";  then
     AC_SUBST([BOOST_LIB_DIR], [$(echo "$BOOST_LDFLAGS" | sed -e 's/^\-L//')])
     AC_SUBST([BOOST_CHRONO_LDADD], [$(echo "$BOOST_LIB_DIR/libboost_chrono.a")])
     AC_SUBST([BOOST_FILESYSTEM_LDADD], [$(echo "$BOOST_LIB_DIR/libboost_filesystem.a")])
-    AC_SUBST([BOOST_SYSTEM_LDADD], [$(echo "$BOOST_LIB_DIR/libboost_system.a")])
+    # Boost.System is header-only since 1.69, and 1.89 stopped shipping the stub library.
+    BOOST_SYSTEM_LDADD=
+    if test -f "$BOOST_LIB_DIR/libboost_system.a"; then
+      BOOST_SYSTEM_LDADD="$BOOST_LIB_DIR/libboost_system.a"
+    fi
+    AC_SUBST([BOOST_SYSTEM_LDADD])
     AC_SUBST([BOOST_TEST_LDADD], [$(echo "$BOOST_LIB_DIR/libboost_unit_test_framework.a")])
     AC_SUBST([BOOST_THREAD_LDADD], [$(echo "$BOOST_LIB_DIR/libboost_thread.a")])
     have_cpp="yes"
@@ -177,8 +193,8 @@ AM_CONDITIONAL([QT5_REDUCE_RELOCATIONS], [test "x$qt_reduce_reloc" != "x"])
 
 AX_THRIFT_LIB(c_glib, [C (GLib)], yes)
 if test "$with_c_glib" = "yes"; then
-  PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.0], have_glib2=yes, have_glib2=no)
-  PKG_CHECK_MODULES([GOBJECT], [gobject-2.0 >= 2.0], have_gobject2=yes, have_gobject2=no)
+  PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.48], have_glib2=yes, have_glib2=no)
+  PKG_CHECK_MODULES([GOBJECT], [gobject-2.0 >= 2.48], have_gobject2=yes, have_gobject2=no)
   if test "$have_glib2" = "yes" -a "$have_gobject2" = "yes" ; then
     AC_PATH_PROG([GSETTINGS], [gsettings])
     have_c_glib="yes"
@@ -238,34 +254,39 @@ if test "$with_erlang" = "yes";  then
 fi
 AM_CONDITIONAL(WITH_ERLANG, [test "$have_erlang" = "yes"])
 
+dnl HAVE_NPM also drives the check targets of lib/js and lib/ts, which are
+dnl browser bindings and not tied to --with-nodejs.  Look for npm up front, so
+dnl that disabling the nodejs binding does not silently turn those tests into
+dnl no-ops.
+AC_PATH_PROG([NPM], [npm])
+AM_CONDITIONAL(HAVE_NPM, [test "x$NPM" != "x"])
+
 AX_THRIFT_LIB(nodejs, [Nodejs], yes)
 have_nodejs=no
 if test "$with_nodejs" = "yes"; then
   AC_PATH_PROGS([NODEJS], [nodejs node])
-  AC_PATH_PROG([NPM], [npm])
   if test "x$NODEJS" != "x" -a "x$NPM" != "x"; then
     have_nodejs="yes"
   fi
 fi
 AM_CONDITIONAL(WITH_NODEJS, [test "$have_nodejs" = "yes"])
-AM_CONDITIONAL(HAVE_NPM, [test "x$NPM" != "x"])
 
 AX_THRIFT_LIB(nodets, [Nodets], yes)
 have_nodets=no
 if test "$with_nodets" = "yes"; then
   AC_PATH_PROGS([NODETS], [nodets node])
-  AC_PATH_PROG([NPM], [npm])
   if test "x$NODETS" != "x" -a "x$NPM" != "x"; then
     have_nodets="yes"
   fi
 fi
 AM_CONDITIONAL(WITH_NODETS, [test "$have_nodets" = "yes"])
-AM_CONDITIONAL(HAVE_NPM, [test "x$NPM" != "x"])
 
 AX_THRIFT_LIB(lua, [Lua], yes)
 have_lua=no
 if test "$with_lua" = "yes"; then
-  AX_PROG_LUA(5.2,, have_lua="yes", have_lua="no")
+  dnl 5.3, because the scripts make check runs in lib/lua/test use its
+  dnl bitwise operators and string.pack.
+  AX_PROG_LUA(5.3,, have_lua="yes", have_lua="no")
   if test "$have_lua" = "yes"; then
     AX_LUA_HEADERS(, have_lua="no")
     AX_LUA_LIBS(, have_lua="no")
@@ -275,6 +296,8 @@ AM_CONDITIONAL(WITH_LUA, [test "$have_lua" = "yes"])
 
 # Find python regardless of with_python value, because it's needed by make cross
 AM_PATH_PYTHON(2.6,, :)
+AC_PATH_PROG([PERL_FOR_BUILD], [perl])
+AM_CONDITIONAL([HAVE_PERL_FOR_BUILD], [test -n "$PERL_FOR_BUILD"])
 AX_THRIFT_LIB(python, [Python], yes)
 if test "$with_python" = "yes";  then
   if test -n "$PYTHON"; then
@@ -348,11 +371,22 @@ AM_CONDITIONAL(WITH_PHP_EXTENSION, [test "$have_php_extension" = "yes"])
 AX_THRIFT_LIB(dart, [DART], yes)
 if test "$with_dart" = "yes"; then
   AC_PATH_PROG([DART], [dart])
-  AC_PATH_PROG([DARTPUB], [pub])
-  if test "x$DART" != "x" -a "x$DARTPUB" != "x"; then
-    have_dart="yes"
+  if test "x$DART" != "x"; then
+    dnl "pub" as a standalone program was deprecated in Dart 2.15 and is gone
+    dnl in Dart 3, where "dart pub" is the only spelling left. Probing for the
+    dnl subcommand rather than the program is what makes the Dart library
+    dnl detectable on the SDK versions it actually supports.
+    AC_MSG_CHECKING([whether $DART has the pub subcommand])
+    if $DART pub --help >/dev/null 2>&1; then
+      AC_MSG_RESULT([yes])
+      DARTPUB="$DART pub"
+      have_dart="yes"
+    else
+      AC_MSG_RESULT([no])
+    fi
   fi
 fi
+AC_SUBST([DARTPUB])
 AM_CONDITIONAL(WITH_DART, [test "$have_dart" = "yes"])
 
 AX_THRIFT_LIB(ruby, [Ruby], yes)
@@ -377,7 +411,7 @@ if test "$with_go" = "yes";  then
       ax_go118_version="1.18"
 
       AC_MSG_CHECKING([for Go version])
-      golang_version=`$GO version 2>&1 | $SED -e 's/\(go \)\(version \)\(go\)\(@<:@0-9@:>@.@<:@0-9@:>@.@<:@0-9@:>@\)\(@<:@\*@:>@*\).*/\4/'`
+      golang_version=`$GO version 2>&1 | $SED -n -e 's/^go version go\(@<:@0-9@:>@@<:@0-9.@:>@*\).*/\1/p'`
       AC_MSG_RESULT($golang_version)
       AC_SUBST([golang_version],[$golang_version])
       AX_COMPARE_VERSION([$ax_go_version],[le],[$golang_version],[
@@ -411,26 +445,16 @@ AM_CONDITIONAL(WITH_GO, [test "$have_go" = "yes"])
 AM_CONDITIONAL([GOVERSION_LT_17], [test "$go_version_lt_17" = "yes"])
 AM_CONDITIONAL([GOVERSION_GE_118], [test "$go_version_ge_118" = "yes"])
 
-AX_THRIFT_LIB(swift, [Swift], yes)
-have_swift="no"
-if test "$with_swift" = "yes"; then
-  AC_PATH_PROG([SWIFT], [swift])
-  if test "x$SWIFT" != "x" -a "x$SWIFT" != "x"; then
-    have_swift="yes"
-  fi
-fi
-AM_CONDITIONAL([WITH_SWIFT], [test "$have_swift" = "yes"])
-
 AX_THRIFT_LIB(rs, [Rust], yes)
 have_rs="no"
 if test "$with_rs" = "yes";  then
   AC_PATH_PROG([CARGO], [cargo])
   AC_PATH_PROG([RUSTC], [rustc])
   if [[ -x "$CARGO" ]] && [[ -x "$RUSTC" ]]; then
-      min_rustc_version="1.13"
+      min_rustc_version="1.85"
 
       AC_MSG_CHECKING([for rustc version])
-      rustc_version=`$RUSTC --version 2>&1 | $SED -e 's/\(rustc \)\([0-9]\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\2.\3/'`
+      rustc_version=`$RUSTC --version 2>&1 | $SED -n -e 's/^rustc \(@<:@0-9@:>@@<:@0-9.@:>@*\).*/\1/p'`
       AC_MSG_RESULT($rustc_version)
       AC_SUBST([rustc_version],[$rustc_version])
 
@@ -531,6 +555,7 @@ linker flags for OPTLINK. Please set DMD_LIBEVENT_FLAGS manually.])
   have_deimos_openssl=$success
 
   with_d_ssl_tests="no"
+  DMD_OPENSSL_VERSION_ID="use_openssl_1_0_x"
   if test "$have_deimos_openssl" = "yes"; then
     if test "x$DMD_OPENSSL_FLAGS" = "x"; then
       if test "$dmd_optlink" = "yes"; then
@@ -548,6 +573,21 @@ linker flags for OPTLINK. Please set DMD_OPENSSL_FLAGS manually.])
     else
       with_d_ssl_tests="yes"
     fi
+
+    # OpenSSL 3.0 removed SSL_get_peer_certificate and ERR_put_error, so the
+    # D SSL modules must be built with -version=use_openssl_3 there. Earlier
+    # OpenSSL keeps the version identifier the modules used before.
+    AC_MSG_CHECKING([which OpenSSL API version the D binding should target])
+    save_CPPFLAGS="$CPPFLAGS"
+    CPPFLAGS="$CPPFLAGS $OPENSSL_INCLUDES"
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <openssl/opensslv.h>]], [[
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+#error OpenSSL is older than 3.0
+#endif
+    ]])],
+      [DMD_OPENSSL_VERSION_ID="use_openssl_3"; AC_MSG_RESULT([3.0 or newer])],
+      [AC_MSG_RESULT([older than 3.0])])
+    CPPFLAGS="$save_CPPFLAGS"
   fi
 fi
 
@@ -560,6 +600,7 @@ AC_SUBST(DMD_LIBEVENT_FLAGS)
 AM_CONDITIONAL(HAVE_DEIMOS_OPENSSL, [test "$have_deimos_openssl" = "yes"])
 AM_CONDITIONAL(WITH_D_SSL_TESTS, [test "$with_d_ssl_tests" = "yes"])
 AC_SUBST(DMD_OPENSSL_FLAGS)
+AC_SUBST(DMD_OPENSSL_VERSION_ID)
 
 AC_ARG_ENABLE([tests],
   AS_HELP_STRING([--enable-tests], [build tests [default=yes]]),
@@ -657,16 +698,6 @@ AC_CHECK_TYPES([ptrdiff_t], [], [echo "ptrdiff_t not found or g++ not installed 
 
 AC_STRUCT_TM
 
-dnl NOTE(dreiss): AI_ADDRCONFIG is not defined on OpenBSD.
-AC_CHECK_DECL([AI_ADDRCONFIG], [],
-              [AC_DEFINE([AI_ADDRCONFIG], 0,
-                         [Define if the AI_ADDRCONFIG symbol is unavailable])],
-              [
-  #include <sys/types.h>
-  #include <sys/socket.h>
-  #include <netdb.h>
-])
-
 AC_FUNC_ALLOCA
 AC_FUNC_FORK
 AC_FUNC_MALLOC
@@ -761,6 +792,7 @@ AC_CONFIG_FILES([
   lib/cl/Makefile
   lib/cpp/Makefile
   lib/cpp/test/Makefile
+  lib/cpp/test/fuzz/Makefile
   lib/cpp/thrift-nb.pc
   lib/cpp/thrift-z.pc
   lib/cpp/thrift-qt5.pc
@@ -768,6 +800,7 @@ AC_CONFIG_FILES([
   lib/c_glib/Makefile
   lib/c_glib/thrift_c_glib.pc
   lib/c_glib/test/Makefile
+  lib/c_glib/test/fuzz/Makefile
   lib/d/Makefile
   lib/d/test/Makefile
   lib/erl/Makefile
@@ -791,8 +824,10 @@ AC_CONFIG_FILES([
   lib/dart/Makefile
   lib/py/Makefile
   lib/rb/Makefile
+  lib/rb/test/fuzz/Makefile
   lib/rs/Makefile
   lib/rs/test/Makefile
+  lib/rs/test/fuzz/Makefile
   lib/rs/test_recursive/Makefile
   lib/rs/test_recursive/src/Makefile
   lib/rs/test_recursive/src/maintenance/Makefile
@@ -800,11 +835,11 @@ AC_CONFIG_FILES([
   lib/rs/test_recursive/src/transit/light/Makefile
   lib/rs/test_recursive/src/transit/services/Makefile
   lib/lua/Makefile
-  lib/swift/Makefile
   lib/ts/Makefile
   lib/xml/Makefile
   lib/xml/test/Makefile
   test/Makefile
+  test/audit/Makefile
   test/features/Makefile
   test/c_glib/Makefile
   test/cl/Makefile
@@ -822,8 +857,6 @@ AC_CONFIG_FILES([
   test/py.tornado/Makefile
   test/rb/Makefile
   test/rs/Makefile
-  test/swift/Makefile
-  test/swift/CrossTests/Makefile
   tutorial/Makefile
   tutorial/c_glib/Makefile
   tutorial/cl/Makefile
@@ -843,7 +876,6 @@ AC_CONFIG_FILES([
   tutorial/py.tornado/Makefile
   tutorial/rb/Makefile
   tutorial/rs/Makefile
-  tutorial/swift/Makefile
 ])
 
 if test "$have_cpp" = "yes" ; then MAYBE_CPP="cpp" ; else MAYBE_CPP="" ; fi
@@ -880,8 +912,6 @@ if test "$have_lua" = "yes" ; then MAYBE_LUA="lua" ; else MAYBE_LUA="" ; fi
 AC_SUBST([MAYBE_LUA])
 if test "$have_rs" = "yes" ; then MAYBE_RS="rs" ; else MAYBE_RS="" ; fi
 AC_SUBST([MAYBE_RS])
-if test "$have_swift" = "yes" ; then MAYBE_SWIFT="swift" ; else MAYBE_SWIFT="" ; fi
-AC_SUBST([MAYBE_SWIFT])
 if test "$have_netstd" = "yes" ; then MAYBE_NETSTD="netstd" ; else MAYBE_NETSTD="" ; fi
 AC_SUBST([MAYBE_NETSTD])
 if test "$have_cl" = "yes" ; then MAYBE_CL="cl" ; else MAYBE_CL="" ; fi
@@ -912,7 +942,6 @@ echo "Building Python Library ...... : $have_python"
 echo "Building Py3 Library ......... : $have_py3"
 echo "Building Ruby Library ........ : $have_ruby"
 echo "Building Rust Library ........ : $have_rs"
-echo "Building Swift Library ....... : $have_swift"
 
 if test "$have_c_glib" = "yes" ; then
   echo
@@ -1041,12 +1070,6 @@ if test "$have_rs" = "yes" ; then
   echo "   Using Cargo................ : $CARGO"
   echo "   Using rustc................ : $RUSTC"
   echo "   Using Rust version......... : $($RUSTC --version)"
-fi
-if test "$have_swift" = "yes" ; then
-  echo
-  echo "Swift Library:"
-  echo "   Using Swift ............... : $SWIFT"
-  echo "   Using Swift version ....... : $($SWIFT --version | head -1)"
 fi
 echo
 echo "If something is missing that you think should be present,"

@@ -181,21 +181,14 @@ thrift_zlib_transport_read_slow (ThriftTransport *transport, gpointer buf,
     if (need == 0) {
       return 1;
     }
-    
-    /* If we will need to read from the underlying transport to get more data,
-     * but we already have some data available, return it now.  Reading from
-     * the underlying transport may block, and read() is only allowed to block
-     * when no data is available.
-     */
-    if (need < 1 && t->rstream->avail_in == 0) {
-      return give;
-    }
 
     /* If we get to this point, we need to get some more data. */
 
-    /* If zlib has reported the end of a stream, we can't really do any more. */
+    /* If zlib has reported the end of a stream, we can't really do any more.
+     * Nothing was copied on this pass, so say so: answering 1 would tell the
+     * caller a byte it never received is sitting in its buffer. */
     if (t->input_ended) {
-      return 1;
+      return 0;
     }
 
     /* The uncompressed read buffer is empty, so reset the stream fields. */
@@ -205,8 +198,9 @@ thrift_zlib_transport_read_slow (ThriftTransport *transport, gpointer buf,
 
     /* Call inflate() to uncompress some more data. */
     if ((ret = thrift_zlib_transport_read_from_zlib(transport, error)) == 0) {
-      /* no data available from underlying transport */
-      return 1;
+      /* no data available from underlying transport -- again, nothing was
+       * copied on this pass. */
+      return 0;
     } else {
       if (ret < 0) {
         return -1;
@@ -230,15 +224,43 @@ thrift_zlib_transport_read (ThriftTransport *transport, gpointer buf,
     return -1;
   }
 
-  for (i=0; i < len; i=i+ret) {
-    if ((ret = thrift_zlib_transport_read_slow (transport, ((char*)buf)+i, error)) < 0) {
+  for (i=0; i < len; ) {
+    ret = thrift_zlib_transport_read_slow (transport, ((char*)buf)+i, error);
+    if (ret < 0) {
       return ret;
     }
+    /* read_slow() answers with the number of bytes it produced.  Zero means
+     * the stream is finished or the transport underneath has nothing more, so
+     * stop here rather than counting bytes that were never written. */
+    if (ret == 0) {
+      break;
+    }
+
+    i = i + ret;
+
     if (t->input_ended)
       break;
   }
 
-  return len;
+  if (!ttc->countConsumedMessageBytes (transport, i, error)) {
+    return -1;
+  }
+
+  /* Nothing at all could be produced for a caller that asked for something:
+   * the stream is finished.  Report it the way thrift_socket_read() reports a
+   * closed peer, so a fill loop above ends instead of asking again. */
+  if (i == 0 && len > 0) {
+    g_set_error (error, THRIFT_TRANSPORT_ERROR,
+                 THRIFT_TRANSPORT_ERROR_RECEIVE,
+                 "failed to read %u bytes - the compressed stream is finished",
+                 len);
+    return -1;
+  }
+
+  /* Otherwise report what ended up in the caller's buffer.  Answering len when
+   * i < len leaves the caller reading its own uninitialised bytes as protocol
+   * data. */
+  return (gint32) i;
 }
 
 /* implements thrift_transport_read_end 
@@ -266,13 +288,16 @@ thrift_zlib_transport_flush_to_zlib (ThriftTransport *transport, const gint8* bu
       break;
     }
 
-    /* If our output buffer is full, flush to the underlying transport. */
+    /* If our output buffer is full, flush to the underlying transport, then
+     * go on deflating what is left of the input. */
     if (t->wstream->avail_out == 0) {
-      THRIFT_TRANSPORT_GET_CLASS (t->transport)->write (t->transport,
-                                                        t->cwbuf, t->cwbuf_size, error);
+      if (!THRIFT_TRANSPORT_GET_CLASS (t->transport)->write (t->transport,
+                                                             t->cwbuf, t->cwbuf_size,
+                                                             error)) {
+        return FALSE;
+      }
       t->wstream->next_out = t->cwbuf;
       t->wstream->avail_out = t->cwbuf_size;
-      break;
     }
 
     int zlib_rv = deflate(t->wstream, flush);
@@ -408,7 +433,9 @@ thrift_zlib_transport_flush (ThriftTransport *transport, GError **error)
     return FALSE;
   }
 
-  thrift_zlib_transport_flush_to_zlib (transport, (gint8*)t->uwbuf, t->uwpos, Z_NO_FLUSH, error);
+  if (!thrift_zlib_transport_flush_to_zlib (transport, (gint8*)t->uwbuf, t->uwpos, Z_NO_FLUSH, error)) {
+    return FALSE;
+  }
   t->uwpos = 0;
 
   if (t->wstream->avail_out < 6) {
@@ -550,6 +577,8 @@ thrift_zlib_transport_finalize (GObject *object)
   if (t->wstream != NULL) {
     g_free (t->wstream);
   }
+
+  G_OBJECT_CLASS (thrift_zlib_transport_parent_class)->finalize (object);
 }
 
 /* property accessor */

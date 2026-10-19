@@ -748,12 +748,22 @@ uint32_t TJSONProtocol::readJSONEscapeChar(uint16_t* out) {
 uint32_t TJSONProtocol::readJSONString(std::string& str, bool skipContext) {
   uint32_t result = (skipContext ? 0 : context_->read(reader_));
   result += readJSONSyntaxChar(kJSONStringDelimiter);
+  // JSON strings are quote-delimited rather than length-prefixed, so there is no
+  // declared size to pre-check the way TBinaryProtocol::readStringBody() does.
+  // Bound the running byte count instead, so a single string cannot grow past
+  // the limit. The count is measured against the configured maximum rather than
+  // the message size still remaining, which a transport that draws the budget
+  // down as it reads has already reduced by these same bytes.
+  const int64_t maxSize = trans_->getConfiguration()->getMaxMessageSize();
   std::vector<uint16_t> codeunits;
   uint8_t ch;
   str.clear();
   while (true) {
     ch = reader_.read();
     ++result;
+    if (static_cast<int64_t>(result) > maxSize) {
+      throw TTransportException(TTransportException::END_OF_FILE, "MaxMessageSize reached");
+    }
     if (ch == kJSONStringDelimiter) {
       break;
     }
@@ -811,11 +821,10 @@ uint32_t TJSONProtocol::readJSONBase64(std::string& str) {
   auto len = static_cast<uint32_t>(tmp.length());
   str.clear();
   // Ignore padding
-  if (len >= 2)  {
-    uint32_t bound = len - 2;
-    for (uint32_t i = len - 1; i >= bound && b[i] == '='; --i) {
-      --len;
-    }
+  uint32_t padding_count = 0;
+  while (len > 0 && b[len - 1] == '=' && padding_count < 2) {
+    --len;
+    ++padding_count;
   }
   while (len >= 4) {
     base64_decode(b, 4);
@@ -836,6 +845,9 @@ uint32_t TJSONProtocol::readJSONBase64(std::string& str) {
 // a valid JSON numeric character.
 uint32_t TJSONProtocol::readJSONNumericChars(std::string& str) {
   uint32_t result = 0;
+  // Numeric literals are also read char-by-char with no declared length; bound
+  // the running count the same way, and for the same reason.
+  const int64_t maxSize = trans_->getConfiguration()->getMaxMessageSize();
   str.clear();
   while (true) {
     uint8_t ch = reader_.peek();
@@ -845,6 +857,9 @@ uint32_t TJSONProtocol::readJSONNumericChars(std::string& str) {
     reader_.read();
     str += ch;
     ++result;
+    if (static_cast<int64_t>(result) > maxSize) {
+      throw TTransportException(TTransportException::END_OF_FILE, "MaxMessageSize reached");
+    }
   }
   return result;
 }
@@ -1087,7 +1102,10 @@ uint32_t TJSONProtocol::readBool(bool& value) {
 uint32_t TJSONProtocol::readByte(int8_t& byte) {
   auto tmp = (int16_t)byte;
   uint32_t result = readJSONInteger(tmp);
-  assert(tmp < 256);
+  if (tmp > 127 || tmp < -128) {
+    throw TProtocolException(TProtocolException::INVALID_DATA,
+                            "Expected byte value; got " + to_string(tmp));
+  }
   byte = (int8_t)tmp;
   return result;
 }
@@ -1128,8 +1146,8 @@ int TJSONProtocol::getMinSerializedSize(TType type)
 {
   switch (type)
   {
-    case T_STOP: return 0;
-    case T_VOID: return 0;
+    case T_STOP: return 1;  // T_STOP needs to count itself
+    case T_VOID: return 1;  // T_VOID needs to count itself
     case T_BOOL: return 1;  // written as int
     case T_BYTE: return 1;
     case T_DOUBLE: return 1;

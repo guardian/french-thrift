@@ -50,8 +50,8 @@ class TEndpointTransport extends TTransport
 	// Resets RemainingMessageSize to the configured maximum 
 	private function ResetConsumedMessageSize(?newSize : Int64) : Void
 	{
-		// full reset 
-		if (newSize == null)
+		// full reset -- omitted, or negative, which is how every other binding spells it
+		if (newSize == null || newSize < 0)
 		{
 			KnownMessageSize = MaxMessageSize;
 			RemainingMessageSize = MaxMessageSize;
@@ -60,10 +60,17 @@ class TEndpointTransport extends TTransport
 
 		// update only: message size can shrink, but not grow
 		if (newSize > KnownMessageSize)
-			throw new TTransportException(TTransportException.END_OF_FILE, "ResetConsumedMessageSize: MaxMessageSize reached");
+			throw new TTransportException(TTransportException.MESSAGE_SIZE_LIMIT, 'ResetConsumedMessageSize: message size exceeds limit ${MaxMessageSize}');
 
 		KnownMessageSize = newSize;
 		RemainingMessageSize = newSize;
+	}
+
+	// Sets the read budget to newSize, discarding whatever has been consumed against the
+	// previous one; omit newSize to restore the configured maximum.
+	public override function ResetMessageSizeAndConsumedBytes(?newSize : Int64) : Void
+	{
+		ResetConsumedMessageSize(newSize);
 	}
 
 	// Updates RemainingMessageSize to reflect then known real message size (e.g. framed transport).
@@ -78,8 +85,8 @@ class TEndpointTransport extends TTransport
 	// Throws if there are not enough bytes in the input stream to satisfy a read of numBytes bytes of data
 	public override function CheckReadBytesAvailable(numBytes : Int64) : Void
 	{
-		if (RemainingMessageSize < numBytes)
-			throw new TTransportException(TTransportException.END_OF_FILE, 'CheckReadBytesAvailable(${numBytes}): MaxMessageSize reached, only ${RemainingMessageSize} bytes available');
+		if (RemainingMessageSize < numBytes || numBytes < 0)
+			throw new TTransportException(TTransportException.MESSAGE_SIZE_LIMIT, 'CheckReadBytesAvailable(${numBytes}): message size exceeds limit ${MaxMessageSize}, only ${RemainingMessageSize} bytes available');
 	}
 
 	// Consumes numBytes from the RemainingMessageSize.
@@ -92,7 +99,7 @@ class TEndpointTransport extends TTransport
 		else
 		{
 			RemainingMessageSize = 0;
-			throw new TTransportException(TTransportException.END_OF_FILE, 'CountConsumedMessageBytes(${numBytes}): MaxMessageSize reached');
+			throw new TTransportException(TTransportException.MESSAGE_SIZE_LIMIT, 'CountConsumedMessageBytes(${numBytes}): message size exceeds limit ${MaxMessageSize}');
 		}
 	}
 }

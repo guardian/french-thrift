@@ -27,7 +27,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 
 	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/apache/thrift/test/go/src/gen/thrifttest"
@@ -69,7 +69,7 @@ func doUnit(t *testing.T, unit *test_unit) {
 
 		processor, serverTransport, transportFactory, protocolFactory, addr, err := GetServerParams(unit.host, unit.port, unit.domain_socket, unit.transport, unit.protocol, unit.ssl, "../../../keys", handler)
 		if err != nil {
-			t.Errorf("GetServerParams failed: %v", err)
+			t.Fatalf("GetServerParams failed: %v", err)
 		}
 
 		server := thrift.NewTSimpleServer4(processor, serverTransport, transportFactory, protocolFactory)
@@ -79,7 +79,7 @@ func doUnit(t *testing.T, unit *test_unit) {
 		}
 		go server.Serve()
 		defer server.Stop()
-		client, trans, err := StartClient(addr, unit.transport, unit.protocol, unit.ssl)
+		client, trans, err := StartClient(addr, unit.transport, unit.protocol, unit.ssl, "../../../keys")
 		if err != nil {
 			t.Errorf("Unable to start client: %v", err)
 			return

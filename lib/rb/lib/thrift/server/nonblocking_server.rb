@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,26 +7,31 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
-require 'logger'
-require 'thread'
+require "logger"
+require "thread"
 
 module Thrift
   # this class expects to always use a FramedTransport for reading messages
   class NonblockingServer < BaseServer
-    def initialize(processor, server_transport, transport_factory=nil, protocol_factory=nil, num=20, logger=nil)
+    def initialize(processor, server_transport, transport_factory = nil, protocol_factory = nil, num = 20, logger = nil,
+                   max_frame_size: FramedTransport::DEFAULT_MAX_FRAME_SIZE)
       super(processor, server_transport, transport_factory, protocol_factory)
+      unless max_frame_size > 0 && max_frame_size <= FramedTransport::HARD_MAX_FRAME_SIZE
+        raise ArgumentError, "max_frame_size must be > 0 and <= #{FramedTransport::HARD_MAX_FRAME_SIZE}"
+      end
       @num_threads = num
+      @max_frame_size = max_frame_size
       if logger.nil?
         @logger = Logger.new(STDERR)
         @logger.level = Logger::WARN
@@ -52,11 +58,16 @@ module Thrift
             break
           end
           next if rd.nil?
-          socket = @server_transport.accept
+          begin
+            socket = @server_transport.accept
+          rescue => e
+            next if defined?(OpenSSL::SSL::SSLError) && e.is_a?(OpenSSL::SSL::SSLError)
+            raise
+          end
           @logger.debug "Accepted socket: #{socket.inspect}"
           @io_manager.add_connection socket
         end
-      rescue IOError => e
+      rescue IOError
       end
       # we must be shutting down
       @logger.info "#{self} is shutting down, goodbye"
@@ -83,30 +94,35 @@ module Thrift
       if block
         shutdown_proc.call
       else
-        Thread.new &shutdown_proc
+        Thread.new(&shutdown_proc)
       end
     end
 
     private
 
     def start_io_manager
-      iom = IOManager.new(@processor, @server_transport, @transport_factory, @protocol_factory, @num_threads, @logger)
+      iom = IOManager.new(
+        @processor, @server_transport, @transport_factory, @protocol_factory, @num_threads, @logger,
+        max_frame_size: @max_frame_size,
+      )
       iom.spawn
       iom
     end
 
     class IOManager # :nodoc:
       DEFAULT_BUFFER = 2**20
-      
-      def initialize(processor, server_transport, transport_factory, protocol_factory, num, logger)
+
+      def initialize(processor, server_transport, transport_factory, protocol_factory, num, logger,
+                     max_frame_size: FramedTransport::DEFAULT_MAX_FRAME_SIZE)
         @processor = processor
         @server_transport = server_transport
         @transport_factory = transport_factory
         @protocol_factory = protocol_factory
         @num_threads = num
         @logger = logger
+        @max_frame_size = max_frame_size
         @connections = []
-        @buffers = Hash.new { |h,k| h[k] = '' }
+        @buffers = Hash.new { |h, k| h[k] = Bytes.empty_byte_buffer }
         @signal_queue = Queue.new
         @signal_pipes = IO.pipe
         @signal_pipes[1].sync = true
@@ -138,11 +154,16 @@ module Thrift
 
       def ensure_closed
         kill_worker_threads if @worker_threads
-        @iom_thread.kill
+        if @iom_thread&.alive?
+          @iom_thread.kill
+          @iom_thread.join
+        end
+        close_connections
+        close_signal_pipes
       end
 
       private
-      
+
       def run
         spin_worker_threads
 
@@ -152,15 +173,13 @@ module Thrift
             break if read_signals == :shutdown
           end
           rd.each do |fd|
-            begin
-              if fd.handle.eof?
-                remove_connection fd
-              else
-                read_connection fd
-              end
-            rescue Errno::ECONNRESET
+            if fd.handle.eof?
               remove_connection fd
+            else
+              read_connection fd
             end
+          rescue Errno::ECONNRESET
+            remove_connection fd
           end
         end
         join_worker_threads(@shutdown_timeout)
@@ -169,8 +188,22 @@ module Thrift
       end
 
       def read_connection(fd)
-        @buffers[fd] << fd.read(DEFAULT_BUFFER)
-        while(frame = slice_frame!(@buffers[fd]))
+        buf = @buffers[fd]
+        buf << fd.read(DEFAULT_BUFFER)
+        while buf.length >= 4
+          # Refuse the size before collecting the frame: the four-byte length
+          # is read here and the bytes are then buffered as they arrive, for as
+          # long as the declared length allows. FramedTransport applies the
+          # same maximum to the frame the worker later reads back.
+          size = buf.unpack1("N")
+          if size > @max_frame_size
+            @logger.error "Frame size #{size} exceeds maximum #{@max_frame_size}, closing connection"
+            fd.close
+            remove_connection fd
+            break
+          end
+          frame = slice_frame!(buf)
+          break if frame.nil?
           @logger.debug "#{self} is processing a frame"
           @worker_queue.push [:frame, fd, frame]
         end
@@ -246,9 +279,25 @@ module Thrift
         @worker_threads.clear
       end
 
+      def close_connections
+        @connections.each do |fd|
+          fd.close
+        rescue IOError, SystemCallError, TransportException
+        end
+        @connections.clear
+        @buffers.clear
+      end
+
+      def close_signal_pipes
+        @signal_pipes.each do |pipe|
+          pipe.close unless pipe.closed?
+        rescue IOError
+        end
+      end
+
       def slice_frame!(buf)
         if buf.length >= 4
-          size = buf.unpack('N').first
+          size = buf.unpack1("N")
           if buf.length >= size + 4
             buf.slice!(0, size + 4)
           else

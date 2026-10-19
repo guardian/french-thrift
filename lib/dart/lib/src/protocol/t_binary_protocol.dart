@@ -43,8 +43,10 @@ class TBinaryProtocol extends TProtocol {
   final bool strictWrite;
 
   TBinaryProtocol(TTransport transport,
-      {this.strictRead = false, this.strictWrite = true})
-      : super(transport);
+      {this.strictRead = false,
+      this.strictWrite = true,
+      int maxStringSize = defaultMaxStringSize})
+      : super(transport, maxStringSize: maxStringSize);
 
   /// write
   @override
@@ -114,7 +116,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeBool(bool b) {
-    if (b == null) b = false;
     writeByte(b ? 1 : 0);
   }
 
@@ -122,7 +123,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeByte(int byte) {
-    if (byte == null) byte = 0;
     _byteOut.setUint8(0, byte);
     transport.write(_byteOut.buffer.asUint8List(), 0, 1);
   }
@@ -131,7 +131,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeI16(int i16) {
-    if (i16 == null) i16 = 0;
     _i16Out.setInt16(0, i16);
     transport.write(_i16Out.buffer.asUint8List(), 0, 2);
   }
@@ -140,7 +139,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeI32(int i32) {
-    if (i32 == null) i32 = 0;
     _i32Out.setInt32(0, i32);
     transport.write(_i32Out.buffer.asUint8List(), 0, 4);
   }
@@ -149,7 +147,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeI64(int i64) {
-    if (i64 == null) i64 = 0;
     var i = Int64(i64);
     var bts = i.toBytes();
     for (var j = 0; j < 8; j++) {
@@ -160,7 +157,7 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeString(String s) {
-    var bytes = s != null ? _utf8Codec.encode(s) : Uint8List.fromList([]);
+    var bytes = _utf8Codec.encode(s);
     writeI32(bytes.length);
     transport.write(bytes, 0, bytes.length);
   }
@@ -169,7 +166,6 @@ class TBinaryProtocol extends TProtocol {
 
   @override
   void writeDouble(double d) {
-    if (d == null) d = 0.0;
     _doubleOut.setFloat64(0, d);
     transport.write(_doubleOut.buffer.asUint8List(), 0, 8);
   }
@@ -203,6 +199,10 @@ class TBinaryProtocol extends TProtocol {
         throw TProtocolError(TProtocolErrorType.BAD_VERSION,
             "Missing version in readMessageBegin");
       }
+      // The pre-versioned header names its own length, and it is the first
+      // thing read off a connection. readString() holds every other declared
+      // length to maxStringSize; this one has to go through the same check.
+      _checkStringSize(size);
       name = _readString(size);
       type = readByte();
       seqid = readI32();
@@ -238,7 +238,9 @@ class TBinaryProtocol extends TProtocol {
     int keyType = readByte();
     int valueType = readByte();
     int length = readI32();
-
+    if (length < 0) {
+      throw TProtocolError(TProtocolErrorType.NEGATIVE_SIZE, 'Negative size');
+    }
     return TMap(keyType, valueType, length);
   }
 
@@ -249,7 +251,9 @@ class TBinaryProtocol extends TProtocol {
   TList readListBegin() {
     int elementType = readByte();
     int length = readI32();
-
+    if (length < 0) {
+      throw TProtocolError(TProtocolErrorType.NEGATIVE_SIZE, 'Negative size');
+    }
     return TList(elementType, length);
   }
 
@@ -260,7 +264,9 @@ class TBinaryProtocol extends TProtocol {
   TSet readSetBegin() {
     int elementType = readByte();
     int length = readI32();
-
+    if (length < 0) {
+      throw TProtocolError(TProtocolErrorType.NEGATIVE_SIZE, 'Negative size');
+    }
     return TSet(elementType, length);
   }
 
@@ -314,7 +320,21 @@ class TBinaryProtocol extends TProtocol {
   @override
   String readString() {
     int size = readI32();
+    if (size < 0) {
+      throw TProtocolError(TProtocolErrorType.NEGATIVE_SIZE, 'Negative size');
+    }
+    _checkStringSize(size);
     return _readString(size);
+  }
+
+  /// Refuses a declared length before it is allocated: size is four bytes the
+  /// peer chose, and Uint8List(size) commits all of it before readAll blocks
+  /// for the bytes themselves.
+  void _checkStringSize(int size) {
+    if (size > maxStringSize) {
+      throw TProtocolError(TProtocolErrorType.SIZE_LIMIT,
+          'Length ($size) larger than max length ($maxStringSize)');
+    }
   }
 
   String _readString(int size) {
@@ -326,6 +346,10 @@ class TBinaryProtocol extends TProtocol {
   @override
   Uint8List readBinary() {
     int length = readI32();
+    if (length < 0) {
+      throw TProtocolError(TProtocolErrorType.NEGATIVE_SIZE, 'Negative size');
+    }
+    _checkStringSize(length);
     Uint8List binaryIn = Uint8List(length);
     transport.readAll(binaryIn, 0, length);
     return binaryIn;

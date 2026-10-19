@@ -48,7 +48,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    *   stringSizeLimit = If positive, the string length is limited to the
    *     given number of bytes.
    */
-  this(Transport trans, int containerSizeLimit = 0, int stringSizeLimit = 0) {
+  this(Transport trans, int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
     trans_ = trans;
     this.containerSizeLimit = containerSizeLimit;
     this.stringSizeLimit = stringSizeLimit;
@@ -75,7 +75,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    * data is received. If the limit is exceeded, a SIZE_LIMIT-type
    * TProtocolException is thrown.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_CONTAINER_SIZE_LIMIT.
    */
   int containerSizeLimit;
 
@@ -90,7 +90,7 @@ final class TJsonProtocol(Transport = TTransport) if (
    * Note: For binary data, the limit applies to the length of the
    * Base64-encoded string data, not the resulting byte array.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_STRING_SIZE_LIMIT.
    */
   int stringSizeLimit;
 
@@ -760,10 +760,10 @@ private:
  * TJsonProtocol construction helper to avoid having to explicitly specify
  * the transport type, i.e. to allow the constructor being called using IFTI
  * (see $(LINK2 http://d.puremagic.com/issues/show_bug.cgi?id=6082, D Bugzilla
- * enhancement requet 6082)).
+ * enhancement request 6082)).
  */
 TJsonProtocol!Transport tJsonProtocol(Transport)(Transport trans,
-  int containerSizeLimit = 0, int stringSizeLimit = 0
+  int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT
 ) if (isTTransport!Transport) {
   return new TJsonProtocol!Transport(trans, containerSizeLimit, stringSizeLimit);
 }
@@ -830,6 +830,9 @@ unittest {
   import thrift.internal.test.protocol;
   testContainerSizeLimit!(TJsonProtocol!())();
   testStringSizeLimit!(TJsonProtocol!())();
+  testSizeLimitDefaults!(TJsonProtocol!())();
+  testFactorySizeLimits!(TJsonProtocol!(), TJsonProtocolFactory!())();
+  testSkipDepthLimit!(TJsonProtocol!())();
 }
 
 /**
@@ -845,17 +848,27 @@ unittest {
 class TJsonProtocolFactory(Transports...) if (
   allSatisfy!(isTTransport, Transports)
 ) : TProtocolFactory {
+  ///
+  this(int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
+    containerSizeLimit_ = containerSizeLimit;
+    stringSizeLimit_ = stringSizeLimit;
+  }
+
   TProtocol getProtocol(TTransport trans) const {
     foreach (Transport; TypeTuple!(Transports, TTransport)) {
       auto concreteTrans = cast(Transport)trans;
       if (concreteTrans) {
-        auto p = new TJsonProtocol!Transport(concreteTrans);
+        auto p = new TJsonProtocol!Transport(concreteTrans,
+          containerSizeLimit_, stringSizeLimit_);
         return p;
       }
     }
     throw new TProtocolException(
       "Passed null transport to TJsonProtocolFactoy.");
   }
+
+  int containerSizeLimit_;
+  int stringSizeLimit_;
 }
 
 private {

@@ -1,5 +1,6 @@
 # encoding: ascii-8bit
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -7,9 +8,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -20,14 +21,29 @@
 
 module Thrift
   class FramedTransport < BaseTransport
-    def initialize(transport, read=true, write=true)
+    # The largest frame accepted by default. The value the Java, netstd, C++
+    # and Python framed transports use.
+    DEFAULT_MAX_FRAME_SIZE = 16_384_000
+
+    # The frame length field is 30 bits, so no frame can usefully be larger
+    # than this whatever a caller configures.
+    HARD_MAX_FRAME_SIZE = 0x3FFFFFFF
+
+    def initialize(transport, read = true, write = true, max_frame_size: DEFAULT_MAX_FRAME_SIZE)
+      unless max_frame_size > 0 && max_frame_size <= HARD_MAX_FRAME_SIZE
+        raise ArgumentError, "max_frame_size must be > 0 and <= #{HARD_MAX_FRAME_SIZE}"
+      end
+
       @transport = transport
       @rbuf      = Bytes.empty_byte_buffer
       @wbuf      = Bytes.empty_byte_buffer
       @read      = read
       @write     = write
-      @index      = 0
+      @index     = 0
+      @max_frame_size = max_frame_size
     end
+
+    attr_reader :max_frame_size
 
     def open?
       @transport.open?
@@ -53,14 +69,14 @@ module Thrift
     end
 
     def read_byte
-      return @transport.read_byte() unless @read
+      return @transport.read_byte unless @read
 
       read_frame if @index >= @rbuf.length
 
       # The read buffer has some data now, read a single byte. Using get_string_byte() avoids
       # allocating a temp string of size 1 unnecessarily.
       @index += 1
-      return Bytes.get_string_byte(@rbuf, @index - 1)
+      Bytes.get_string_byte(@rbuf, @index - 1)
     end
 
     def read_into_buffer(buffer, size)
@@ -77,7 +93,7 @@ module Thrift
       i
     end
 
-    def write(buf, sz=nil)
+    def write(buf, sz = nil)
       return @transport.write(buf) unless @write
 
       buf = Bytes.force_binary_encoding(buf)
@@ -91,7 +107,7 @@ module Thrift
     def flush
       return @transport.flush unless @write
 
-      out = [@wbuf.length].pack('N')
+      out = [@wbuf.length].pack("N")
       # Array#pack should return a BINARY encoded String, so it shouldn't be necessary to force encoding
       out << @wbuf
       @transport.write(out)
@@ -100,13 +116,23 @@ module Thrift
     end
 
     def to_s
-      "framed(#{@transport.to_s})"
+      "framed(#{@transport})"
     end
 
     private
 
     def read_frame
-      sz = @transport.read_all(4).unpack('N').first
+      sz = @transport.read_all(4).unpack1("N")
+      raise TransportException.new(TransportException::END_OF_FILE, "Cannot read from a zero-length frame") if sz == 0
+
+      # Checked before the read, not after: read_all accumulates whatever the
+      # four bytes declare while the peer decides how much of it to send.
+      if sz > @max_frame_size
+        raise TransportException.new(
+          TransportException::UNKNOWN,
+          "Frame size #{sz} exceeds maximum #{@max_frame_size}",
+        )
+      end
 
       @index = 0
       @rbuf = @transport.read_all(sz)
@@ -115,9 +141,9 @@ module Thrift
 
   class FramedTransportFactory < BaseTransportFactory
     def get_transport(transport)
-      return FramedTransport.new(transport)
+      FramedTransport.new(transport)
     end
-    
+
     def to_s
       "framed"
     end

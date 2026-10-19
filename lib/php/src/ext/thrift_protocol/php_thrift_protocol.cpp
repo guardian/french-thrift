@@ -23,6 +23,7 @@
 #include "php.h"
 #include "zend_interfaces.h"
 #include "zend_exceptions.h"
+#include "zend_smart_str.h"
 #include "php_thrift_protocol.h"
 
 #if PHP_VERSION_ID >= 70000
@@ -33,6 +34,14 @@
 #include <cstdint>
 #include <stdexcept>
 #include <algorithm>
+
+// Wire-supplied string lengths are read in steps of this size, so the buffer
+// grows with the data that actually arrives.
+#define STRING_READ_CHUNK_SIZE 8192
+
+// How deeply structs and containers may nest while being read, matching the
+// limit the PHP library applies to generated read() implementations.
+#define MAX_RECURSION_DEPTH 64
 
 #ifndef bswap_64
 #define	bswap_64(x)     (((uint64_t)(x) << 56) | \
@@ -72,6 +81,7 @@ enum TType {
   T_MAP        = 13,
   T_SET        = 14,
   T_LIST       = 15,
+  T_UUID       = 16,
   T_UTF8       = 16,
   T_UTF16      = 17
 };
@@ -83,7 +93,63 @@ const int8_t T_REPLY = 2;
 const int8_t T_EXCEPTION = 3;
 // tprotocolexception
 const int INVALID_DATA = 1;
+const int SIZE_LIMIT = 3;
 const int BAD_VERSION = 4;
+
+static inline int uuid_hex_nibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + (c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + (c - 'A');
+  }
+  return -1;
+}
+
+static bool parse_uuid_string(const char* value, size_t len, uint8_t (&uuid)[16]) {
+  size_t nibble_index = 0;
+  int high_nibble = -1;
+
+  for (size_t i = 0; i < len; ++i) {
+    const char c = value[i];
+    if (c == '-' || c == '{' || c == '}') {
+      continue;
+    }
+
+    const int nibble = uuid_hex_nibble(c);
+    if (nibble < 0) {
+      return false;
+    }
+
+    if (high_nibble < 0) {
+      high_nibble = nibble;
+    } else {
+      if (nibble_index >= sizeof(uuid)) {
+        return false;
+      }
+      uuid[nibble_index++] = static_cast<uint8_t>((high_nibble << 4) | nibble);
+      high_nibble = -1;
+    }
+  }
+
+  return nibble_index == sizeof(uuid) && high_nibble < 0;
+}
+
+static void format_uuid_string(const uint8_t (&uuid)[16], char (&buffer)[37]) {
+  static const char hex[] = "0123456789abcdef";
+  size_t out = 0;
+  for (size_t i = 0; i < sizeof(uuid); ++i) {
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      buffer[out++] = '-';
+    }
+    buffer[out++] = hex[(uuid[i] >> 4) & 0x0f];
+    buffer[out++] = hex[uuid[i] & 0x0f];
+  }
+  buffer[out] = '\0';
+}
 
 zend_module_entry thrift_protocol_module_entry = {
   STANDARD_MODULE_HEADER,
@@ -268,6 +334,14 @@ protected:
 class PHPInputTransport : public PHPTransport {
 public:
   PHPInputTransport(zval* _p, size_t _buffer_size = 8192) : PHPTransport(_p, _buffer_size) {
+    max_string_size = read_max_string_size(_p);
+  }
+
+  // The longest string or binary field the protocol reads, as
+  // TBinaryProtocol::$maxStringSize holds it. 0 (or less) means no limit, and
+  // so does a protocol object that has no such property.
+  zend_long maxStringSize() const {
+    return max_string_size;
   }
 
   ~PHPInputTransport() {
@@ -349,6 +423,24 @@ public:
   }
 
 protected:
+  static zend_long read_max_string_size(zval* _p) {
+    zval rv;
+    zval* max = zend_read_property(Z_OBJCE_P(_p), Z4_OBJ_P(_p), ZEND_STRL("maxStringSize"), true, &rv);
+
+    if (EG(exception)) {
+      zend_object *ex = EG(exception);
+      EG(exception) = nullptr;
+      throw PHPExceptionWrapper(ex);
+    }
+
+    if (max == nullptr) {
+      return 0;
+    }
+    ZVAL_DEREF(max);
+
+    return Z_TYPE_P(max) == IS_LONG ? Z_LVAL_P(max) : 0;
+  }
+
   void refill() {
     assert(buffer_used == 0);
     zval retval;
@@ -380,10 +472,12 @@ protected:
     buffer_ptr = buffer;
   }
 
+  zend_long max_string_size;
 };
 
 static
-void binary_deserialize_spec(zval* zthis, PHPInputTransport& transport, HashTable* spec);
+void binary_deserialize_spec(zval* zthis, PHPInputTransport& transport, HashTable* spec,
+                             int depth);
 static
 void binary_serialize_spec(zval* zthis, PHPOutputTransport& transport, HashTable* spec);
 static
@@ -432,14 +526,45 @@ void throw_tprotocolexception(const char* what, long errorcode) {
   throw PHPExceptionWrapper(&ex);
 }
 
+// A string or binary field carries its length on the wire. Hold it to the
+// protocol's maximum string size before any of the bytes are read, as
+// TProtocol::checkStringSize() does on the PHP side.
+static
+void check_string_size(const PHPInputTransport& transport, int64_t len) {
+  const zend_long max = transport.maxStringSize();
+  if (max > 0 && len > (int64_t)max) {
+    char errbuf[128];
+    snprintf(errbuf, sizeof(errbuf), "String size (%lld) larger than the maximum (%lld)",
+             (long long)len, (long long)max);
+    throw_tprotocolexception(errbuf, SIZE_LIMIT);
+  }
+}
+
 // Sets EG(exception), call this and then RETURN_NULL();
 static
 void throw_zend_exception_from_std_exception(const std::exception& ex) {
-  zend_throw_exception(zend_exception_get_default(), const_cast<char*>(ex.what()), 0);
+  zend_throw_exception(zend_ce_exception, const_cast<char*>(ex.what()), 0);
+}
+
+// The element type of a container is read from the wire.  T_STOP and T_VOID
+// consume no bytes, so accepting them as an element type lets a wire-declared
+// element count drive the read loop with no matching input on the wire.  Every
+// other element type reads at least one byte, so the wire itself bounds the
+// loop.  Reject the two zero-byte types, as the interpreted PHP protocol
+// (TProtocol::skip) and the other protocol accelerators already do.
+static inline
+void validate_container_element_type(int8_t thrift_typeID) {
+  if (thrift_typeID == T_STOP || thrift_typeID == T_VOID) {
+    throw_tprotocolexception("Invalid container element type", INVALID_DATA);
+  }
 }
 
 static
-void skip_element(long thrift_typeID, PHPInputTransport& transport) {
+void skip_element(long thrift_typeID, PHPInputTransport& transport, int depth) {
+  if (depth > MAX_RECURSION_DEPTH) {
+    throw_tprotocolexception("Maximum recursion depth exceeded", INVALID_DATA);
+  }
+
   switch (thrift_typeID) {
     case T_STOP:
     case T_VOID:
@@ -449,7 +574,7 @@ void skip_element(long thrift_typeID, PHPInputTransport& transport) {
         int8_t ttype = transport.readI8(); // get field type
         if (ttype == T_STOP) break;
         transport.skip(2); // skip field number, I16
-        skip_element(ttype, transport); // skip field payload
+        skip_element(ttype, transport, depth + 1); // skip field payload
       }
       return;
     case T_BOOL:
@@ -467,28 +592,34 @@ void skip_element(long thrift_typeID, PHPInputTransport& transport) {
     case T_DOUBLE:
       transport.skip(8);
       return;
+    case T_UUID:
+      transport.skip(16);
+      return;
     //case T_UTF7: // aliases T_STRING
-    case T_UTF8:
     case T_UTF16:
     case T_STRING: {
       uint32_t len = transport.readU32();
+      check_string_size(transport, len);
       transport.skip(len);
       } return;
     case T_MAP: {
       int8_t keytype = transport.readI8();
       int8_t valtype = transport.readI8();
+      validate_container_element_type(keytype);
+      validate_container_element_type(valtype);
       uint32_t size = transport.readU32();
       for (uint32_t i = 0; i < size; ++i) {
-        skip_element(keytype, transport);
-        skip_element(valtype, transport);
+        skip_element(keytype, transport, depth + 1);
+        skip_element(valtype, transport, depth + 1);
       }
     } return;
     case T_LIST:
     case T_SET: {
       int8_t valtype = transport.readI8();
+      validate_container_element_type(valtype);
       uint32_t size = transport.readU32();
       for (uint32_t i = 0; i < size; ++i) {
-        skip_element(valtype, transport);
+        skip_element(valtype, transport, depth + 1);
       }
     } return;
   };
@@ -504,7 +635,12 @@ bool zval_is_bool(zval* v) {
 }
 
 static
-void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval* return_value, HashTable* fieldspec) {
+void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval* return_value,
+                        HashTable* fieldspec, int depth) {
+  if (depth > MAX_RECURSION_DEPTH) {
+    throw_tprotocolexception("Maximum recursion depth exceeded", INVALID_DATA);
+  }
+
   ZVAL_NULL(return_value);
 
   switch (thrift_typeID) {
@@ -516,7 +652,7 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
       zval* val_ptr = zend_hash_str_find(fieldspec, "class", sizeof("class")-1);
       if (val_ptr == nullptr) {
         throw_tprotocolexception("no class type in spec", INVALID_DATA);
-        skip_element(T_STRUCT, transport);
+        skip_element(T_STRUCT, transport, depth + 1);
         RETURN_NULL();
       }
 
@@ -525,11 +661,11 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
       createObject(structType, return_value);
       if (Z_TYPE_P(return_value) == IS_NULL) {
         // unable to create class entry
-        skip_element(T_STRUCT, transport);
+        skip_element(T_STRUCT, transport, depth + 1);
         RETURN_NULL();
       }
 
-      zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), "_TSPEC", sizeof("_TSPEC")-1, false);
+      zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), ZEND_STRL("tspec"), false);
       ZVAL_DEREF(spec);
       if (EG(exception)) {
         zend_object *ex = EG(exception);
@@ -542,7 +678,7 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
         throw_tprotocolexception(errbuf, INVALID_DATA);
         RETURN_NULL();
       }
-      binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec));
+      binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec), depth + 1);
       return;
     } break;
     case T_BOOL: {
@@ -582,37 +718,72 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
       RETURN_DOUBLE(a.d);
     }
     //case T_UTF7: // aliases T_STRING
-    case T_UTF8:
     case T_UTF16:
     case T_STRING: {
       uint32_t size = transport.readU32();
+      check_string_size(transport, size);
       if (size) {
-        char strbuf[size+1];
-        transport.readBytes(strbuf, size);
-        strbuf[size] = '\0';
-        ZVAL_STRINGL(return_value, strbuf, size);
+        // The length comes off the wire, so the result is built on the heap as
+        // the bytes actually arrive: nothing is placed on the stack, the length
+        // takes part in no expression that can wrap, and a length the peer does
+        // not back with data costs only what it does send.
+        smart_str strbuf = {0};
+        try {
+          char chunk[STRING_READ_CHUNK_SIZE];
+          uint32_t remaining = size;
+          while (remaining > 0) {
+            uint32_t chunk_len = (std::min)(remaining, (uint32_t)sizeof(chunk));
+            transport.readBytes(chunk, chunk_len);
+            smart_str_appendl(&strbuf, chunk, chunk_len);
+            remaining -= chunk_len;
+          }
+        } catch (...) {
+          smart_str_free(&strbuf);
+          throw;
+        }
+        smart_str_0(&strbuf);
+        ZVAL_NEW_STR(return_value, strbuf.s);
       } else {
         ZVAL_EMPTY_STRING(return_value);
       }
       return;
     }
+    case T_UUID: {
+      uint8_t uuid[16];
+      char strbuf[37];
+      transport.readBytes(uuid, sizeof(uuid));
+      format_uuid_string(uuid, strbuf);
+      ZVAL_STRINGL(return_value, strbuf, sizeof(strbuf) - 1);
+      return;
+    }
     case T_MAP: { // array of key -> value
       uint8_t types[2];
       transport.readBytes(types, 2);
+      validate_container_element_type(types[0]);
+      validate_container_element_type(types[1]);
       uint32_t size = transport.readU32();
       array_init(return_value);
 
       zval *val_ptr;
       val_ptr = zend_hash_str_find(fieldspec, "key", sizeof("key")-1);
+      // The element types are read from the wire, so the declared type can name
+      // a container the field spec does not describe. Reject that here rather
+      // than dereferencing the missing entry, as the struct case already does.
+      if (val_ptr == nullptr) {
+        throw_tprotocolexception("no key type in spec", INVALID_DATA);
+      }
       HashTable* keyspec = Z_ARRVAL_P(val_ptr);
       val_ptr = zend_hash_str_find(fieldspec, "val", sizeof("val")-1);
+      if (val_ptr == nullptr) {
+        throw_tprotocolexception("no val type in spec", INVALID_DATA);
+      }
       HashTable* valspec = Z_ARRVAL_P(val_ptr);
 
       for (uint32_t s = 0; s < size; ++s) {
         zval key, value;
 
-        binary_deserialize(types[0], transport, &key, keyspec);
-        binary_deserialize(types[1], transport, &value, valspec);
+        binary_deserialize(types[0], transport, &key, keyspec, depth + 1);
+        binary_deserialize(types[1], transport, &value, valspec, depth + 1);
         if (Z_TYPE(key) == IS_LONG) {
           zend_hash_index_update(Z_ARR_P(return_value), Z_LVAL(key), &value);
         } else {
@@ -625,14 +796,18 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
     }
     case T_LIST: { // array with autogenerated numeric keys
       int8_t type = transport.readI8();
+      validate_container_element_type(type);
       uint32_t size = transport.readU32();
       zval *val_ptr = zend_hash_str_find(fieldspec, "elem", sizeof("elem")-1);
+      if (val_ptr == nullptr) {
+        throw_tprotocolexception("no elem type in spec", INVALID_DATA);
+      }
       HashTable* elemspec = Z_ARRVAL_P(val_ptr);
 
       array_init(return_value);
       for (uint32_t s = 0; s < size; ++s) {
         zval value;
-        binary_deserialize(type, transport, &value, elemspec);
+        binary_deserialize(type, transport, &value, elemspec, depth + 1);
         zend_hash_next_index_insert(Z_ARR_P(return_value), &value);
       }
       return;
@@ -641,9 +816,13 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
       uint8_t type;
       uint32_t size;
       transport.readBytes(&type, 1);
+      validate_container_element_type(type);
       transport.readBytes(&size, 4);
       size = ntohl(size);
       zval *val_ptr = zend_hash_str_find(fieldspec, "elem", sizeof("elem")-1);
+      if (val_ptr == nullptr) {
+        throw_tprotocolexception("no elem type in spec", INVALID_DATA);
+      }
       HashTable* elemspec = Z_ARRVAL_P(val_ptr);
 
       array_init(return_value);
@@ -652,7 +831,7 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
         zval key, value;
         ZVAL_TRUE(&value);
 
-        binary_deserialize(type, transport, &key, elemspec);
+        binary_deserialize(type, transport, &key, elemspec, depth + 1);
 
         if (Z_TYPE(key) == IS_LONG) {
           zend_hash_index_update(Z_ARR_P(return_value), Z_LVAL(key), &value);
@@ -673,7 +852,7 @@ void binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport, zval
 
 static
 void binary_serialize_hashtable_key(int8_t keytype, PHPOutputTransport& transport, HashTable* ht, HashPosition& ht_pos, HashTable* spec) {
-  bool keytype_is_numeric = (!((keytype == T_STRING) || (keytype == T_UTF8) || (keytype == T_UTF16)));
+  bool keytype_is_numeric = (!((keytype == T_STRING) || (keytype == T_UUID) || (keytype == T_UTF16)));
 
   zend_string* key;
   uint key_len;
@@ -705,7 +884,7 @@ void binary_serialize(int8_t thrift_typeID, PHPOutputTransport& transport, zval*
       if (Z_TYPE_P(value) != IS_OBJECT) {
         throw_tprotocolexception("Attempt to send non-object type as a T_STRUCT", INVALID_DATA);
       }
-      zval* spec = zend_read_static_property(Z_OBJCE_P(value), "_TSPEC", sizeof("_TSPEC")-1, true);
+      zval* spec = zend_read_static_property(Z_OBJCE_P(value), ZEND_STRL("tspec"), true);
       if (spec && Z_TYPE_P(spec) == IS_REFERENCE) {
         ZVAL_DEREF(spec);
       }
@@ -751,7 +930,15 @@ void binary_serialize(int8_t thrift_typeID, PHPOutputTransport& transport, zval*
       a.d = Z_DVAL_P(value);
       transport.writeI64(a.c);
     } return;
-    case T_UTF8:
+    case T_UUID: {
+      if (Z_TYPE_P(value) != IS_STRING) convert_to_string(value);
+      uint8_t uuid[16];
+      if (!parse_uuid_string(Z_STRVAL_P(value), Z_STRLEN_P(value), uuid)) {
+        throw_tprotocolexception("Attempt to send an invalid UUID string", INVALID_DATA);
+      }
+      transport.write(reinterpret_cast<const char*>(uuid), sizeof(uuid));
+      return;
+    }
     case T_UTF16:
     case T_STRING:
       if (Z_TYPE_P(value) != IS_STRING) convert_to_string(value);
@@ -896,7 +1083,7 @@ void validate_thrift_object(zval* object) {
     if (is_validate) {
       ZVAL_DEREF(is_validate);
     }
-    zval* spec = zend_read_static_property(object_class_entry, "_TSPEC", sizeof("_TSPEC")-1, true);
+    zval* spec = zend_read_static_property(object_class_entry, ZEND_STRL("tspec"), true);
     if (spec) {
       ZVAL_DEREF(spec);
     }
@@ -933,7 +1120,12 @@ void validate_thrift_object(zval* object) {
 }
 
 static
-void binary_deserialize_spec(zval* zthis, PHPInputTransport& transport, HashTable* spec) {
+void binary_deserialize_spec(zval* zthis, PHPInputTransport& transport, HashTable* spec,
+                             int depth) {
+  if (depth > MAX_RECURSION_DEPTH) {
+    throw_tprotocolexception("Maximum recursion depth exceeded", INVALID_DATA);
+  }
+
   // SET and LIST have 'elem' => array('type', [optional] 'class')
   // MAP has 'val' => array('type', [optiona] 'class')
   zend_class_entry* ce = Z_OBJCE_P(zthis);
@@ -961,15 +1153,15 @@ void binary_deserialize_spec(zval* zthis, PHPInputTransport& transport, HashTabl
         zval rv;
         ZVAL_UNDEF(&rv);
 
-        binary_deserialize(ttype, transport, &rv, fieldspec);
+        binary_deserialize(ttype, transport, &rv, fieldspec, depth + 1);
         zend_update_property(ce, Z4_OBJ_P(zthis), varname, strlen(varname), &rv);
 
         zval_ptr_dtor(&rv);
       } else {
-        skip_element(ttype, transport);
+        skip_element(ttype, transport, depth + 1);
       }
     } else {
-      skip_element(ttype, transport);
+      skip_element(ttype, transport, depth + 1);
     }
   }
 }
@@ -1032,7 +1224,7 @@ PHP_FUNCTION(thrift_protocol_write_binary) {
   }
 
   try {
-    zval* spec = zend_read_static_property(Z_OBJCE_P(request_struct), "_TSPEC", sizeof("_TSPEC")-1, true);
+    zval* spec = zend_read_static_property(Z_OBJCE_P(request_struct), ZEND_STRL("tspec"), true);
     if (spec) {
       ZVAL_DEREF(spec);
     }
@@ -1083,6 +1275,7 @@ PHP_FUNCTION(thrift_protocol_read_binary) {
       }
       messageType = (sz & 0x000000ff);
       int32_t namelen = transport.readI32();
+      check_string_size(transport, namelen);
       // skip the name string and the sequence ID, we don't care about those
       transport.skip(namelen + 4);
     } else {
@@ -1090,6 +1283,7 @@ PHP_FUNCTION(thrift_protocol_read_binary) {
         throw_tprotocolexception("No version identifier... old protocol client in strict mode?", BAD_VERSION);
       } else {
         // Handle pre-versioned input
+        check_string_size(transport, sz);
         transport.skip(sz); // skip string body
         messageType = transport.readI8();
         transport.skip(4); // skip sequence number
@@ -1099,26 +1293,26 @@ PHP_FUNCTION(thrift_protocol_read_binary) {
     if (messageType == T_EXCEPTION) {
       zval ex;
       createObject("\\Thrift\\Exception\\TApplicationException", &ex);
-      zval* spec = zend_read_static_property(Z_OBJCE(ex), "_TSPEC", sizeof("_TPSEC")-1, false);
+      zval* spec = zend_read_static_property(Z_OBJCE(ex), ZEND_STRL("tspec"), false);
       ZVAL_DEREF(spec);
       if (EG(exception)) {
         zend_object *ex = EG(exception);
         EG(exception) = nullptr;
         throw PHPExceptionWrapper(ex);
       }
-      binary_deserialize_spec(&ex, transport, Z_ARRVAL_P(spec));
+      binary_deserialize_spec(&ex, transport, Z_ARRVAL_P(spec), 0);
       throw PHPExceptionWrapper(&ex);
     }
 
     createObject(ZSTR_VAL(obj_typename), return_value);
-    zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), "_TSPEC", sizeof("_TSPEC")-1, true);
+    zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), ZEND_STRL("tspec"), true);
     if (spec) {
       ZVAL_DEREF(spec);
     }
     if (!spec || Z_TYPE_P(spec) != IS_ARRAY) {
       throw_tprotocolexception("Attempt deserialize to non-Thrift object", INVALID_DATA);
     }
-    binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec));
+    binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec), 0);
   } catch (const PHPExceptionWrapper& ex) {
     // ex will be destructed, so copy to a zval that zend_throw_exception_object can ownership of
     zval myex;
@@ -1147,9 +1341,9 @@ PHP_FUNCTION(thrift_protocol_read_binary_after_message_begin) {
     PHPInputTransport transport(protocol, buffer_size);
 
     createObject(ZSTR_VAL(obj_typename), return_value);
-    zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), "_TSPEC", sizeof("_TSPEC")-1, false);
+    zval* spec = zend_read_static_property(Z_OBJCE_P(return_value), ZEND_STRL("tspec"), false);
     ZVAL_DEREF(spec);
-    binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec));
+    binary_deserialize_spec(return_value, transport, Z_ARRVAL_P(spec), 0);
   } catch (const PHPExceptionWrapper& ex) {
     // ex will be destructed, so copy to a zval that zend_throw_exception_object can take ownership of
     zval myex;

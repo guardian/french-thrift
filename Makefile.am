@@ -65,6 +65,10 @@ dist-hook:
 	find $(distdir) -type f \( -iname ".DS_Store" -or -iname "._*" -or -iname ".gitignore" \) | xargs rm -f
 	find $(distdir) -type d \( -iname ".deps" -or -iname ".libs" \) | xargs rm -rf
 	find $(distdir) -type d \( -iname ".svn" -or -iname ".git" \) | xargs rm -rf
+	find $(distdir) -type d -name node_modules -prune -exec rm -rf {} +
+	find $(distdir) -type d -name __pycache__ -prune -exec rm -rf {} +
+	find $(distdir) -type f -name "*.pyc" -exec rm -f {} +
+	rm -f $(distdir)/doc/thrift-threat-model.md
 
 print-version:
 	@echo $(PACKAGE_VERSION)
@@ -78,7 +82,7 @@ empty :=
 space := $(empty) $(empty)
 comma := ,
 
-CROSS_LANGS = @MAYBE_CPP@ @MAYBE_C_GLIB@ @MAYBE_CL@ @MAYBE_D@ @MAYBE_JAVA@ @MAYBE_PYTHON@ @MAYBE_PY3@ @MAYBE_RUBY@ @MAYBE_PERL@ @MAYBE_PHP@ @MAYBE_GO@ @MAYBE_NODEJS@ @MAYBE_DART@ @MAYBE_ERLANG@ @MAYBE_LUA@ @MAYBE_RS@ @MAYBE_NETSTD@ @MAYBE_NODETS@ @MAYBE_KOTLIN@ @MAYBE_SWIFT@
+CROSS_LANGS = @MAYBE_CPP@ @MAYBE_C_GLIB@ @MAYBE_CL@ @MAYBE_D@ @MAYBE_JAVA@ @MAYBE_PYTHON@ @MAYBE_PY3@ @MAYBE_RUBY@ @MAYBE_PERL@ @MAYBE_PHP@ @MAYBE_GO@ @MAYBE_NODEJS@ @MAYBE_DART@ @MAYBE_ERLANG@ @MAYBE_LUA@ @MAYBE_RS@ @MAYBE_NETSTD@ @MAYBE_NODETS@ @MAYBE_KOTLIN@
 CROSS_LANGS_COMMA_SEPARATED = $(subst $(space),$(comma),$(CROSS_LANGS))
 
 if WITH_PY3
@@ -136,26 +140,21 @@ distdir:
 
 EXTRA_DIST = \
 	.asf.yaml \
+	.cargo/config.toml \
 	.clang-format \
 	.dockerignore \
 	.editorconfig \
-	.eslintignore \
-	.eslintrc.json \
 	.flake8 \
 	.gitattributes \
 	.gitignore \
-	.github/dependabot.yml \
-	.github/pull_request_template.md \
-	.github/stale.yml \
-	.github/workflows/build.yml \
-	.github/workflows/cmake.yml \
-	.github/workflows/pypi.yml \
 	.travis.yml \
 	ApacheThrift.nuspec \
+	AGENTS.md \
 	appveyor.yml \
 	bootstrap.sh \
 	bower.json \
 	build \
+	CLAUDE.md \
 	CHANGES.md \
 	CMakeLists.txt \
 	composer.json \
@@ -165,6 +164,8 @@ EXTRA_DIST = \
 	doap.rdf \
 	doc \
 	dub.json \
+	eslint.config.mjs \
+	FUZZING.md \
 	go.mod \
 	jitpack.yml \
 	LANGUAGES.md \
@@ -174,6 +175,6 @@ EXTRA_DIST = \
 	package-lock.json \
 	phpcs.xml.dist \
 	README.md \
+	SECURITY.md \
 	rust-toolchain \
-	sonar-project.properties \
-	Thrift.podspec
+	sonar-project.properties

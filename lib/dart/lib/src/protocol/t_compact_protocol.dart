@@ -39,6 +39,7 @@ class TCompactProtocol extends TProtocol {
   static const int TYPE_MASK = 0xE0;
   static const int TYPE_BITS = 0x07;
   static const int TYPE_SHIFT_AMOUNT = 5;
+  static const int MAX_VARINT_BYTES = 10; // ceil(64/7); matches protobuf wire format
   static final TField TSTOP = TField("", TType.STOP, 0);
 
   static const int TYPE_BOOLEAN_TRUE = 0x01;
@@ -54,7 +55,8 @@ class TCompactProtocol extends TProtocol {
   static const int TYPE_MAP = 0x0B;
   static const int TYPE_STRUCT = 0x0C;
 
-  static final List<int> _typeMap = List.unmodifiable(List(16)
+static final List<int> _typeMap = List<int>.unmodifiable(
+  List<int>.filled(16, 0)
     ..[TType.STOP] = TType.STOP
     ..[TType.BOOL] = TYPE_BOOLEAN_TRUE
     ..[TType.BYTE] = TYPE_BYTE
@@ -66,7 +68,8 @@ class TCompactProtocol extends TProtocol {
     ..[TType.LIST] = TYPE_LIST
     ..[TType.SET] = TYPE_SET
     ..[TType.MAP] = TYPE_MAP
-    ..[TType.STRUCT] = TYPE_STRUCT);
+    ..[TType.STRUCT] = TYPE_STRUCT,
+);
 
   static const Utf8Codec _utf8Codec = Utf8Codec();
 
@@ -74,13 +77,15 @@ class TCompactProtocol extends TProtocol {
   DoubleLinkedQueue<int> _lastField = DoubleLinkedQueue<int>();
   int _lastFieldId = 0;
 
-  TField _booleanField;
-  bool _boolValue;
+  TField? _booleanField;
+  bool? _boolValue;
 
   final Uint8List tempList = Uint8List(10);
   final ByteData tempBD = ByteData(10);
 
-  TCompactProtocol(TTransport transport) : super(transport);
+  TCompactProtocol(TTransport transport,
+      {int maxStringSize = defaultMaxStringSize})
+      : super(transport, maxStringSize: maxStringSize);
 
   /// Write
   @override
@@ -169,10 +174,9 @@ class TCompactProtocol extends TProtocol {
 
   @override
   void writeBool(bool b) {
-    if (b == null) b = false;
     if (_booleanField != null) {
       _writeFieldBegin(
-          _booleanField, b ? TYPE_BOOLEAN_TRUE : TYPE_BOOLEAN_FALSE);
+          _booleanField!, b ? TYPE_BOOLEAN_TRUE : TYPE_BOOLEAN_FALSE);
       _booleanField = null;
     } else {
       writeByte(b ? TYPE_BOOLEAN_TRUE : TYPE_BOOLEAN_FALSE);
@@ -181,40 +185,34 @@ class TCompactProtocol extends TProtocol {
 
   @override
   void writeByte(int b) {
-    if (b == null) b = 0;
     tempList[0] = b;
     transport.write(tempList, 0, 1);
   }
 
   @override
   void writeI16(int i16) {
-    if (i16 == null) i16 = 0;
     _writeVarInt32(_int32ToZigZag(Int32(i16)));
   }
 
   @override
   void writeI32(int i32) {
-    if (i32 == null) i32 = 0;
     _writeVarInt32(_int32ToZigZag(Int32(i32)));
   }
 
   @override
   void writeI64(int i64) {
-    if (i64 == null) i64 = 0;
     _writeVarInt64(_int64ToZigZag(Int64(i64)));
   }
 
   @override
   void writeDouble(double d) {
-    if (d == null) d = 0.0;
     tempBD.setFloat64(0, d, Endian.little);
     transport.write(tempBD.buffer.asUint8List(), 0, 8);
   }
 
   @override
   void writeString(String str) {
-    Uint8List bytes =
-        str != null ? _utf8Codec.encode(str) : Uint8List.fromList([]);
+    Uint8List bytes = _utf8Codec.encode(str);
     writeBinary(bytes);
   }
 
@@ -374,7 +372,7 @@ class TCompactProtocol extends TProtocol {
   @override
   bool readBool() {
     if (_boolValue != null) {
-      bool result = _boolValue;
+      bool result = _boolValue!;
       _boolValue = null;
       return result;
     }
@@ -412,6 +410,7 @@ class TCompactProtocol extends TProtocol {
   String readString() {
     int length = _readVarInt32().toInt();
     _checkNegReadLength(length);
+    _checkStringSize(length);
 
     // TODO look at using temp for small strings?
     Uint8List buff = Uint8List(length);
@@ -423,6 +422,7 @@ class TCompactProtocol extends TProtocol {
   Uint8List readBinary() {
     int length = _readVarInt32().toInt();
     _checkNegReadLength(length);
+    _checkStringSize(length);
 
     Uint8List buff = Uint8List(length);
     transport.readAll(buff, 0, length);
@@ -432,25 +432,25 @@ class TCompactProtocol extends TProtocol {
   Int32 _readVarInt32() {
     Int32 result = Int32.ZERO;
     int shift = 0;
-    while (true) {
+    for (int idx = 0; idx < MAX_VARINT_BYTES; idx++) {
       Int32 b = Int32(readByte());
       result |= (b & 0x7f) << shift;
-      if ((b & 0x80) != 0x80) break;
+      if ((b & 0x80) != 0x80) return result;
       shift += 7;
     }
-    return result;
+    throw TProtocolError(TProtocolErrorType.INVALID_DATA, 'Variable-length int over 10 bytes.');
   }
 
   Int64 _readVarInt64() {
     Int64 result = Int64.ZERO;
     int shift = 0;
-    while (true) {
+    for (int idx = 0; idx < MAX_VARINT_BYTES; idx++) {
       Int64 b = Int64(readByte());
       result |= (b & 0x7f) << shift;
-      if ((b & 0x80) != 0x80) break;
+      if ((b & 0x80) != 0x80) return result;
       shift += 7;
     }
-    return result;
+    throw TProtocolError(TProtocolErrorType.INVALID_DATA, 'Variable-length int over 10 bytes.');
   }
 
   Int32 _zigzagToInt32(Int32 n) {
@@ -465,6 +465,14 @@ class TCompactProtocol extends TProtocol {
     if (length < 0) {
       throw TProtocolError(
           TProtocolErrorType.NEGATIVE_SIZE, 'Negative length: $length');
+    }
+  }
+
+  /// Refuses a declared length before it is allocated.
+  void _checkStringSize(int length) {
+    if (length > maxStringSize) {
+      throw TProtocolError(TProtocolErrorType.SIZE_LIMIT,
+          'Length ($length) larger than max length ($maxStringSize)');
     }
   }
 

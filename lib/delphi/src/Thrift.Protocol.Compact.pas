@@ -60,7 +60,9 @@ type
     VERSION_MASK      = Byte( $1F); // 0001 1111
     TYPE_MASK         = Byte( $E0); // 1110 0000
     TYPE_BITS         = Byte( $07); // 0000 0111
-    TYPE_SHIFT_AMOUNT = Byte( 5);
+    TYPE_SHIFT_AMOUNT   = Byte( 5);
+    MAX_VARINT32_BYTES  = Integer( 5);   // ceil(32/7); matches protobuf wire format
+    MAX_VARINT64_BYTES  = Integer( 10);  // ceil(64/7); matches protobuf wire format
 
   strict private type
     // All of the on-wire type codes.
@@ -915,36 +917,38 @@ end;
 // Read an i32 from the wire as a varint. The MSB of each byte is set
 // if there is another byte to follow. This can Read up to 5 bytes.
 function TCompactProtocolImpl.ReadVarint32 : Cardinal;
-var shift : Integer;
+var shift, idx : Integer;
     b : Byte;
 begin
   result := 0;
   shift  := 0;
-  while TRUE do begin
+  for idx := 0 to MAX_VARINT32_BYTES - 1 do begin
     b := Byte( ReadByte);
     result := result or (Cardinal(b and $7F) shl shift);
     if ((b and $80) <> $80)
-    then Break;
+    then Exit;
     Inc( shift, 7);
   end;
+  raise TProtocolExceptionInvalidData.Create('Variable-length int over 5 bytes.');
 end;
 
 
 // Read an i64 from the wire as a proper varint. The MSB of each byte is set
 // if there is another byte to follow. This can Read up to 10 bytes.
 function TCompactProtocolImpl.ReadVarint64 : UInt64;
-var shift : Integer;
+var shift, idx : Integer;
     b : Byte;
 begin
   result := 0;
   shift  := 0;
-  while TRUE do begin
+  for idx := 0 to MAX_VARINT64_BYTES - 1 do begin
     b := Byte( ReadByte);
     result := result or (UInt64(b and $7F) shl shift);
     if ((b and $80) <> $80)
-    then Break;
+    then Exit;
     Inc( shift, 7);
   end;
+  raise TProtocolExceptionInvalidData.Create('Variable-length int over 10 bytes.');
 end;
 
 
@@ -1011,8 +1015,8 @@ function TCompactProtocolImpl.GetMinSerializedSize( const aType : TType) : Integ
 // Return the minimum number of bytes a type will consume on the wire
 begin
   case aType of
-    TType.Stop:    result := 0;
-    TType.Void:    result := 0;
+    TType.Stop:    result := 1;  // T_STOP needs to count itself
+    TType.Void:    result := 1;  // T_VOID needs to count itself
     TType.Bool_:   result := SizeOf(Byte);
     TType.Byte_:   result := SizeOf(Byte);
     TType.Double_: result := 8;  // uses fixedLongToBytes() which always writes 8 bytes
@@ -1020,7 +1024,7 @@ begin
     TType.I32:     result := SizeOf(Byte);
     TType.I64:     result := SizeOf(Byte);
     TType.String_: result := SizeOf(Byte);  // string length
-    TType.Struct:  result := 0;             // empty struct
+    TType.Struct:  result := 1;  // empty struct needs at least 1 byte for the T_STOP
     TType.Map:     result := SizeOf(Byte);  // element count
     TType.Set_:    result := SizeOf(Byte);  // element count
     TType.List:    result := SizeOf(Byte);  // element count

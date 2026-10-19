@@ -37,13 +37,13 @@
 module thrift.server.nonblocking;
 
 import core.atomic : atomicLoad, atomicStore, atomicOp;
-import core.exception : onOutOfMemoryError;
 import core.memory : GC;
 import core.sync.mutex;
 import core.stdc.stdlib : free, realloc;
 import core.time : Duration, dur;
 import core.thread : Thread, ThreadGroup;
 import deimos.event2.event;
+import std.algorithm : min;
 import std.array : empty;
 import std.conv : emplace, to;
 import std.exception : enforce;
@@ -344,11 +344,11 @@ class TNonblockingServer : TServer {
   ///
   /// If a client tries to send a message larger than this limit, its
   /// connection will be closed. This helps to avoid allocating huge buffers
-  /// on bogous input.
+  /// on bogus input.
   uint maxFrameSize;
 
-  /// Ditto
-  enum uint DEFAULT_MAX_FRAME_SIZE = 256 * 1024 * 1024;
+  /// Ditto, the frame size limit the Thrift libraries use elsewhere.
+  enum uint DEFAULT_MAX_FRAME_SIZE = 16384000;
 
 
   size_t numIOThreads() @property {
@@ -459,7 +459,7 @@ private:
       // (We need to avoid writing to our own notification pipe, to
       // avoid possible deadlocks if the pipe is full.)
       if (thisThread) {
-        conn.transition();
+        conn.processSafely(&conn.transition);
       } else {
         loop.notifyCompleted(conn);
       }
@@ -776,7 +776,7 @@ private {
           continue;
         }
 
-        connection.transition();
+        connection.processSafely(&connection.transition);
       }
 
       if (bytesRead > 0) {
@@ -941,6 +941,45 @@ private {
     }
 
     /**
+     * Grows the read buffer to hold at least target bytes, by doubling.
+     *
+     * Never shrinks it; a target that already fits is a no-op. Throws a
+     * TTransportException if the reallocation fails.
+     */
+    void growReadBuffer(size_t target) {
+      if (target <= readBufferSize_) return;
+
+      auto newSize = readBufferSize_ ? readBufferSize_ : 1;
+      while (newSize < target) {
+        auto doubled = newSize * 2;
+        if (doubled <= newSize) {
+          // The next doubling would overflow size_t. That needs a 32-bit
+          // size_t and a maxFrameSize raised past 2 GiB, but the old in-line
+          // loop would have spun forever on it. target is itself a valid
+          // size, so allocate exactly that rather than wrapping to a
+          // smaller buffer.
+          newSize = target;
+          break;
+        }
+        newSize = doubled;
+      }
+
+      auto newBuffer = cast(ubyte*)realloc(readBuffer_, newSize);
+      if (!newBuffer) {
+        // The buffer for the requested frame size could not be allocated.
+        // Fail just this connection with a regular exception instead of
+        // raising an Error, which would unwind out of the libevent callback
+        // and stop the whole server.
+        throw new TTransportException("Could not allocate a read buffer " ~
+          "for the requested frame size.",
+          TTransportException.Type.INTERNAL_ERROR);
+      }
+
+      readBuffer_ = newBuffer;
+      readBufferSize_ = newSize;
+    }
+
+    /**
      * Transitions the connection to the next state.
      *
      * This is called e.g. when the request has been read completely or all
@@ -1039,26 +1078,20 @@ private {
           return;
         case ConnectionState.READ_FRAME_SIZE:
           // We just read the request length, set up the buffers for reading
-          // the payload.
-          if (readWant_ > readBufferSize_) {
-            // The current buffer is too small, exponentially grow the buffer
-            // until it is big enough.
-
-            if (readBufferSize_ == 0) {
-              readBufferSize_ = 1;
-            }
-
-            auto newSize = readBufferSize_;
-            while (readWant_ > newSize) {
-              newSize *= 2;
-            }
-
-            auto newBuffer = cast(ubyte*)realloc(readBuffer_, newSize);
-            if (!newBuffer) onOutOfMemoryError();
-
-            readBuffer_ = newBuffer;
-            readBufferSize_ = newSize;
-          }
+          // the payload. Reserve only enough to start reading: the buffer
+          // grows towards readWant_ in SocketState.RECV as the payload
+          // actually arrives, so a peer that declares a large frame and then
+          // sends none of it does not make the server reserve the whole frame.
+          //
+          // The initial kilobyte deliberately equals
+          // DEFAULT_IDLE_READ_BUFFER_LIMIT: a connection that only ever
+          // carries small frames settles at exactly the size an idle
+          // connection is allowed to keep, so checkIdleBufferLimit() does not
+          // free and regrow it between requests. Keep this a fixed constant --
+          // deriving it from the configurable idle limit would mean raising
+          // that limit put every connection back to reserving on the header,
+          // which is the amplification this avoids.
+          growReadBuffer(min(readWant_, 1024));
 
           readBufferPos_= 0;
 
@@ -1079,7 +1112,26 @@ private {
     extern(C) static void workSocketCallback(int fd, short flags, void* connThis) {
       auto conn = cast(Connection)connThis;
       assert(fd == conn.socket_.socketHandle);
-      conn.workSocket();
+      conn.processSafely(&conn.workSocket);
+    }
+
+    /**
+     * Runs a processing step (workSocket()/transition()) for this connection,
+     * making sure that an exception escaping it closes just this connection
+     * rather than propagating out of the libevent callback that invoked it –
+     * which would end the I/O loop and stop the whole server.
+     */
+    void processSafely(scope void delegate() step) {
+      try {
+        step();
+      } catch (Exception e) {
+        logError("Error while processing a client connection, closing it: %s", e);
+        try {
+          close();
+        } catch (Exception closeError) {
+          logError("Error while closing a client connection: %s", closeError);
+        }
+      }
     }
 
     /**
@@ -1119,9 +1171,18 @@ private {
 
           auto size = netToHost(frameSize);
           if (size > server_.maxFrameSize) {
+            // Resolving the peer address can fail, e.g. when the client has
+            // already reset the connection. Keep that out of the callback so
+            // the diagnostic below is still logged and the connection is still
+            // closed cleanly rather than via an escaping exception.
+            string peer;
+            try {
+              peer = socket_.getPeerAddress().toHostNameString();
+            } catch (Exception) {
+              peer = "(unknown)";
+            }
             logError("Frame size too large (%s > %s), client %s not using " ~
-              "TFramedTransport?", size, server_.maxFrameSize,
-              socket_.getPeerAddress().toHostNameString());
+              "TFramedTransport?", size, server_.maxFrameSize, peer);
             close();
             return;
           }
@@ -1136,10 +1197,30 @@ private {
           // If we already got all the data, we should be in the SEND state.
           assert(readBufferPos_ < readWant_);
 
+          // Grow the buffer towards the frame size only as far as the next
+          // read needs, so what is reserved tracks the payload received rather
+          // than the length the peer declared. Ask for double the current
+          // size, capped at the frame size; growReadBuffer() rounds up by
+          // doubling, so the buffer can still end up larger than the frame.
+          //
+          // readBufferSize_ is never 0 here: transition() reserved at least
+          // one byte for this frame before handing over, and readWant_ of 0
+          // never reaches this state. Doubling therefore always makes
+          // progress.
+          if (readBufferPos_ == readBufferSize_) {
+            growReadBuffer(readBufferSize_ > readWant_ / 2 ?
+              readWant_ : readBufferSize_ * 2);
+          }
+
           size_t bytesRead;
           try {
-            // Read as much as possible from the socket.
-            bytesRead = socket_.read(readBuffer_[readBufferPos_ .. readWant_]);
+            // Read as much as possible from the socket, but never past either
+            // the end of the buffer or the end of this frame. The buffer can
+            // be larger than the frame -- doubling may overshoot it, or it may
+            // have been kept from an earlier, larger request -- and bytes
+            // beyond readWant_ belong to the next frame.
+            bytesRead = socket_.read(
+              readBuffer_[readBufferPos_ .. min(readBufferSize_, readWant_)]);
           } catch (TTransportException te) {
             logError("Failed to read from client socket: %s", te);
             close();
@@ -1394,4 +1475,415 @@ unittest {
     s.taskPool = tp;
     s.numIOThreads = 4;
   });
+}
+
+version (unittest) {
+  private {
+    import core.sync.condition : Condition;
+
+    // Replies to every request with a single byte, so the client can tell a
+    // frame the server accepted from one it refused.
+    class ReplyProcessor : TProcessor {
+      override bool process(TProtocol iprot, TProtocol oprot,
+        Variant connectionContext = Variant()
+      ) {
+        // Consume the whole frame; processRequest() calls the processor again
+        // for as long as the input transport has data left.
+        ubyte[4096] request;
+        while (iprot.transport.peek()) iprot.transport.read(request);
+
+        ubyte[1] reply = [42];
+        oprot.transport.write(reply);
+        return true;
+      }
+    }
+
+    // Replies with the number of payload bytes it received and a hash over
+    // them, so a client can verify that a frame came back byte for byte.
+    class DigestProcessor : TProcessor {
+      override bool process(TProtocol iprot, TProtocol oprot,
+        Variant connectionContext = Variant()
+      ) {
+        ubyte[8192] chunk;
+        uint length;
+        uint hash = 2_166_136_261u;
+
+        while (iprot.transport.peek()) {
+          auto got = iprot.transport.read(chunk);
+          length += cast(uint)got;
+          foreach (b; chunk[0 .. got]) {
+            hash = (hash ^ b) * 16_777_619u;
+          }
+        }
+
+        auto netLength = hostToNet(length);
+        auto netHash = hostToNet(hash);
+        oprot.transport.write(cast(ubyte[])((&netLength)[0 .. 1]));
+        oprot.transport.write(cast(ubyte[])((&netHash)[0 .. 1]));
+        return true;
+      }
+    }
+
+    // The same hash the DigestProcessor computes, for the client side.
+    uint digestOf(in ubyte[] data) {
+      uint hash = 2_166_136_261u;
+      foreach (b; data) hash = (hash ^ b) * 16_777_619u;
+      return hash;
+    }
+
+    TNonblockingServer makeServer(TProcessor processor = null) {
+      return new TNonblockingServer(
+        processor is null ? new ReplyProcessor : processor, 0,
+        new TTransportFactory, new TBinaryProtocolFactory!());
+    }
+
+    // Runs server on an ephemeral port, hands dg the port it listens on, and
+    // stops the server once dg returns.
+    void withServerPort(TNonblockingServer server,
+      scope void delegate(ushort port) dg
+    ) {
+      auto mutex = new Mutex;
+      auto condition = new Condition(mutex);
+      ushort port;
+      bool done;
+
+      class PortHandler : TServerEventHandler {
+        void preServe() {
+          synchronized (mutex) {
+            port = to!ushort(server.listenSocket_.localAddress.toPortString());
+            condition.notifyAll();
+          }
+        }
+        Variant createContext(TProtocol input, TProtocol output) {
+          return Variant.init;
+        }
+        void deleteContext(Variant serverContext, TProtocol input,
+          TProtocol output) {}
+        void preProcess(Variant serverContext, TTransport transport) {}
+      }
+      server.eventHandler = new PortHandler;
+
+      auto cancel = new TCancellationOrigin;
+      auto serverThread = new Thread({
+        scope (exit) synchronized (mutex) {
+          done = true;
+          condition.notifyAll();
+        }
+        server.serve(cancel);
+      });
+      serverThread.isDaemon = true;
+
+      synchronized (mutex) {
+        serverThread.start();
+        while (port == 0 && !done) {
+          enforce(condition.wait(dur!"seconds"(10)), "Server did not start.");
+        }
+        enforce(port != 0, "Server did not start.");
+      }
+
+      scope (exit) {
+        cancel.trigger();
+        synchronized (mutex) {
+          while (!done) {
+            enforce(condition.wait(dur!"seconds"(10)), "Server did not stop.");
+          }
+        }
+        serverThread.join();
+      }
+
+      dg(port);
+    }
+
+    // As withServerPort, but hands dg a client already connected to the server.
+    void withServer(TNonblockingServer server,
+      scope void delegate(TSocket client) dg
+    ) {
+      withServerPort(server, (ushort port) {
+        auto client = new TSocket("127.0.0.1", port);
+        client.recvTimeout = dur!"seconds"(10);
+        client.open();
+        scope (exit) client.close();
+        dg(client);
+      });
+    }
+
+    void writeFrameSize(TSocket client, uint size) {
+      auto netSize = hostToNet(size);
+      client.write(cast(ubyte[])((&netSize)[0 .. 1]));
+    }
+  }
+}
+
+// maxFrameSize defaults to the 16384000 bytes the other Thrift libraries use,
+// a frame declaring one byte more closes the connection, and a limit the caller
+// raises is the one the server enforces.
+unittest {
+  import std.exception : collectException;
+
+  // Temporarily silence the log sinks so the test output is not spammed with
+  // the server's startup and error messages.
+  auto oldInfoLogSink = g_infoLogSink;
+  auto oldErrorLogSink = g_errorLogSink;
+  g_infoLogSink = null;
+  g_errorLogSink = null;
+  scope (exit) {
+    g_infoLogSink = oldInfoLogSink;
+    g_errorLogSink = oldErrorLogSink;
+  }
+
+  // The default is the shared limit, and it is enforced: the connection is
+  // closed as soon as the four length bytes announce more.
+  {
+    auto server = makeServer();
+    assert(server.maxFrameSize == 16_384_000);
+
+    withServer(server, (TSocket client) {
+      writeFrameSize(client, 16_384_001);
+
+      ubyte[1] buf;
+      size_t received = size_t.max;
+      auto e = collectException!TTransportException(
+        received = client.read(buf));
+      assert(e is null && received == 0, "a frame over the default maximum " ~
+        "frame size must close the connection");
+    });
+  }
+
+  // A caller who raises the limit gets a frame of that size read and processed.
+  {
+    auto server = makeServer();
+    server.maxFrameSize = 16_384_001;
+
+    withServer(server, (TSocket client) {
+      writeFrameSize(client, 16_384_001);
+      client.write(new ubyte[16_384_001]);
+
+      // The four length bytes of the one-byte reply, then the reply itself.
+      static immutable ubyte[5] expected = [0, 0, 0, 1, 42];
+      ubyte[5] reply;
+      client.readAll(reply);
+      assert(reply == expected);
+    });
+  }
+}
+
+// The read buffer tracks the payload that actually arrived rather than the
+// length the peer declared: a frame header on its own reserves next to
+// nothing, and a frame far larger than that initial reservation is still
+// assembled correctly as the buffer grows.
+unittest {
+  import std.conv : text;
+
+  // Temporarily silence the log sinks so the test output is not spammed with
+  // the server's startup and error messages.
+  auto oldInfoLogSink = g_infoLogSink;
+  auto oldErrorLogSink = g_errorLogSink;
+  g_infoLogSink = null;
+  g_errorLogSink = null;
+  scope (exit) {
+    g_infoLogSink = oldInfoLogSink;
+    g_errorLogSink = oldErrorLogSink;
+  }
+
+  // A header that declares a large frame and is followed by no payload at all
+  // must not make the server reserve the frame. The connection is closed
+  // afterwards so that it goes back on the idle stack, where its buffer can be
+  // read without racing the I/O thread.
+  {
+    enum uint declared = 64 * 1024 * 1024;
+
+    auto server = makeServer();
+    server.maxFrameSize = declared;
+    // Keep the buffer across disposal -- the default idle limit would free it
+    // and hide what had been reserved.
+    server.idleReadBufferLimit = 0;
+
+    size_t reserved = size_t.max;
+
+    withServerPort(server, (ushort port) {
+      auto client = new TSocket("127.0.0.1", port);
+      client.open();
+      writeFrameSize(client, declared);
+      client.close();
+
+      Connection connection;
+      foreach (_; 0 .. 1000) {
+        synchronized (server.connectionMutex_) {
+          if (!server.connectionStack_.empty) {
+            connection = server.connectionStack_[$ - 1];
+            break;
+          }
+        }
+        Thread.sleep(dur!"msecs"(10));
+      }
+      enforce(connection !is null,
+        "The server did not put the connection back on the idle stack.");
+      reserved = connection.readBufferSize_;
+    });
+
+    assert(reserved <= 64 * 1024, text("A frame header alone must not reserve "
+      ~ "the whole frame: the server reserved ", reserved, " bytes after a "
+      ~ "header declaring ", declared, "."));
+  }
+
+  // Payloads much larger than the initial reservation are assembled over many
+  // libevent callbacks while the buffer doubles. Two requests go over one
+  // connection with different content, so bytes left in the recycled buffer,
+  // a read bounded by the buffer instead of the frame, or a slice past the end
+  // of the buffer all show up as a mismatch rather than passing by chance.
+  {
+    enum uint payloadSize = 2 * 1024 * 1024;
+
+    auto server = makeServer(new DigestProcessor);
+    server.maxFrameSize = 16 * 1024 * 1024;
+
+    withServer(server, (TSocket client) {
+      foreach (uint seed; [0x5Au, 0xC3u]) {
+        auto payload = new ubyte[payloadSize];
+        // Position-dependent, so duplicated or reordered bytes fail too.
+        foreach (i, ref b; payload) b = cast(ubyte)(i * 31 + seed);
+
+        writeFrameSize(client, payloadSize);
+        client.write(payload);
+
+        // Four length bytes, then the echoed length and hash.
+        ubyte[4 + 4 + 4] reply;
+        client.readAll(reply);
+
+        uint replyLength, echoedLength, echoedHash;
+        (cast(ubyte*)&replyLength)[0 .. 4] = reply[0 .. 4];
+        (cast(ubyte*)&echoedLength)[0 .. 4] = reply[4 .. 8];
+        (cast(ubyte*)&echoedHash)[0 .. 4] = reply[8 .. 12];
+
+        assert(netToHost(replyLength) == 8);
+        assert(netToHost(echoedLength) == payloadSize,
+          text("The server saw ", netToHost(echoedLength), " payload bytes "
+            ~ "instead of ", payloadSize, "."));
+        assert(netToHost(echoedHash) == digestOf(payload),
+          "The payload did not survive the read buffer growing.");
+      }
+    });
+  }
+}
+
+// An exception raised while a connection is being serviced must close only
+// that connection and leave the server running, rather than escaping the
+// libevent callback and ending the I/O loop. When a peer announces a frame
+// larger than the maximum and then resets the connection, resolving its
+// address for the rejection log fails; the server must survive a burst of such
+// peers and still answer a well-behaved request afterwards.
+unittest {
+  import core.sync.condition : Condition;
+  import std.socket : Socket, AddressFamily, SocketType, SocketOptionLevel,
+    SocketOption, Linger, InternetAddress;
+
+  auto oldInfoLogSink = g_infoLogSink;
+  auto oldErrorLogSink = g_errorLogSink;
+  g_infoLogSink = null;
+  g_errorLogSink = null;
+  scope (exit) {
+    g_infoLogSink = oldInfoLogSink;
+    g_errorLogSink = oldErrorLogSink;
+  }
+
+  // Consumes the whole frame and replies with a single byte, so a caller can
+  // tell that a request was actually served.
+  static class ReplyProcessor : TProcessor {
+    override bool process(TProtocol iprot, TProtocol oprot,
+      Variant connectionContext = Variant()
+    ) {
+      ubyte[4096] request;
+      while (iprot.transport.peek()) iprot.transport.read(request);
+
+      ubyte[1] reply = [42];
+      oprot.transport.write(reply);
+      return true;
+    }
+  }
+
+  auto server = new TNonblockingServer(new ReplyProcessor, 0,
+    new TTransportFactory, new TBinaryProtocolFactory!());
+
+  auto mutex = new Mutex;
+  auto condition = new Condition(mutex);
+  ushort port;
+  bool done;
+
+  class PortHandler : TServerEventHandler {
+    void preServe() {
+      synchronized (mutex) {
+        port = to!ushort(server.listenSocket_.localAddress.toPortString());
+        condition.notifyAll();
+      }
+    }
+    Variant createContext(TProtocol input, TProtocol output) {
+      return Variant.init;
+    }
+    void deleteContext(Variant serverContext, TProtocol input,
+      TProtocol output) {}
+    void preProcess(Variant serverContext, TTransport transport) {}
+  }
+  server.eventHandler = new PortHandler;
+
+  auto cancel = new TCancellationOrigin;
+  auto serverThread = new Thread({
+    scope (exit) synchronized (mutex) {
+      done = true;
+      condition.notifyAll();
+    }
+    server.serve(cancel);
+  });
+  serverThread.isDaemon = true;
+
+  synchronized (mutex) {
+    serverThread.start();
+    while (port == 0 && !done) {
+      enforce(condition.wait(dur!"seconds"(10)), "Server did not start.");
+    }
+    enforce(port != 0, "Server did not start.");
+  }
+
+  scope (exit) {
+    cancel.trigger();
+    synchronized (mutex) {
+      while (!done) {
+        enforce(condition.wait(dur!"seconds"(10)), "Server did not stop.");
+      }
+    }
+    serverThread.join();
+  }
+
+  // Each peer announces an over-limit frame and then closes with a zero linger
+  // timeout, which sends a reset. Several of them make it likely that the
+  // server reaches the rejection log for at least one after its peer is gone.
+  auto overSize = hostToNet(server.maxFrameSize + 1);
+  foreach (i; 0 .. 64) {
+    auto peer = new Socket(AddressFamily.INET, SocketType.STREAM);
+    peer.connect(new InternetAddress("127.0.0.1", port));
+    Linger linger;
+    linger.on = 1;
+    linger.time = 0;
+    peer.setOption(SocketOptionLevel.SOCKET, SocketOption.LINGER, linger);
+    peer.send(cast(ubyte[])((&overSize)[0 .. 1]));
+    peer.close();
+  }
+
+  // The server must still be serving: a normal one-byte framed request has to
+  // round-trip. If the I/O loop had stopped, this read would time out.
+  auto client = new TSocket("127.0.0.1", port);
+  client.recvTimeout = dur!"seconds"(10);
+  client.open();
+  scope (exit) client.close();
+
+  auto requestSize = hostToNet(1u);
+  client.write(cast(ubyte[])((&requestSize)[0 .. 1]));
+  ubyte[1] payload = [7];
+  client.write(payload);
+
+  // The four length bytes of the one-byte reply, then the reply itself.
+  static immutable ubyte[5] expected = [0, 0, 0, 1, 42];
+  ubyte[5] reply;
+  client.readAll(reply);
+  assert(reply == expected, "the server stopped serving after a peer reset " ~
+    "its connection while announcing an over-limit frame");
 }

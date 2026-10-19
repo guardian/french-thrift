@@ -34,19 +34,30 @@ package Thrift::FramedTransport;
 use base('Thrift::Transport');
 use version 0.77; our $VERSION = version->declare("$Thrift::VERSION");
 
+#
+# The largest frame accepted from the wire by default. Matches
+# TConfiguration.DEFAULT_MAX_FRAME_SIZE in the Java, netstd and C++ bindings
+# and the Python framed transport.
+#
+use constant DEFAULT_MAX_FRAME_SIZE => 16384000;
+
 sub new
 {
-    my $classname = shift;
-    my $transport = shift;
-    my $read      = shift || 1;
-    my $write     = shift || 1;
+    my $classname    = shift;
+    my $transport    = shift;
+    my $read         = shift || 1;
+    my $write        = shift || 1;
+    my $maxFrameSize = shift;
+    $maxFrameSize = DEFAULT_MAX_FRAME_SIZE unless defined $maxFrameSize;
 
     my $self      = {
-        transport => $transport,
-        read      => $read,
-        write     => $write,
-        wBuf      => '',
-        rBuf      => '',
+        transport    => $transport,
+        read         => $read,
+        write        => $write,
+        maxFrameSize => $maxFrameSize,
+        wBuf         => '',
+        rBuf         => '',
+        rPos         => 0,
     };
 
     return bless($self,$classname);
@@ -94,17 +105,16 @@ sub read
         $self->_readFrame();
     }
 
+    # Serve the read from the current position in the frame
+    my $out = substr($self->{rBuf}, $self->{rPos}, $len);
+    $self->{rPos} += length($out);
 
-    # Just return full buff
-    if ($len > length($self->{rBuf})) {
-        my $out = $self->{rBuf};
+    # Release the frame once it has been read
+    if ($self->{rPos} >= length($self->{rBuf})) {
         $self->{rBuf} = '';
-        return $out;
+        $self->{rPos} = 0;
     }
 
-    # Return substr
-    my $out = substr($self->{rBuf}, 0, $len);
-    $self->{rBuf} = substr($self->{rBuf}, $len);
     return $out;
 }
 
@@ -118,7 +128,18 @@ sub _readFrame
     my @val  = unpack('N', $buf);
     my $sz   = $val[0];
 
+    # Check the declared size before reading the body: readAll() would
+    # otherwise wait for as many bytes as the length claims while the peer
+    # sends them at its own pace. The length is read unsigned, so a negative
+    # value cannot occur here; only the upper bound needs a guard.
+    if ($sz > $self->{maxFrameSize}) {
+        die Thrift::TTransportException->new(
+            "Frame size ($sz) larger than the maximum ($self->{maxFrameSize})",
+            Thrift::TTransportException::SIZE_LIMIT);
+    }
+
     $self->{rBuf} = $self->{transport}->readAll($sz);
+    $self->{rPos} = 0;
 }
 
 #

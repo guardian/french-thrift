@@ -93,7 +93,7 @@ thrift_buffered_transport_read_slow (ThriftTransport *transport, gpointer buf,
   /* first copy what we have in our buffer. */
   if (have > 0)
   {
-    memcpy (buf, t->r_buf, t->r_buf->len);
+    memcpy (buf, t->r_buf->data, t->r_buf->len);
     want -= t->r_buf->len;
     t->r_buf = g_byte_array_remove_range (t->r_buf, 0, t->r_buf->len);
   }
@@ -303,6 +303,8 @@ thrift_buffered_transport_finalize (GObject *object)
     g_byte_array_free (transport->w_buf, TRUE);
   }
   transport->w_buf = NULL;
+
+  G_OBJECT_CLASS (thrift_buffered_transport_parent_class)->finalize (object);
 }
 
 /* property accessor */

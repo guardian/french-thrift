@@ -31,7 +31,7 @@
 #include <thrift/transport/TSocket.h>
 #include <thrift/transport/THttpServer.h>
 #if defined(_MSC_VER) || defined(__MINGW32__)
-#include <Shlwapi.h>
+#include <shlwapi.h>
 #define THRIFT_strncasecmp(str1, str2, len) _strnicmp(str1, str2, len)
 #define THRIFT_strcasestr(haystack, needle) StrStrIA(haystack, needle)
 #else
@@ -60,6 +60,12 @@ public:
 
   ~TWebSocketServer() override = default;
 
+  // The readAll() inherited from TVirtualTransport<THttpTransport> reads
+  // through THttpTransport::read() and never sees a WebSocket frame, so a
+  // caller holding the concrete type would bypass the framing below. This one
+  // does what a call through TTransport does.
+  uint32_t readAll(uint8_t* buf, uint32_t len) { return readAll_virt(buf, len); }
+
   uint32_t readAll_virt(uint8_t* buf, uint32_t len) override {
     // If we do not have a good handshake, the client will attempt one.
     if (!handshakeComplete()) {
@@ -75,34 +81,41 @@ public:
       THttpServer::flush();
     }
 
-    uint32_t want = len;
-    auto have = readBuffer_.available_read();
-
-    // If we have some data in the buffer, copy it out and return it.
-    // We have to return it without attempting to read more, since we aren't
-    // guaranteed that the underlying transport actually has more data, so
-    // attempting to read from it could block.
-    if (have > 0 && have >= want) {
-      return readBuffer_.read(buf, want);
+    // Deliver the number of bytes the caller asked for, drawing on the read
+    // buffer and reading further frames when it runs dry, and raise at end of
+    // stream. That is the contract readAll carries everywhere, the same one the
+    // base transport and the other bindings meet. A frame carries its own
+    // WebSocket framing, so a single frame's payload may be smaller than one
+    // caller's request.
+    uint32_t have = 0;
+    while (have < len) {
+      auto avail = readBuffer_.available_read();
+      if (avail == 0) {
+        if (!readFrame()) {
+          // End of stream. With nothing handed over yet, this is the clean end
+          // of the message the caller was waiting for, reported as it always
+          // has been by a read count of zero. Part way through a request it is
+          // a message that stops short, and readAll does not hand back part of
+          // one -- it delivers the whole request or it raises.
+          if (have == 0) {
+            return 0;
+          }
+          throw TTransportException(TTransportException::END_OF_FILE, "No more data to read.");
+        }
+        continue;
+      }
+      uint32_t give = (std::min)(len - have, avail);
+      have += readBuffer_.read(buf + have, give);
     }
-
-    // Read another frame.
-    if (!readFrame()) {
-      // EOF.  No frame available.
-      return 0;
-    }
-
-    // Hand over whatever we have.
-    uint32_t give = (std::min)(want, readBuffer_.available_read());
-    return readBuffer_.read(buf, give);
+    return have;
   }
 
   void flush() override {
     resetConsumedMessageSize();
-    writeFrameHeader();
     uint8_t* buffer;
     uint32_t length;
     writeBuffer_.getBuffer(&buffer, &length);
+    writeFrameHeader(Opcode::Continuation, length);
     transport_->write(buffer, length);
     transport_->flush();
     writeBuffer_.resetBuffer();
@@ -118,6 +131,14 @@ protected:
     return h.str();
   }
 
+  // sz is the length of the name the peer sent, so comparing only that many
+  // characters accepted every name that is a prefix of one below: "U:", "C:"
+  // and "S:" were enough to satisfy the handshake, and "S:" reached the key
+  // arm because it is tested before the version one.
+  static bool headerNameIs(const char* header, size_t sz, const char* name) {
+    return sz == strlen(name) && THRIFT_strncasecmp(header, name, sz) == 0;
+  }
+
   void parseHeader(char* header) override {
     char* colon = strchr(header, ':');
     if (colon == nullptr) {
@@ -126,22 +147,29 @@ protected:
     size_t sz = colon - header;
     char* value = colon + 1;
 
-    if (THRIFT_strncasecmp(header, "Upgrade", sz) == 0) {
+    if (headerNameIs(header, sz, "Upgrade")) {
       if (THRIFT_strcasestr(value, "websocket") != nullptr) {
         upgrade_ = true;
       }
-    } else if (THRIFT_strncasecmp(header, "Connection", sz) == 0) {
+    } else if (headerNameIs(header, sz, "Connection")) {
       if (THRIFT_strcasestr(value, "Upgrade") != nullptr) {
         connection_ = true;
       }
-    } else if (THRIFT_strncasecmp(header, "Sec-WebSocket-Key", sz) == 0) {
-      std::string toHash = value + 1;
+    } else if (headerNameIs(header, sz, "Sec-WebSocket-Key")) {
+      // value + 1 dropped the space that a header usually has after the colon,
+      // and read past the terminator when it did not: "Sec-WebSocket-Key:" on
+      // its own leaves *value at '\0'.  Skip the optional whitespace instead.
+      const char* key = value;
+      while (*key == ' ' || *key == '\t') {
+        ++key;
+      }
+      std::string toHash = key;
       toHash += "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
       unsigned char hash[20];
       SHA1((const unsigned char*)toHash.c_str(), toHash.length(), hash);
       acceptKey_ = base64Encode(hash, 20);
       secWebSocketKey_ = true;
-    } else if (THRIFT_strncasecmp(header, "Sec-WebSocket-Version", sz) == 0) {
+    } else if (headerNameIs(header, sz, "Sec-WebSocket-Version")) {
       if (THRIFT_strcasestr(value, "13") != nullptr) {
         secWebSocketVersion_ = true;
       }
@@ -199,7 +227,7 @@ private:
   };
 
   void failConnection(CloseCode reason) {
-    writeFrameHeader(Opcode::Close);
+    writeFrameHeader(Opcode::Close, sizeof(uint16_t));
     auto buffer = htons(static_cast<uint16_t>(reason));
     transport_->write(reinterpret_cast<const uint8_t*>(&buffer), 2);
     transport_->flush();
@@ -211,114 +239,150 @@ private:
   }
 
   void pong() {
-    writeFrameHeader(Opcode::Pong);
+    // RFC 6455 5.5.3: the Pong carries the Ping's payload, which is what the
+    // read buffer holds at this point, and the header has to say so -- a peer
+    // told the frame is empty reads the payload as the next frame header.
     uint8_t* buffer;
     uint32_t size;
     readBuffer_.getBuffer(&buffer, &size);
+    writeFrameHeader(Opcode::Pong, size);
     transport_->write(buffer, size);
     transport_->flush();
   }
 
   bool readFrame() {
-    uint8_t headerBuffer[8];
+    // Loop rather than recurse: a Ping carries nothing for the caller, so the
+    // reader has to go on to the next frame to satisfy it, and a peer may send
+    // as many Pings as it likes. Re-entering readFrame() for each one cost a
+    // stack frame per seven bytes on the wire.
+    while (true) {
+      uint8_t headerBuffer[8];
 
-    auto read = transport_->read(headerBuffer, 2);
-    if (read < 2) {
-      return false;
-    }
-    // Since Thrift has its own message end marker and we read frame by frame,
-    // it doesn't really matter if the frame is marked as FIN.
-    // Capture it only for debugging only.
-    auto fin = (headerBuffer[0] & 0x80) != 0;
-    THRIFT_UNUSED_VARIABLE(fin);
-
-    // RSV1, RSV2, RSV3
-    if ((headerBuffer[0] & 0x70) != 0) {
-      failConnection(CloseCode::ProtocolError);
-      throw TTransportException(TTransportException::CORRUPTED_DATA,
-                                "Reserved bits must be zeroes");
-    }
-
-    auto opcode = (Opcode)(headerBuffer[0] & 0x0F);
-
-    // Mask
-    if ((headerBuffer[1] & 0x80) == 0) {
-      failConnection(CloseCode::ProtocolError);
-      throw TTransportException(TTransportException::CORRUPTED_DATA,
-                                "Messages from the client must be masked");
-    }
-
-    // Read the length
-    uint64_t payloadLength = headerBuffer[1] & 0x7F;
-    if (payloadLength == 126) {
-      read = transport_->read(headerBuffer, 2);
+      auto read = transport_->read(headerBuffer, 2);
       if (read < 2) {
         return false;
       }
-      payloadLength = ntohs(*reinterpret_cast<uint16_t*>(headerBuffer));
-    } else if (payloadLength == 127) {
-      read = transport_->read(headerBuffer, 8);
-      if (read < 8) {
+      // Since Thrift has its own message end marker and we read frame by frame,
+      // it doesn't really matter if the frame is marked as FIN.
+      // Capture it only for debugging only.
+      auto fin = (headerBuffer[0] & 0x80) != 0;
+      THRIFT_UNUSED_VARIABLE(fin);
+
+      // RSV1, RSV2, RSV3
+      if ((headerBuffer[0] & 0x70) != 0) {
+        failConnection(CloseCode::ProtocolError);
+        throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                  "Reserved bits must be zeroes");
+      }
+
+      auto opcode = (Opcode)(headerBuffer[0] & 0x0F);
+
+      // Mask
+      if ((headerBuffer[1] & 0x80) == 0) {
+        failConnection(CloseCode::ProtocolError);
+        throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                  "Messages from the client must be masked");
+      }
+
+      // Read the length
+      uint64_t payloadLength = headerBuffer[1] & 0x7F;
+      if (payloadLength == 126) {
+        read = transport_->read(headerBuffer, 2);
+        if (read < 2) {
+          return false;
+        }
+        payloadLength = ntohs(*reinterpret_cast<uint16_t*>(headerBuffer));
+      } else if (payloadLength == 127) {
+        read = transport_->read(headerBuffer, 8);
+        if (read < 8) {
+          return false;
+        }
+        payloadLength = THRIFT_ntohll(*reinterpret_cast<uint64_t*>(headerBuffer));
+        if ((payloadLength & 0x8000000000000000) != 0) {
+          failConnection(CloseCode::ProtocolError);
+          throw TTransportException(
+              TTransportException::CORRUPTED_DATA,
+              "The most significant bit of the payload length must be zero");
+        }
+      }
+
+      // The read buffer below is sized from this number before a single payload
+      // byte has arrived, so the frame header on its own decides how much memory
+      // the server commits unless something bounds it. Hold it to the configured
+      // maximum frame size, the same ceiling TFramedTransport applies to its own
+      // frames. The UINT32_MAX arm stays for its own reason: size_t is narrower
+      // than the length field on a 32-bit system.
+      //
+      // The cast is safe because the first arm has already ruled out anything
+      // wider than 32 bits by the time the second is evaluated.
+      if (payloadLength > UINT32_MAX
+          || static_cast<int64_t>(payloadLength) > getConfiguration()->getMaxFrameSize()) {
+        failConnection(CloseCode::MessageTooBig);
         return false;
       }
-      payloadLength = THRIFT_ntohll(*reinterpret_cast<uint64_t*>(headerBuffer));
-      if ((payloadLength & 0x8000000000000000) != 0) {
-        failConnection(CloseCode::ProtocolError);
-        throw TTransportException(
-            TTransportException::CORRUPTED_DATA,
-            "The most significant bit of the payload length must be zero");
-      }
-    }
 
-    // size_t is smaller than a ulong on a 32-bit system
-    if (payloadLength > UINT32_MAX) {
-      failConnection(CloseCode::MessageTooBig);
-      return false;
-    }
+      auto length = static_cast<uint32_t>(payloadLength);
 
-    auto length = static_cast<uint32_t>(payloadLength);
-
-    if (length > 0) {
-      // Read the masking key
+      // The masking key is part of the header of every frame whose MASK bit is
+      // set, whatever the payload length, and a client frame without MASK was
+      // already refused above. Reading it only for a frame that carries a
+      // payload leaves four bytes behind, and the next header is then parsed
+      // out of the masking key.
       read = transport_->read(headerBuffer, 4);
       if (read < 4) {
         return false;
       }
 
-      readBuffer_.resetBuffer(length);
-      uint8_t* buffer = readBuffer_.getWritePtr(length);
-      read = transport_->read(buffer, length);
-      readBuffer_.wroteBytes(read);
-      if (read < length) {
-        return false;
-      }
+      if (length > 0) {
+        readBuffer_.resetBuffer(length);
+        uint8_t* buffer = readBuffer_.getWritePtr(length);
+        // Wait for the whole payload. A single read returns whatever one recv()
+        // produced, so anything the network split across segments used to be
+        // reported as end of stream and the frame lost. Waiting is only safe
+        // because length has been held to the configured maximum frame size
+        // above; TFramedTransport reads its own frames the same way.
+        try {
+          transport_->readAll(buffer, length);
+        } catch (const TTransportException& e) {
+          if (e.getType() == TTransportException::END_OF_FILE) {
+            // The peer went away part-way through the frame. That is what the
+            // caller has always been told about a payload that does not turn up.
+            return false;
+          }
+          throw;
+        }
+        readBuffer_.wroteBytes(length);
       
-      // Unmask the data
-      for (size_t i = 0; i < length; i++) {
-        buffer[i] ^= headerBuffer[i % 4];
+        // Unmask the data
+        for (size_t i = 0; i < length; i++) {
+          buffer[i] ^= headerBuffer[i % 4];
+        }
+
+        T_DEBUG("FIN=%d, Opcode=%X, length=%d, payload=%s", fin, opcode, length,
+                binary ? readBuffer_.toHexString() : cast(string) readBuffer_);
+      } else {
+        // Nothing for the caller, and nothing for pong() to echo back either.
+        readBuffer_.resetBuffer();
       }
 
-      T_DEBUG("FIN=%d, Opcode=%X, length=%d, payload=%s", fin, opcode, length,
-              binary ? readBuffer_.toHexString() : cast(string) readBuffer_);
-    }
-
-    switch (opcode) {
-    case Opcode::Close:
-      if (length >= 2) {
-        uint8_t buffer[2];
-        readBuffer_.read(buffer, 2);
-        CloseCode closeCode = static_cast<CloseCode>(ntohs(*reinterpret_cast<uint16_t*>(buffer)));
-        THRIFT_UNUSED_VARIABLE(closeCode);
-        string closeReason = readBuffer_.readAsString(length - 2);
-        T_DEBUG("Connection closed: %d %s", closeCode, closeReason);
+      switch (opcode) {
+      case Opcode::Close:
+        if (length >= 2) {
+          uint8_t buffer[2];
+          readBuffer_.read(buffer, 2);
+          CloseCode closeCode = static_cast<CloseCode>(ntohs(*reinterpret_cast<uint16_t*>(buffer)));
+          THRIFT_UNUSED_VARIABLE(closeCode);
+          string closeReason = readBuffer_.readAsString(length - 2);
+          T_DEBUG("Connection closed: %d %s", closeCode, closeReason);
+        }
+        transport_->close();
+        return false;
+      case Opcode::Ping:
+        pong();
+        continue;
+      default:
+        return true;
       }
-      transport_->close();
-      return false;
-    case Opcode::Ping:
-      pong();
-      return readFrame();
-    default:
-      return true;
     }
   }
 
@@ -338,9 +402,8 @@ private:
     transport_->close();
   }
 
-  void writeFrameHeader(Opcode opcode = Opcode::Continuation) {
+  void writeFrameHeader(Opcode opcode, uint32_t length) {
     uint32_t headerSize = 1;
-    uint32_t length = writeBuffer_.available_read();
     if (length < 126) {
       ++headerSize;
     } else if (length < 65536) {
@@ -390,7 +453,7 @@ public:
    * Wraps the transport into a buffered one.
    */
   std::shared_ptr<TTransport> getTransport(std::shared_ptr<TTransport> trans) override {
-    return std::shared_ptr<TTransport>(new TWebSocketServer<true>(trans));
+    return std::shared_ptr<TTransport>(new TWebSocketServer<true>(trans, trans->getConfiguration()));
   }
 };
 
@@ -407,7 +470,7 @@ public:
    * Wraps the transport into a buffered one.
    */
   std::shared_ptr<TTransport> getTransport(std::shared_ptr<TTransport> trans) override {
-    return std::shared_ptr<TTransport>(new TWebSocketServer<false>(trans));
+    return std::shared_ptr<TTransport>(new TWebSocketServer<false>(trans, trans->getConfiguration()));
   }
 };
 } // namespace transport

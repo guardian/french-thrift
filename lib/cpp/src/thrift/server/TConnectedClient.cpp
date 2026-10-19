@@ -19,6 +19,8 @@
 
 #include <thrift/server/TConnectedClient.h>
 
+#include <exception>
+
 namespace apache {
 namespace thrift {
 namespace server {
@@ -75,15 +77,29 @@ void TConnectedClient::run() {
           // All other transport exceptions are logged.
           // State of connection is unknown.  Done.
           string errStr = string("TConnectedClient died: ") + ttx.what();
-          GlobalOutput(errStr.c_str());
+          TOutput::instance()(errStr.c_str());
           done = true;
           break;
         }
       }
     } catch (const TException& tex) {
       string errStr = string("TConnectedClient processing exception: ") + tex.what();
-      GlobalOutput(errStr.c_str());
+      TOutput::instance()(errStr.c_str());
       // Disconnect from client, because we could not process the message.
+      done = true;
+    } catch (const std::exception& ex) {
+      // Not every exception a processor can raise is a TException:
+      // std::bad_alloc comes out of reading a message whose declared sizes do
+      // not fit in memory, and a handler may raise anything at all. Escaping
+      // here ends the thread this loop runs on, and with it the process --
+      // TSimpleServer runs it on the serve thread, TThreadedServer on a thread
+      // of its own, and neither has a handler above this one. One client that
+      // cannot be served is not a reason to stop serving the others.
+      string errStr = string("TConnectedClient processing exception: ") + ex.what();
+      TOutput::instance()(errStr.c_str());
+      done = true;
+    } catch (...) {
+      TOutput::instance()("TConnectedClient processing unknown exception");
       done = true;
     }
   }
@@ -100,21 +116,21 @@ void TConnectedClient::cleanup() {
     inputProtocol_->getTransport()->close();
   } catch (const TTransportException& ttx) {
     string errStr = string("TConnectedClient input close failed: ") + ttx.what();
-    GlobalOutput(errStr.c_str());
+    TOutput::instance()(errStr.c_str());
   }
 
   try {
     outputProtocol_->getTransport()->close();
   } catch (const TTransportException& ttx) {
     string errStr = string("TConnectedClient output close failed: ") + ttx.what();
-    GlobalOutput(errStr.c_str());
+    TOutput::instance()(errStr.c_str());
   }
 
   try {
     client_->close();
   } catch (const TTransportException& ttx) {
     string errStr = string("TConnectedClient client close failed: ") + ttx.what();
-    GlobalOutput(errStr.c_str());
+    TOutput::instance()(errStr.c_str());
   }
 }
 }

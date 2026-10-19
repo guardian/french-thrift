@@ -66,6 +66,7 @@ public:
   void init_generator() override;
   void close_generator() override;
   std::string display_name() const override;
+  std::string get_doc_type_name(t_type* type) override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -110,8 +111,6 @@ public:
   void generate_java_struct_writer(std::ostream& out, t_struct* tstruct);
   void generate_java_struct_tostring(std::ostream& out, t_struct* tstruct);
   void generate_java_struct_clear(std::ostream& out, t_struct* tstruct);
-  void generate_field_value_meta_data(std::ostream& out, t_type* type);
-  std::string get_java_type_string(t_type* type);
   void generate_reflection_setters(std::ostringstream& out,
                                    t_type* type,
                                    std::string field_name,
@@ -120,7 +119,6 @@ public:
                                    t_type* type,
                                    std::string field_name,
                                    std::string cap_name);
-  void generate_generic_field_getters_setters(std::ostream& out, t_struct* tstruct);
   void generate_java_bean_boilerplate(std::ostream& out, t_struct* tstruct);
 
   void generate_function_helpers(t_function* tfunction);
@@ -188,7 +186,7 @@ public:
 
   void generate_java_doc(std::ostream& out, t_doc* tdoc) override;
 
-  void generate_java_doc(std::ostream& out, t_function* tdoc) override;
+  void generate_java_doc(std::ostream& out, t_function* tfunction) override;
 
   void generate_java_docstring_comment(std::ostream& out, string contents) override;
 
@@ -289,8 +287,9 @@ string t_javame_generator::java_package() {
  * @return List of imports for Java types that are used in here
  */
 string t_javame_generator::java_type_imports() {
-  return string() + "import java.util.Hashtable;\n" + "import java.util.Vector;\n"
-         + "import java.util.Enumeration;\n\n";
+  return "import java.util.Hashtable;\n"
+         "import java.util.Vector;\n"
+         "import java.util.Enumeration;\n\n";
 }
 
 /**
@@ -299,8 +298,10 @@ string t_javame_generator::java_type_imports() {
  * @return List of imports necessary for thrift
  */
 string t_javame_generator::java_thrift_imports() {
-  return string() + "import org.apache.thrift.*;\n" + "import org.apache.thrift.meta_data.*;\n"
-         + "import org.apache.thrift.transport.*;\n" + "import org.apache.thrift.protocol.*;\n\n";
+  return "import org.apache.thrift.*;\n"
+         "import org.apache.thrift.meta_data.*;\n"
+         "import org.apache.thrift.transport.*;\n"
+         "import org.apache.thrift.protocol.*;\n\n";
 }
 
 /**
@@ -1154,7 +1155,6 @@ void t_javame_generator::generate_java_struct_definition(ostream& out,
   generate_java_struct_clear(out, tstruct);
 
   generate_java_bean_boilerplate(out, tstruct);
-  generate_generic_field_getters_setters(out, tstruct);
 
   generate_java_struct_equality(out, tstruct);
   generate_java_struct_compare_to(out, tstruct);
@@ -1304,7 +1304,11 @@ void t_javame_generator::generate_java_struct_reader(ostream& out, t_struct* tst
   vector<t_field*>::const_iterator f_iter;
 
   // Declare stack tmp variables and read struct header
-  out << indent() << "TField field;" << '\n' << indent() << "iprot.readStructBegin();" << '\n';
+  out << indent() << "TField field;" << '\n';
+  indent(out) << "iprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
+  out << indent() << "iprot.readStructBegin();" << '\n';
 
   // Loop over reading in fields
   indent(out) << "while (true)" << '\n';
@@ -1359,6 +1363,13 @@ void t_javame_generator::generate_java_struct_reader(ostream& out, t_struct* tst
   indent(out) << "validate();" << '\n';
 
   indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "iprot.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
+
+  indent_down();
   out << indent() << "}" << '\n' << '\n';
 }
 
@@ -1400,6 +1411,9 @@ void t_javame_generator::generate_java_struct_writer(ostream& out, t_struct* tst
   // performs various checks (e.g. check that all required fields are set)
   indent(out) << "validate();" << '\n' << '\n';
 
+  indent(out) << "oprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
   indent(out) << "oprot.writeStructBegin(STRUCT_DESC);" << '\n';
 
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
@@ -1437,6 +1451,13 @@ void t_javame_generator::generate_java_struct_writer(ostream& out, t_struct* tst
       << '\n';
 
   indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "oprot.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
+
+  indent_down();
   out << indent() << "}" << '\n' << '\n';
 }
 
@@ -1456,6 +1477,9 @@ void t_javame_generator::generate_java_struct_result_writer(ostream& out, t_stru
   const vector<t_field*>& fields = tstruct->get_sorted_members();
   vector<t_field*>::const_iterator f_iter;
 
+  indent(out) << "oprot.incrementRecursionDepth();" << '\n';
+  indent(out) << "try {" << '\n';
+  indent_up();
   indent(out) << "oprot.writeStructBegin(STRUCT_DESC);" << '\n';
 
   bool first = true;
@@ -1486,6 +1510,13 @@ void t_javame_generator::generate_java_struct_result_writer(ostream& out, t_stru
   // Write the struct map
   out << '\n' << indent() << "oprot.writeFieldStop();" << '\n' << indent()
       << "oprot.writeStructEnd();" << '\n';
+
+  indent_down();
+  indent(out) << "} finally {" << '\n';
+  indent_up();
+  indent(out) << "oprot.decrementRecursionDepth();" << '\n';
+  indent_down();
+  indent(out) << "}" << '\n';
 
   indent_down();
   out << indent() << "}" << '\n' << '\n';
@@ -1524,28 +1555,6 @@ void t_javame_generator::generate_reflection_setters(ostringstream& out,
   indent(out) << "break;" << '\n' << '\n';
 
   indent_down();
-}
-
-void t_javame_generator::generate_generic_field_getters_setters(std::ostream& out,
-                                                                t_struct* tstruct) {
-  (void)out;
-  std::ostringstream getter_stream;
-  std::ostringstream setter_stream;
-
-  // build up the bodies of both the getter and setter at once
-  const vector<t_field*>& fields = tstruct->get_members();
-  vector<t_field*>::const_iterator f_iter;
-  for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    t_field* field = *f_iter;
-    t_type* type = get_true_type(field->get_type());
-    std::string field_name = field->get_name();
-    std::string cap_name = get_cap_name(field_name);
-
-    indent_up();
-    generate_reflection_setters(setter_stream, type, field_name, cap_name);
-    generate_reflection_getters(getter_stream, type, field_name, cap_name);
-    indent_down();
-  }
 }
 
 /**
@@ -1761,97 +1770,6 @@ void t_javame_generator::generate_java_struct_tostring(ostream& out, t_struct* t
 
   indent_down();
   indent(out) << "}" << '\n' << '\n';
-}
-
-/**
- * Returns a string with the java representation of the given thrift type
- * (e.g. for the type struct it returns "TType.STRUCT")
- */
-std::string t_javame_generator::get_java_type_string(t_type* type) {
-  if (type->is_list()) {
-    return "TType.LIST";
-  } else if (type->is_map()) {
-    return "TType.MAP";
-  } else if (type->is_set()) {
-    return "TType.SET";
-  } else if (type->is_struct() || type->is_xception()) {
-    return "TType.STRUCT";
-  } else if (type->is_enum()) {
-    return "TType.ENUM";
-  } else if (type->is_typedef()) {
-    return get_java_type_string(((t_typedef*)type)->get_type());
-  } else if (type->is_base_type()) {
-    switch (((t_base_type*)type)->get_base()) {
-    case t_base_type::TYPE_VOID:
-      return "TType.VOID";
-      break;
-    case t_base_type::TYPE_STRING:
-      return "TType.STRING";
-      break;
-    case t_base_type::TYPE_BOOL:
-      return "TType.BOOL";
-      break;
-    case t_base_type::TYPE_I8:
-      return "TType.BYTE";
-      break;
-    case t_base_type::TYPE_I16:
-      return "TType.I16";
-      break;
-    case t_base_type::TYPE_I32:
-      return "TType.I32";
-      break;
-    case t_base_type::TYPE_I64:
-      return "TType.I64";
-      break;
-    case t_base_type::TYPE_DOUBLE:
-      return "TType.DOUBLE";
-      break;
-    default:
-      throw std::runtime_error("Unknown thrift type \"" + type->get_name()
-                               + "\" passed to t_javame_generator::get_java_type_string!");
-      break; // This should never happen!
-    }
-  } else {
-    throw std::runtime_error(
-        "Unknown thrift type \"" + type->get_name()
-        + "\" passed to t_javame_generator::get_java_type_string!"); // This should never happen!
-  }
-}
-
-void t_javame_generator::generate_field_value_meta_data(std::ostream& out, t_type* type) {
-  out << '\n';
-  indent_up();
-  indent_up();
-  if (type->is_struct() || type->is_xception()) {
-    indent(out) << "new StructMetaData(TType.STRUCT, " << type_name(type) << ".class";
-  } else if (type->is_container()) {
-    if (type->is_list()) {
-      indent(out) << "new ListMetaData(TType.LIST, ";
-      t_type* elem_type = ((t_list*)type)->get_elem_type();
-      generate_field_value_meta_data(out, elem_type);
-    } else if (type->is_set()) {
-      indent(out) << "new SetMetaData(TType.SET, ";
-      t_type* elem_type = ((t_list*)type)->get_elem_type();
-      generate_field_value_meta_data(out, elem_type);
-    } else { // map
-      indent(out) << "new MapMetaData(TType.MAP, ";
-      t_type* key_type = ((t_map*)type)->get_key_type();
-      t_type* val_type = ((t_map*)type)->get_val_type();
-      generate_field_value_meta_data(out, key_type);
-      out << ", ";
-      generate_field_value_meta_data(out, val_type);
-    }
-  } else if (type->is_enum()) {
-    indent(out) << "new EnumMetaData(TType.ENUM, " << type_name(type) << ".class";
-  } else {
-    indent(out) << "new FieldValueMetaData(" << get_java_type_string(type);
-    if (type->is_typedef()) {
-      indent(out) << ", \"" << ((t_typedef*)type)->get_symbolic() << "\"";
-    }
-  }
-  out << ")";
-  indent_down();
-  indent_down();
 }
 
 /**
@@ -2489,9 +2407,10 @@ void t_javame_generator::generate_deserialize_container(ostream& out,
   }
 
   indent(out) << prefix << " = new " << type_name(ttype, false, true)
-              // size the collection correctly
-              << "(" << (ttype->is_list() ? "" : "2*") << obj << ".size"
-              << ");" << '\n';
+              // size the collection correctly, but cap the capacity reserved from the wire-supplied
+              // element count so a peer cannot name a count it never backs with data
+              << "(TBaseHelper.preallocSize(" << (ttype->is_list() ? "" : "2*") << obj << ".size"
+              << "));" << '\n';
 
   // For loop iterates over elements
   string i = tmp("_i");
@@ -2800,6 +2719,17 @@ string t_javame_generator::type_name(t_type* ttype,
   return ttype->get_name();
 }
 
+std::string t_javame_generator::get_doc_type_name(t_type* type) {
+  type = get_true_type(type);
+  const std::string type_name_str = type_name(type);
+  if (type->get_program() != program_) {
+    return type_name_str;
+  }
+
+  const std::string package = type->get_program()->get_namespace("java");
+  return (package.empty() ? "" : package + ".") + type_name_str;
+}
+
 /**
  * Returns the C++ type that corresponds to the thrift type.
  *
@@ -3024,20 +2954,7 @@ void t_javame_generator::generate_java_doc(ostream& out, t_doc* tdoc) {
  * Emits a JavaDoc comment if the provided function object has a doc in Thrift
  */
 void t_javame_generator::generate_java_doc(ostream& out, t_function* tfunction) {
-  if (tfunction->has_doc()) {
-    stringstream ss;
-    ss << tfunction->get_doc();
-    const vector<t_field*>& fields = tfunction->get_arglist()->get_members();
-    vector<t_field*>::const_iterator p_iter;
-    for (p_iter = fields.begin(); p_iter != fields.end(); ++p_iter) {
-      t_field* p = *p_iter;
-      ss << "\n@param " << p->get_name();
-      if (p->has_doc()) {
-        ss << " " << p->get_doc();
-      }
-    }
-    generate_docstring_comment(out, "/**\n", " * ", ss.str(), " */\n");
-  }
+  t_oop_generator::generate_java_doc(out, tfunction);
 }
 
 void t_javame_generator::generate_deep_copy_container(ostream& out,

@@ -76,14 +76,13 @@ public:
       this->nspace_lc = "";
     } else {
       /* replace dots with underscores */
-      char* tmp = strdup(this->nspace.c_str());
-      for (unsigned int i = 0; i < strlen(tmp); i++) {
+      string tmp = this->nspace;
+      for (size_t i = 0; i < tmp.size(); i++) {
         if (tmp[i] == '.') {
           tmp[i] = '_';
         }
       }
-      this->nspace = string(tmp, strlen(tmp));
-      free(tmp);
+      this->nspace = tmp;
 
       /* clean up the namespace for C.
        * An input of 'namespace foo' should result in:
@@ -2595,8 +2594,8 @@ void t_c_glib_generator::generate_service_processor(t_service* tservice) {
   f_service_ << indent() << parent_class_name << "Class "
                                                  "*parent_class =" << '\n';
   indent_up();
-  f_service_ << indent() << "g_type_class_peek_parent (" << class_name_uc << "_GET_CLASS (self));"
-             << '\n';
+  f_service_ << indent() << "g_type_class_peek_parent (g_type_class_peek ("
+             << class_name_lc << "_get_type ()));" << '\n';
   indent_down();
   f_service_ << '\n'
              << indent() << "process_function_def = "
@@ -3223,6 +3222,8 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
   f_types_impl_ << "}" << '\n' << '\n';
 
   /* create the destructor */
+  f_types_impl_ << "static gpointer " << class_name_lc << "_parent_class = NULL;" << '\n' << '\n';
+
   f_types_impl_ << "static void " << '\n' << this->nspace_lc << name_u
                 << "_finalize (GObject *object)" << '\n' << "{" << '\n';
   indent_up();
@@ -3304,6 +3305,10 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
     }
   }
 
+  f_types_impl_ << '\n'
+                << indent() << "G_OBJECT_CLASS (" << class_name_lc
+                << "_parent_class)->finalize (object);" << '\n';
+
   indent_down();
   f_types_impl_ << "}" << '\n' << '\n';
 
@@ -3315,9 +3320,14 @@ void t_c_glib_generator::generate_object(t_struct* tstruct) {
 
   f_types_impl_ << indent() << "GObjectClass *gobject_class = G_OBJECT_CLASS (cls);" << '\n'
                 << indent() << "ThriftStructClass *struct_class = "
-                << "THRIFT_STRUCT_CLASS (cls);" << '\n' << '\n' << indent()
-                << "struct_class->read = " << class_name_lc << "_read;" << '\n' << indent()
-                << "struct_class->write = " << class_name_lc << "_write;" << '\n' << '\n'
+                << "THRIFT_STRUCT_CLASS (cls);" << '\n'
+                << '\n'
+                << indent() << class_name_lc << "_parent_class = g_type_class_peek_parent (cls);"
+                << '\n'
+                << '\n'
+                << indent() << "struct_class->read = " << class_name_lc << "_read;" << '\n'
+                << indent() << "struct_class->write = " << class_name_lc << "_write;" << '\n'
+                << '\n'
                 << indent() << "gobject_class->finalize = " << class_name_lc << "_finalize;"
                 << '\n';
   if (members.size() > 0) {
@@ -4023,7 +4033,12 @@ void t_c_glib_generator::generate_deserialize_field(ostream& out,
     if (tbase == t_base_type::TYPE_STRING) {
       indent(out) << "if (" << name << " != NULL)" << '\n' << indent() << "{" << '\n';
       indent_up();
-      indent(out) << "g_free(" << name << ");" << '\n' << indent() << name << " = NULL;" << '\n';
+      if (type->is_binary()) {
+        indent(out) << "g_byte_array_free(" << name << ", TRUE);" << '\n';
+      } else {
+        indent(out) << "g_free(" << name << ");" << '\n';
+      }
+      indent(out) << name << " = NULL;" << '\n';
       indent_down();
       indent(out) << "}" << '\n' << '\n';
     }
@@ -4300,9 +4315,11 @@ void t_c_glib_generator::generate_deserialize_set_element(ostream& out,
                                                           int error_ret) {
   t_type* telem = tset->get_elem_type();
   string elem = tmp("_elem");
-  string telem_ptr = telem->is_string() || !telem->is_base_type() ? "" : "*";
 
   declare_local_variable(out, telem, elem, true);
+
+  telem = get_true_type(telem);
+  string telem_ptr = telem->is_string() || !telem->is_base_type() ? "" : "*";
 
   t_field felem(telem, telem_ptr + elem);
   generate_deserialize_field(out, &felem, "", "", error_ret);

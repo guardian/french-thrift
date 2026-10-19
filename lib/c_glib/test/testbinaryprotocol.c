@@ -36,6 +36,8 @@
 #include <thrift/c_glib/transport/thrift_socket.h>
 #include <thrift/c_glib/transport/thrift_server_socket.h>
 #include <thrift/c_glib/transport/thrift_framed_transport.h>
+#include <thrift/c_glib/transport/thrift_memory_buffer.h>
+#include <thrift/c_glib/thrift_configuration.h>
 
 #define TEST_BOOL TRUE
 #define TEST_BYTE 123
@@ -343,7 +345,10 @@ test_read_and_write_complex_types (void)
     /* invalid version */
     g_assert (thrift_binary_protocol_write_i32 (protocol, -1, NULL) > 0);
 
-    /* sz > 0 for a message */
+    /* a non-versioned (old-style) message: the leading int32 is the length of
+       the method name, followed by the message type and the sequence id */
+    g_assert (thrift_binary_protocol_write_string (protocol, "test", NULL) > 0);
+    g_assert (thrift_binary_protocol_write_byte (protocol, T_CALL, NULL) > 0);
     g_assert (thrift_binary_protocol_write_i32 (protocol, 1, NULL) > 0);
 
     /* send a valid message */
@@ -715,10 +720,14 @@ thrift_server_complex_types (const int port)
                                                      &message_type, &seqid,
                                                      NULL) == -1);
 
-  /* sz > 0 */
+  /* a non-versioned (old-style) message */
   g_assert (thrift_binary_protocol_read_message_begin (protocol, &message_name,
                                                      &message_type, &seqid,
                                                      NULL) > 0);
+  g_assert_cmpstr (message_name, ==, "test");
+  g_assert_cmpint (message_type, ==, T_CALL);
+  g_assert_cmpint (seqid, ==, 1);
+  g_free (message_name);
 
   /* read a valid message */
   g_assert (thrift_binary_protocol_read_message_begin (protocol, &message_name,
@@ -839,6 +848,163 @@ thrift_server_many_frames (const int port)
   g_object_unref (tsocket);
 }
 
+/* skip should stop recursing once it has descended past the configured
+   recursion limit, rather than running off the stack on a deeply nested
+   message. */
+static void
+test_skip_recursion_depth (void)
+{
+  ThriftConfiguration *configuration = NULL;
+  ThriftMemoryBuffer *tbuffer = NULL;
+  ThriftBinaryProtocol *tb = NULL;
+  ThriftProtocol *protocol = NULL;
+  GError *error = NULL;
+  gint i;
+  const gint recursion_limit = 8;
+
+  /* a memory buffer carrying a small recursion limit */
+  configuration = g_object_new (THRIFT_TYPE_CONFIGURATION,
+                                "recursion_limit", recursion_limit, NULL);
+  tbuffer = g_object_new (THRIFT_TYPE_MEMORY_BUFFER,
+                          "buf_size", 1024,
+                          "configuration", configuration, NULL);
+  tb = g_object_new (THRIFT_TYPE_BINARY_PROTOCOL, "transport", tbuffer, NULL);
+  protocol = THRIFT_PROTOCOL (tb);
+
+  /* nest struct field headers a good way past the limit */
+  for (i = 0; i < recursion_limit + 10; i++)
+  {
+    g_assert (thrift_binary_protocol_write_field_begin (protocol, NULL,
+                                                        T_STRUCT, 1, NULL) > 0);
+  }
+
+  /* skipping the outermost struct must bail out with a depth-limit error
+     instead of recursing without bound */
+  g_assert (thrift_protocol_skip (protocol, T_STRUCT, &error) == -1);
+  g_assert (error != NULL);
+  g_assert (error->domain == THRIFT_PROTOCOL_ERROR);
+  g_assert (error->code == THRIFT_PROTOCOL_ERROR_DEPTH_LIMIT);
+  g_error_free (error);
+  error = NULL;
+
+  g_object_unref (tb);
+  g_object_unref (tbuffer);
+  g_object_unref (configuration);
+}
+
+/* a struct nested within the limit should still skip cleanly */
+static void
+test_skip_within_limit (void)
+{
+  ThriftConfiguration *configuration = NULL;
+  ThriftMemoryBuffer *tbuffer = NULL;
+  ThriftBinaryProtocol *tb = NULL;
+  ThriftProtocol *protocol = NULL;
+  GError *error = NULL;
+  gint i;
+  const gint depth = 3;
+
+  configuration = g_object_new (THRIFT_TYPE_CONFIGURATION,
+                                "recursion_limit", 8, NULL);
+  tbuffer = g_object_new (THRIFT_TYPE_MEMORY_BUFFER,
+                          "buf_size", 1024,
+                          "configuration", configuration, NULL);
+  tb = g_object_new (THRIFT_TYPE_BINARY_PROTOCOL, "transport", tbuffer, NULL);
+  protocol = THRIFT_PROTOCOL (tb);
+
+  /* depth struct fields, each closed off with a stop, plus the innermost
+     empty struct's stop */
+  for (i = 0; i < depth; i++)
+  {
+    g_assert (thrift_binary_protocol_write_field_begin (protocol, NULL,
+                                                        T_STRUCT, 1, NULL) > 0);
+  }
+  for (i = 0; i < depth + 1; i++)
+  {
+    g_assert (thrift_binary_protocol_write_field_stop (protocol, NULL) > 0);
+  }
+
+  g_assert (thrift_protocol_skip (protocol, T_STRUCT, &error) > 0);
+  g_assert (error == NULL);
+
+  g_object_unref (tb);
+  g_object_unref (tbuffer);
+  g_object_unref (configuration);
+}
+
+/* A non-versioned (old-style) binary message: the leading int32 is the method
+   name length rather than a version word. read_message_begin must populate the
+   name, message type and sequence id for it — previously the sz >= 0 branch
+   returned success without touching them, leaving the caller with an
+   uninitialized method-name pointer. */
+static void
+test_read_message_begin_nonversioned (void)
+{
+  ThriftMemoryBuffer *tbuffer = NULL;
+  ThriftBinaryProtocol *tb = NULL;
+  ThriftProtocol *protocol = NULL;
+  gchar *name = NULL;
+  ThriftMessageType mtype = 0;
+  gint32 seqid = 0;
+  guint8 message[] = { 0x00, 0x00, 0x00, 0x05,   /* name length = 5      */
+                       'h', 'e', 'l', 'l', 'o',   /* method name "hello"  */
+                       0x01,                       /* message type T_CALL  */
+                       0x00, 0x00, 0x00, 0x2a };   /* sequence id 42       */
+
+  tbuffer = g_object_new (THRIFT_TYPE_MEMORY_BUFFER, "buf_size", 1024, NULL);
+  tb = g_object_new (THRIFT_TYPE_BINARY_PROTOCOL, "transport", tbuffer, NULL);
+  protocol = THRIFT_PROTOCOL (tb);
+
+  g_assert (thrift_transport_write (THRIFT_TRANSPORT (tbuffer),
+                                    message, sizeof (message), NULL));
+
+  g_assert (thrift_binary_protocol_read_message_begin (protocol, &name, &mtype,
+                                                       &seqid, NULL) > 0);
+  g_assert (name != NULL);
+  g_assert_cmpstr (name, ==, "hello");
+  g_assert_cmpint (mtype, ==, T_CALL);
+  g_assert_cmpint (seqid, ==, 42);
+
+  g_free (name);
+  g_object_unref (tb);
+  g_object_unref (tbuffer);
+}
+
+/* An old-style message declares its method-name length in the leading int32.
+   That length must be bounded by the configured string limit the same way the
+   length-prefixed string read is, rather than blindly allocated. */
+static void
+test_read_message_begin_nonversioned_oversized_name (void)
+{
+  ThriftMemoryBuffer *tbuffer = NULL;
+  ThriftBinaryProtocol *tb = NULL;
+  ThriftProtocol *protocol = NULL;
+  gchar *name = NULL;
+  ThriftMessageType mtype = 0;
+  gint32 seqid = 0;
+  GError *error = NULL;
+  guint8 message[] = { 0x00, 0x00, 0x00, 0x64 };   /* name length = 100 */
+
+  tbuffer = g_object_new (THRIFT_TYPE_MEMORY_BUFFER, "buf_size", 1024, NULL);
+  tb = g_object_new (THRIFT_TYPE_BINARY_PROTOCOL, "transport", tbuffer,
+                     "string_limit", 10, NULL);
+  protocol = THRIFT_PROTOCOL (tb);
+
+  g_assert (thrift_transport_write (THRIFT_TRANSPORT (tbuffer),
+                                    message, sizeof (message), NULL));
+
+  g_assert (thrift_binary_protocol_read_message_begin (protocol, &name, &mtype,
+                                                       &seqid, &error) < 0);
+  g_assert (error != NULL);
+  g_assert (error->domain == THRIFT_PROTOCOL_ERROR);
+  g_assert (error->code == THRIFT_PROTOCOL_ERROR_SIZE_LIMIT);
+  g_assert (name == NULL);
+  g_error_free (error);
+
+  g_object_unref (tb);
+  g_object_unref (tbuffer);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -854,6 +1020,14 @@ main(int argc, char *argv[])
   g_test_add_func ("/testbinaryprotocol/ReadAndWriteComplexTypes", test_read_and_write_complex_types);
   g_test_add_func ("/testbinaryprotocol/ReadAndWriteManyFrames",
                    test_read_and_write_many_frames);
+  g_test_add_func ("/testbinaryprotocol/SkipRecursionDepth",
+                   test_skip_recursion_depth);
+  g_test_add_func ("/testbinaryprotocol/SkipWithinLimit",
+                   test_skip_within_limit);
+  g_test_add_func ("/testbinaryprotocol/ReadMessageBeginNonVersioned",
+                   test_read_message_begin_nonversioned);
+  g_test_add_func ("/testbinaryprotocol/ReadMessageBeginNonVersionedOversizedName",
+                   test_read_message_begin_nonversioned_oversized_name);
 
   return g_test_run ();
 }

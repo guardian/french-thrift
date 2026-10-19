@@ -43,10 +43,14 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/version.hpp>
 
+#include <thrift/protocol/TJSONProtocol.h>
 #include <thrift/transport/TBufferTransports.h>
 #include <thrift/transport/TZlibTransport.h>
+#include <thrift/TConfiguration.h>
 
 using namespace apache::thrift::transport;
+using apache::thrift::TConfiguration;
+using apache::thrift::protocol::TJSONProtocol;
 using std::shared_ptr;
 using std::string;
 
@@ -338,6 +342,73 @@ void test_get_underlying_transport() {
   BOOST_CHECK_EQUAL(membuf.get(), zlib_trans->getUnderlyingTransport().get());
 }
 
+void test_message_size_limit() {
+  // Write 4 KB of compressible data, then read it back with a 1 KB limit.
+  const uint32_t write_len = 4096;
+  boost::shared_array<uint8_t> buf = gen_uniform_buffer(write_len, 'a');
+
+  shared_ptr<TMemoryBuffer> membuf(new TMemoryBuffer());
+  {
+    shared_ptr<TZlibTransport> writer(new TZlibTransport(membuf));
+    writer->write(buf.get(), write_len);
+    writer->finish();
+  }
+
+  auto config = std::make_shared<TConfiguration>();
+  config->setMaxMessageSize(1024);
+  shared_ptr<TZlibTransport> reader(new TZlibTransport(
+      membuf,
+      TZlibTransport::DEFAULT_URBUF_SIZE,
+      TZlibTransport::DEFAULT_CRBUF_SIZE,
+      TZlibTransport::DEFAULT_UWBUF_SIZE,
+      TZlibTransport::DEFAULT_CWBUF_SIZE,
+      Z_DEFAULT_COMPRESSION,
+      config));
+
+  boost::shared_array<uint8_t> mirror(new uint8_t[write_len]);
+  try {
+    reader->readAll(mirror.get(), write_len);
+    BOOST_ERROR("readAll() should have thrown when maxMessageSize is exceeded");
+  } catch (TTransportException& ex) {
+    BOOST_CHECK_EQUAL(ex.getType(), TTransportException::END_OF_FILE);
+  }
+}
+
+// A JSON string carries no declared length, so TJSONProtocol measures the one it
+// is decoding against the configured maximum. This transport draws the remaining
+// message size down as it reads, so the two must not be confused: a string that
+// fits the configured maximum has to be read in full, however much of the budget
+// the transport has already accounted for.
+void test_json_string_message_size_limit() {
+  const int max_message_size = 1024;
+  const size_t string_size = max_message_size * 3 / 4;
+  const string json = "\"" + string(string_size, 'a') + "\"";
+
+  shared_ptr<TMemoryBuffer> membuf(new TMemoryBuffer());
+  {
+    shared_ptr<TZlibTransport> writer(new TZlibTransport(membuf));
+    writer->write(reinterpret_cast<const uint8_t*>(json.data()),
+                  static_cast<uint32_t>(json.size()));
+    writer->finish();
+  }
+
+  auto config = std::make_shared<TConfiguration>();
+  config->setMaxMessageSize(max_message_size);
+  shared_ptr<TZlibTransport> reader(new TZlibTransport(
+      membuf,
+      TZlibTransport::DEFAULT_URBUF_SIZE,
+      TZlibTransport::DEFAULT_CRBUF_SIZE,
+      TZlibTransport::DEFAULT_UWBUF_SIZE,
+      TZlibTransport::DEFAULT_CWBUF_SIZE,
+      Z_DEFAULT_COMPRESSION,
+      config));
+
+  shared_ptr<TJSONProtocol> protocol(new TJSONProtocol(reader));
+  string str;
+  BOOST_CHECK_NO_THROW(protocol->readString(str));
+  BOOST_CHECK_EQUAL(str.size(), string_size);
+}
+
 /*
  * Initialization
  */
@@ -347,8 +418,7 @@ void test_get_underlying_transport() {
   do {                                                                                             \
     ::std::ostringstream name_ss;                                                                  \
     name_ss << name << "-" << BOOST_STRINGIZE(_FUNC);                                              \
-    ::std::function<void ()> test_func =                                        \
-        ::std::bind(_FUNC, ##__VA_ARGS__);                                      \
+    ::std::function<void ()> test_func = ::std::bind(_FUNC, __VA_ARGS__);                          \
     ::boost::unit_test::test_case* tc                                                              \
         = ::boost::unit_test::make_test_case(test_func, name_ss.str(), __FILE__, __LINE__);        \
     (suite)->add(tc);                                                                              \
@@ -359,8 +429,7 @@ void test_get_underlying_transport() {
     ::std::ostringstream name_ss;                                                                  \
     name_ss << name << "-" << BOOST_STRINGIZE(_FUNC);                                              \
     ::boost::unit_test::test_case* tc                                                              \
-        = ::boost::unit_test::make_test_case(::std::bind(_FUNC,                 \
-                                                                            ##__VA_ARGS__),        \
+        = ::boost::unit_test::make_test_case(::std::bind(_FUNC, __VA_ARGS__),                      \
                                              name_ss.str());                                       \
     (suite)->add(tc);                                                                              \
   } while (0)
@@ -443,6 +512,8 @@ bool init_unit_test_suite() {
 
   suite->add(BOOST_TEST_CASE(test_no_write));
   suite->add(BOOST_TEST_CASE(test_get_underlying_transport));
+  suite->add(BOOST_TEST_CASE(test_message_size_limit));
+  suite->add(BOOST_TEST_CASE(test_json_string_message_size_limit));
 
   return true;
 }
@@ -469,6 +540,9 @@ boost::unit_test::test_suite* init_unit_test_suite(int argc, char* argv[]) {
   add_tests(suite, gen_random_buffer(buf_len), buf_len, "random");
 
   suite->add(BOOST_TEST_CASE(test_no_write));
+  suite->add(BOOST_TEST_CASE(test_get_underlying_transport));
+  suite->add(BOOST_TEST_CASE(test_message_size_limit));
+  suite->add(BOOST_TEST_CASE(test_json_string_message_size_limit));
 
   return nullptr;
 }

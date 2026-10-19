@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,9 +21,12 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Protocol\TProtocol;
+use Thrift\Transport\TTransport;
 
 /**
  * Protocol factory creates protocol objects from transports
@@ -31,8 +35,6 @@ interface TProtocolFactory
 {
     /**
      * Build a protocol from the base transport
-     *
-     * @return TProtocol protocol
      */
-    public function getProtocol($trans);
+    public function getProtocol(TTransport $trans): TProtocol;
 }

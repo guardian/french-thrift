@@ -37,13 +37,31 @@ namespace transport {
 uint32_t pipe_read(HANDLE pipe, uint8_t* buf, uint32_t len);
 void pipe_write(HANDLE pipe, const uint8_t* buf, uint32_t len);
 
-uint32_t pseudo_sync_read(HANDLE pipe, HANDLE event, uint8_t* buf, uint32_t len);
-void pseudo_sync_write(HANDLE pipe, HANDLE event, const uint8_t* buf, uint32_t len);
+uint32_t pseudo_sync_read(HANDLE pipe,
+                          HANDLE event,
+                          HANDLE cancel_event,
+                          HANDLE interrupt_event,
+                          uint8_t* buf,
+                          uint32_t len);
+void pseudo_sync_write(HANDLE pipe,
+                       HANDLE event,
+                       HANDLE cancel_event,
+                       HANDLE interrupt_event,
+                       const uint8_t* buf,
+                       uint32_t len);
 
 class TPipeImpl : apache::thrift::TNonCopyable {
 public:
-  TPipeImpl() {}
+  // Once interruptListener, if any, is signalled, read() gives up, and so does
+  // a write() that waits on the pipe.  TPipeServer shares one among the pipes
+  // it accepts, for interruptChildren().
+  explicit TPipeImpl(std::shared_ptr<TManualResetEvent> interruptListener = nullptr)
+    : interrupt_listener_(interruptListener) {}
   virtual ~TPipeImpl() {}
+  // Makes a read() or write() that waits on the pipe, now or later, give up with
+  // TTransportException::INTERRUPTED.  Anonymous pipes do synchronous I/O and are
+  // not affected.
+  void cancel() { ::SetEvent(cancel_event_.h); }
   virtual uint32_t read(uint8_t* buf, uint32_t len) = 0;
   virtual void write(const uint8_t* buf, uint32_t len) = 0;
   virtual HANDLE getPipeHandle() = 0; // doubles as the read handle for anon pipe
@@ -52,6 +70,17 @@ public:
   virtual void setWrtPipeHandle(HANDLE) {}
   virtual bool isBufferedDataAvailable() { return false; }
   virtual HANDLE getNativeWaitHandle() { return INVALID_HANDLE_VALUE; }
+
+protected:
+  HANDLE interruptListener() const {
+    return interrupt_listener_ ? interrupt_listener_->h : nullptr;
+  }
+
+  // signalled by cancel(), and never reset
+  TManualResetEvent cancel_event_;
+
+private:
+  std::shared_ptr<TManualResetEvent> interrupt_listener_;
 };
 
 class TNamedPipeImpl : public TPipeImpl {
@@ -59,10 +88,10 @@ public:
   explicit TNamedPipeImpl(TAutoHandle &pipehandle) : Pipe_(pipehandle.release()) {}
   virtual ~TNamedPipeImpl() {}
   virtual uint32_t read(uint8_t* buf, uint32_t len) {
-    return pseudo_sync_read(Pipe_.h, read_event_.h, buf, len);
+    return pseudo_sync_read(Pipe_.h, read_event_.h, cancel_event_.h, interruptListener(), buf, len);
   }
   virtual void write(const uint8_t* buf, uint32_t len) {
-    pseudo_sync_write(Pipe_.h, write_event_.h, buf, len);
+    pseudo_sync_write(Pipe_.h, write_event_.h, cancel_event_.h, interruptListener(), buf, len);
   }
 
   virtual HANDLE getPipeHandle() { return Pipe_.h; }
@@ -96,8 +125,9 @@ private:
 // than using the regular named pipe implementation
 class TWaitableNamedPipeImpl : public TPipeImpl {
 public:
-  explicit TWaitableNamedPipeImpl(TAutoHandle &pipehandle)
-    : begin_unread_idx_(0), end_unread_idx_(0) {
+  explicit TWaitableNamedPipeImpl(TAutoHandle& pipehandle,
+                                  std::shared_ptr<TManualResetEvent> interruptListener = nullptr)
+    : TPipeImpl(interruptListener), begin_unread_idx_(0), end_unread_idx_(0) {
     readOverlap_.action = TOverlappedWorkItem::READ;
     readOverlap_.h = pipehandle.h;
     cancelOverlap_.action = TOverlappedWorkItem::CANCELIO;
@@ -116,7 +146,7 @@ public:
   }
   virtual uint32_t read(uint8_t* buf, uint32_t len);
   virtual void write(const uint8_t* buf, uint32_t len) {
-    pseudo_sync_write(Pipe_.h, write_event_.h, buf, len);
+    pseudo_sync_write(Pipe_.h, write_event_.h, cancel_event_.h, interruptListener(), buf, len);
   }
 
   virtual HANDLE getPipeHandle() { return Pipe_.h; }
@@ -139,23 +169,75 @@ private:
   uint32_t end_unread_idx_;
 };
 
+// Waits for an overlapped operation on the pipe to finish, as GetOverlappedResult()
+// does.  If cancel_event or interrupt_event (which may be null) is signalled
+// first, the operation is cancelled instead.  Either way, this returns only once
+// the system is done with the OVERLAPPED and the buffer, which both belong to
+// the caller.
+static BOOL waitForOverlappedResult(HANDLE pipe,
+                                    OVERLAPPED* overlap,
+                                    HANDLE cancel_event,
+                                    HANDLE interrupt_event,
+                                    DWORD* bytes) {
+  // the operation comes first, so that one that has finished wins over a cancel
+  HANDLE events[3] = {overlap->hEvent, cancel_event, interrupt_event};
+  DWORD count = interrupt_event ? 3 : 2;
+  DWORD signalled = ::WaitForMultipleObjects(count, events, FALSE, INFINITE);
+  if (signalled > WAIT_OBJECT_0 && signalled < WAIT_OBJECT_0 + count) {
+    // fails with ERROR_NOT_FOUND if the operation has finished in the meantime
+    ::CancelIoEx(pipe, overlap);
+  }
+  return ::GetOverlappedResult(pipe, overlap, bytes, TRUE);
+}
+
+static bool isSignalled(HANDLE event) {
+  return event && ::WaitForSingleObject(event, 0) == WAIT_OBJECT_0;
+}
+
+// An interrupted pipe reads no more, not even data that has already arrived,
+// as TSocket does.
+static void checkNotInterrupted(HANDLE interrupt_event) {
+  if (isSignalled(interrupt_event)) {
+    throw TTransportException(TTransportException::INTERRUPTED, "TPipe: interrupted");
+  }
+}
+
+// Throws for an overlapped operation that did not succeed.  Once the pipe has
+// been cancelled or interrupted, that is an interruption rather than a failure.
+static void throwOverlappedFailure(HANDLE cancel_event, HANDLE interrupt_event) {
+  DWORD lastError = ::GetLastError();
+  if (isSignalled(cancel_event) || isSignalled(interrupt_event)) {
+    throw TTransportException(TTransportException::INTERRUPTED, "TPipe: interrupted");
+  }
+  TOutput::instance().perror("TPipe ::GetOverlappedResult errored GLE=", lastError);
+  throw TTransportException(TTransportException::UNKNOWN, "TPipe: GetOverlappedResult failed");
+}
+
 void TWaitableNamedPipeImpl::beginAsyncRead(uint8_t* buf, uint32_t len) {
   begin_unread_idx_ = end_unread_idx_ = 0;
   readOverlap_.reset(buf, len, ready_event_.h);
   thread_->addWorkItem(&readOverlap_);
   if (readOverlap_.success == FALSE && readOverlap_.last_error != ERROR_IO_PENDING) {
-    GlobalOutput.perror("TPipe ::ReadFile errored GLE=", readOverlap_.last_error);
+    TOutput::instance().perror("TPipe ::ReadFile errored GLE=", readOverlap_.last_error);
     throw TTransportException(TTransportException::UNKNOWN, "TPipe: ReadFile failed");
   }
 }
 
 uint32_t TWaitableNamedPipeImpl::endAsyncRead() {
-  return readOverlap_.overlappedResults();
+  DWORD bytes = 0;
+  if (!waitForOverlappedResult(readOverlap_.h, &readOverlap_.overlap, cancel_event_.h,
+                               interruptListener(), &bytes)) {
+    throwOverlappedFailure(cancel_event_.h, interruptListener());
+  }
+  return bytes;
 }
 
 uint32_t TWaitableNamedPipeImpl::read(uint8_t* buf, uint32_t len) {
+  checkNotInterrupted(interruptListener());
   if (begin_unread_idx_ == end_unread_idx_) {
     end_unread_idx_ = endAsyncRead();
+    // the interrupt may have come while we waited, together with the data
+    checkNotInterrupted(interruptListener());
   }
 
   uint32_t __idxsize = end_unread_idx_ - begin_unread_idx_;
@@ -176,7 +258,12 @@ uint32_t TWaitableNamedPipeImpl::read(uint8_t* buf, uint32_t len) {
   return bytes_copied;
 }
 
-void pseudo_sync_write(HANDLE pipe, HANDLE event, const uint8_t* buf, uint32_t len) {
+void pseudo_sync_write(HANDLE pipe,
+                       HANDLE event,
+                       HANDLE cancel_event,
+                       HANDLE interrupt_event,
+                       const uint8_t* buf,
+                       uint32_t len) {
   OVERLAPPED tempOverlap;
   memset(&tempOverlap, 0, sizeof(tempOverlap));
   tempOverlap.hEvent = event;
@@ -186,21 +273,26 @@ void pseudo_sync_write(HANDLE pipe, HANDLE event, const uint8_t* buf, uint32_t l
     BOOL result = ::WriteFile(pipe, buf + written, len - written, nullptr, &tempOverlap);
 
     if (result == FALSE && ::GetLastError() != ERROR_IO_PENDING) {
-      GlobalOutput.perror("TPipe ::WriteFile errored GLE=", ::GetLastError());
+      TOutput::instance().perror("TPipe ::WriteFile errored GLE=", ::GetLastError());
       throw TTransportException(TTransportException::UNKNOWN, "TPipe: write failed");
     }
 
     DWORD bytes = 0;
-    result = ::GetOverlappedResult(pipe, &tempOverlap, &bytes, TRUE);
-    if (!result) {
-      GlobalOutput.perror("TPipe ::GetOverlappedResult errored GLE=", ::GetLastError());
-      throw TTransportException(TTransportException::UNKNOWN, "TPipe: GetOverlappedResult failed");
+    if (!waitForOverlappedResult(pipe, &tempOverlap, cancel_event, interrupt_event, &bytes)) {
+      throwOverlappedFailure(cancel_event, interrupt_event);
     }
     written += bytes;
   }
 }
 
-uint32_t pseudo_sync_read(HANDLE pipe, HANDLE event, uint8_t* buf, uint32_t len) {
+uint32_t pseudo_sync_read(HANDLE pipe,
+                          HANDLE event,
+                          HANDLE cancel_event,
+                          HANDLE interrupt_event,
+                          uint8_t* buf,
+                          uint32_t len) {
+  checkNotInterrupted(interrupt_event);
+
   OVERLAPPED tempOverlap;
   memset(&tempOverlap, 0, sizeof(tempOverlap));
   tempOverlap.hEvent = event;
@@ -208,16 +300,16 @@ uint32_t pseudo_sync_read(HANDLE pipe, HANDLE event, uint8_t* buf, uint32_t len)
   BOOL result = ::ReadFile(pipe, buf, len, nullptr, &tempOverlap);
 
   if (result == FALSE && ::GetLastError() != ERROR_IO_PENDING) {
-    GlobalOutput.perror("TPipe ::ReadFile errored GLE=", ::GetLastError());
+    TOutput::instance().perror("TPipe ::ReadFile errored GLE=", ::GetLastError());
     throw TTransportException(TTransportException::UNKNOWN, "TPipe: read failed");
   }
 
   DWORD bytes = 0;
-  result = ::GetOverlappedResult(pipe, &tempOverlap, &bytes, TRUE);
-  if (!result) {
-    GlobalOutput.perror("TPipe ::GetOverlappedResult errored GLE=", ::GetLastError());
-    throw TTransportException(TTransportException::UNKNOWN, "TPipe: GetOverlappedResult failed");
+  if (!waitForOverlappedResult(pipe, &tempOverlap, cancel_event, interrupt_event, &bytes)) {
+    throwOverlappedFailure(cancel_event, interrupt_event);
   }
+  // the interrupt may have come while we waited, together with the data
+  checkNotInterrupted(interrupt_event);
   return bytes;
 }
 
@@ -226,6 +318,14 @@ TPipe::TPipe(TAutoHandle &Pipe, std::shared_ptr<TConfiguration> config)
   : impl_(new TWaitableNamedPipeImpl(Pipe)), TimeoutSeconds_(3),
   isAnonymous_(false), TVirtualTransport(config) {
 }
+
+TPipe::TPipe(TAutoHandle& Pipe,
+             std::shared_ptr<TManualResetEvent> interruptListener,
+             std::shared_ptr<TConfiguration> config)
+  : TVirtualTransport(config),
+    impl_(new TWaitableNamedPipeImpl(Pipe, interruptListener)),
+    TimeoutSeconds_(3),
+    isAnonymous_(false) {}
 
 TPipe::TPipe(HANDLE Pipe, std::shared_ptr<TConfiguration> config)
   : TimeoutSeconds_(3), isAnonymous_(false), TVirtualTransport(config)
@@ -259,8 +359,19 @@ TPipe::~TPipe() {
 //---------------------------------------------------------
 // Transport callbacks
 //---------------------------------------------------------
+std::shared_ptr<TPipeImpl> TPipe::getImpl() const {
+  TAutoCrit lock(impl_protect_);
+  return impl_;
+}
+
+std::shared_ptr<TPipeImpl> TPipe::exchangeImpl(std::shared_ptr<TPipeImpl> impl) {
+  TAutoCrit lock(impl_protect_);
+  impl_.swap(impl);
+  return impl;
+}
+
 bool TPipe::isOpen() const {
-  return impl_.get() != nullptr;
+  return getImpl() != nullptr;
 }
 
 bool TPipe::peek() {
@@ -286,28 +397,36 @@ void TPipe::open() {
       break; // success!
 
     if (::GetLastError() != ERROR_PIPE_BUSY) {
-      GlobalOutput.perror("TPipe::open ::CreateFile errored GLE=", ::GetLastError());
+      TOutput::instance().perror("TPipe::open ::CreateFile errored GLE=", ::GetLastError());
       throw TTransportException(TTransportException::NOT_OPEN, "Unable to open pipe");
     }
   } while (::WaitNamedPipeA(pipename_.c_str(), TimeoutSeconds_ * 1000));
 
   if (hPipe.h == INVALID_HANDLE_VALUE) {
-    GlobalOutput.perror("TPipe::open ::CreateFile errored GLE=", ::GetLastError());
+    TOutput::instance().perror("TPipe::open ::CreateFile errored GLE=", ::GetLastError());
     throw TTransportException(TTransportException::NOT_OPEN, "Unable to open pipe");
   }
 
-  impl_.reset(new TNamedPipeImpl(hPipe));
+  exchangeImpl(std::make_shared<TNamedPipeImpl>(hPipe));
 }
 
 void TPipe::close() {
-  impl_.reset();
+  // Detach the implementation first, so that a concurrent read() or write()
+  // that already took a reference keeps it alive, then cancel it, so that
+  // such a call stops waiting for the peer.  The handles close with the last
+  // reference, which for an anonymous pipe can be a call that cancel() does
+  // not end.
+  auto oldImpl = exchangeImpl(nullptr);
+  if (oldImpl)
+    oldImpl->cancel();
 }
 
 uint32_t TPipe::read(uint8_t* buf, uint32_t len) {
   checkReadBytesAvailable(len);
-  if (!isOpen())
+  auto myImpl = getImpl();
+  if (!myImpl)
     throw TTransportException(TTransportException::NOT_OPEN, "Called read on non-open pipe");
-  return impl_->read(buf, len);
+  return myImpl->read(buf, len);
 }
 
 uint32_t pipe_read(HANDLE pipe, uint8_t* buf, uint32_t len) {
@@ -325,9 +444,10 @@ uint32_t pipe_read(HANDLE pipe, uint8_t* buf, uint32_t len) {
 }
 
 void TPipe::write(const uint8_t* buf, uint32_t len) {
-  if (!isOpen())
+  auto myImpl = getImpl();
+  if (!myImpl)
     throw TTransportException(TTransportException::NOT_OPEN, "Called write on non-open pipe");
-  impl_->write(buf, len);
+  myImpl->write(buf, len);
 }
 
 void pipe_write(HANDLE pipe, const uint8_t* buf, uint32_t len) {
@@ -358,35 +478,38 @@ void TPipe::setPipename(const std::string& pipename) {
 }
 
 HANDLE TPipe::getPipeHandle() {
-  if (impl_)
-    return impl_->getPipeHandle();
+  if (auto myImpl = getImpl())
+    return myImpl->getPipeHandle();
   return INVALID_HANDLE_VALUE;
 }
 
 void TPipe::setPipeHandle(HANDLE pipehandle) {
   if (isAnonymous_)
-    impl_->setPipeHandle(pipehandle);
+    getImpl()->setPipeHandle(pipehandle);
   else
   {
     TAutoHandle pipe(pipehandle);
-    impl_.reset(new TNamedPipeImpl(pipe));
+    // the implementation this replaces goes away as in close()
+    auto oldImpl = exchangeImpl(std::make_shared<TNamedPipeImpl>(pipe));
+    if (oldImpl)
+      oldImpl->cancel();
   }
 }
 
 HANDLE TPipe::getWrtPipeHandle() {
-  if (impl_)
-    return impl_->getWrtPipeHandle();
+  if (auto myImpl = getImpl())
+    return myImpl->getWrtPipeHandle();
   return INVALID_HANDLE_VALUE;
 }
 
 void TPipe::setWrtPipeHandle(HANDLE pipehandle) {
-  if (impl_)
-    impl_->setWrtPipeHandle(pipehandle);
+  if (auto myImpl = getImpl())
+    myImpl->setWrtPipeHandle(pipehandle);
 }
 
 HANDLE TPipe::getNativeWaitHandle() {
-  if (impl_)
-    return impl_->getNativeWaitHandle();
+  if (auto myImpl = getImpl())
+    return myImpl->getNativeWaitHandle();
   return INVALID_HANDLE_VALUE;
 }
 

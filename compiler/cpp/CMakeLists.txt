@@ -17,7 +17,7 @@
 # under the License.
 #
 
-cmake_minimum_required(VERSION 3.3)
+cmake_minimum_required(VERSION 3.16)
 project("thrift-compiler" VERSION ${PACKAGE_VERSION})
 
 # version.h now handled via veralign.sh
@@ -30,7 +30,7 @@ find_package(BISON REQUIRED)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/thrift/)
 
 # Create flex and bison files and build the lib parse static library
-BISON_TARGET(thrifty ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thrifty.yy ${CMAKE_CURRENT_BINARY_DIR}/thrift/thrifty.cc)
+BISON_TARGET(thrifty ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thrifty.yy ${CMAKE_CURRENT_BINARY_DIR}/thrift/thrifty.cc COMPILE_FLAGS "--file-prefix-map=${CMAKE_BINARY_DIR}='' --file-prefix-map=${CMAKE_SOURCE_DIR}=''")
 FLEX_TARGET(thriftl ${CMAKE_CURRENT_SOURCE_DIR}/src/thrift/thriftl.ll ${CMAKE_CURRENT_BINARY_DIR}/thrift/thriftl.cc)
 ADD_FLEX_BISON_DEPENDENCY(thriftl thrifty)
 
@@ -98,6 +98,7 @@ THRIFT_ADD_COMPILER(gv            "Enable compiler for GraphViz" ON)
 THRIFT_ADD_COMPILER(haxe          "Enable compiler for Haxe" ON)
 THRIFT_ADD_COMPILER(html          "Enable compiler for HTML Documentation" ON)
 THRIFT_ADD_COMPILER(markdown      "Enable compiler for Markdown Documentation" ON)
+THRIFT_ADD_COMPILER(mmd           "Enable compiler for Mermaid diagrams" ON)
 THRIFT_ADD_COMPILER(java          "Enable compiler for Java"   ON)
 THRIFT_ADD_COMPILER(javame        "Enable compiler for Java ME" ON)
 THRIFT_ADD_COMPILER(js            "Enable compiler for JavaScript" ON)
@@ -112,7 +113,6 @@ THRIFT_ADD_COMPILER(py            "Enable compiler for Python 2.0" ON)
 THRIFT_ADD_COMPILER(rb            "Enable compiler for Ruby" ON)
 THRIFT_ADD_COMPILER(rs            "Enable compiler for Rust" ON)
 THRIFT_ADD_COMPILER(st            "Enable compiler for Smalltalk" ON)
-THRIFT_ADD_COMPILER(swift         "Enable compiler for Cocoa Swift" ON)
 THRIFT_ADD_COMPILER(xml           "Enable compiler for XML" ON)
 THRIFT_ADD_COMPILER(xsd           "Enable compiler for XSD" ON)
 
@@ -125,7 +125,43 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR} src)
 
 list(APPEND thrift-compiler_SOURCES ${compiler_core})
 
-add_executable(thrift-compiler ${thrift-compiler_SOURCES})
+# The unit tests in tests/ link the generator and parser sources rather than
+# running the built compiler, so the same translation units used to be compiled
+# once here and a second time there. Compile them once into an object library
+# and let both targets consume the objects.
+#
+# What the executable keeps for itself is taken out of the shared set by what
+# the list actually holds, rather than by re-deriving the option names, so that
+# a renamed or disabled generator cannot silently leave one in place.
+set(thrift_compiler_exe_only
+    src/thrift/main.cc
+    # tests/ocaml/t_ocaml_generator_tests.cc includes t_ocaml_generator.cc
+    # directly, so that translation unit must not also reach the tests as a
+    # compiled object; the executable compiles it on its own.
+    src/thrift/generate/t_ocaml_generator.cc
+)
+
+set(thrift_compiler_exe_SOURCES)
+set(thrift_compiler_core_SOURCES ${thrift-compiler_SOURCES})
+foreach(src IN LISTS thrift_compiler_exe_only)
+    list(FIND thrift_compiler_core_SOURCES ${src} _found)
+    if(NOT _found EQUAL -1)
+        list(REMOVE_ITEM thrift_compiler_core_SOURCES ${src})
+        list(APPEND thrift_compiler_exe_SOURCES ${src})
+    endif()
+endforeach()
+
+if(NOT thrift_compiler_exe_SOURCES)
+    message(FATAL_ERROR "none of thrift_compiler_exe_only matched thrift-compiler_SOURCES; the compiler would be built without a main()")
+endif()
+
+add_library(thrift_compiler_core OBJECT ${thrift_compiler_core_SOURCES})
+
+# The generator sources include thrifty.hh, which bison produces as part of the
+# parse target; without this the objects could compile before it exists.
+target_link_libraries(thrift_compiler_core PUBLIC parse)
+
+add_executable(thrift-compiler ${thrift_compiler_exe_SOURCES} $<TARGET_OBJECTS:thrift_compiler_core>)
 
 set_target_properties(thrift-compiler PROPERTIES RUNTIME_OUTPUT_DIRECTORY bin/)
 set_target_properties(thrift-compiler PROPERTIES OUTPUT_NAME thrift)
@@ -143,4 +179,5 @@ install(TARGETS thrift-compiler DESTINATION bin)
 
 if(BUILD_TESTING)
     add_subdirectory(test)
+    add_subdirectory(tests)
 endif()

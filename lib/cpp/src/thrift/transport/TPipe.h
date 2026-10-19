@@ -29,6 +29,7 @@
 #include <thrift/windows/Sync.h>
 #endif
 #include <thrift/TNonCopyable.h>
+#include <memory>
 #ifdef _WIN32
 #include <thrift/windows/Sync.h>
 #endif
@@ -53,6 +54,12 @@ public:
   // Named pipe constructors -
   explicit TPipe(HANDLE Pipe, std::shared_ptr<TConfiguration> config = nullptr);       // HANDLE is a void*
   explicit TPipe(TAutoHandle& Pipe, std::shared_ptr<TConfiguration> config = nullptr); // this ctor will clear out / move from Pipe
+  // Like the one above, and once interruptListener is signalled, read() throws
+  // TTransportException::INTERRUPTED, as does a write() that waits on the pipe.
+  // TPipeServer uses this for the pipes it accepts, see interruptChildren().
+  TPipe(TAutoHandle& Pipe,
+        std::shared_ptr<TManualResetEvent> interruptListener,
+        std::shared_ptr<TConfiguration> config = nullptr);
   // need a const char * overload so string literals don't go to the HANDLE overload
   explicit TPipe(const char* pipename, std::shared_ptr<TConfiguration> config = nullptr);
   explicit TPipe(const std::string& pipename, std::shared_ptr<TConfiguration> config = nullptr);
@@ -71,7 +78,12 @@ public:
   // Creates and opens the named/anonymous pipe.
   void open() override;
 
-  // Shuts down communications on the pipe.
+  // Shuts down communications on the pipe.  Another thread may be in read() or
+  // write() meanwhile: if that call waits for the peer, it stops waiting and
+  // throws TTransportException::INTERRUPTED.  The pipe handles are closed once
+  // no such call uses them any more.  Anonymous pipes do synchronous I/O, which
+  // close() does not interrupt: their handles stay open, and the peer does not
+  // see the pipe closed, until a call in progress returns.
   void close() override;
 
   // Reads from the pipe.
@@ -95,6 +107,13 @@ public:
   HANDLE getNativeWaitHandle();
 
 private:
+  // close() may run while a read() or a write() is in flight by another thread,
+  // so impl_ must be accessed under impl_protect_.
+  std::shared_ptr<TPipeImpl> getImpl() const;
+  // Sets the new implementation and returns the previous one.
+  std::shared_ptr<TPipeImpl> exchangeImpl(std::shared_ptr<TPipeImpl> impl);
+
+  mutable TCriticalSection impl_protect_;
   std::shared_ptr<TPipeImpl> impl_;
 
   std::string pipename_;

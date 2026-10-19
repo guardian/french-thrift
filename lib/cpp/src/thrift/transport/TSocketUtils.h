@@ -62,7 +62,13 @@ private:
 public:
   using PtrOwnedList = std::unique_ptr<addrinfo, addrinfo_deleter>;
 
-  struct Iter : std::iterator<std::forward_iterator_tag, const addrinfo*> {
+  struct Iter {
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = const addrinfo*;
+    using difference_type = std::ptrdiff_t;
+    using pointer = value_type*;
+    using reference = value_type&;
+
     value_type ptr = nullptr;
 
     Iter() = default;
@@ -131,7 +137,7 @@ public:
   AddressResolutionHelper(const std::string& host,
                           const std::string& port, // pass "25" or "smtp" for port 25
                           int socktype = SOCK_STREAM,
-                          int flags = AI_V4MAPPED | AI_ADDRCONFIG)
+                          int flags = AI_ADDRCONFIG)
     : gai_results(query(host, port, socktype, flags)) {}
 
   AddressResolutionHelper() = default;
@@ -146,7 +152,7 @@ public:
   AddressResolutionHelper& resolve(const std::string& host,
                                    const std::string& port, // pass "25" or "smtp" for port 25
                                    int socktype = SOCK_STREAM,
-                                   int flags = AI_V4MAPPED | AI_ADDRCONFIG) {
+                                   int flags = AI_ADDRCONFIG) {
     gai_results.reset(query(host, port, socktype, flags));
     return *this;
   }

@@ -51,6 +51,7 @@ t_netstd_generator::t_netstd_generator(t_program* program, const map<string, str
     : t_oop_generator(program)
 {
     (void)option_string;
+    extensions_owner_ = program;
     target_net_version = 0;
     suppress_deepcopy = false;
     add_async_postfix = false;
@@ -82,8 +83,11 @@ t_netstd_generator::t_netstd_generator(t_program* program, const map<string, str
         else if (iter->first.compare("no_deepcopy") == 0) {
           suppress_deepcopy = true;
         }
-        else if (iter->first.compare("net6") == 0) {
-          target_net_version = 6;
+        else if (iter->first.compare("net10") == 0) {
+          target_net_version = 10;
+        }
+        else if (iter->first.compare("net9") == 0) {
+          target_net_version = 9;
         }
         else if (iter->first.compare("net8") == 0) {
           target_net_version = 8;
@@ -150,6 +154,12 @@ void t_netstd_generator::init_generator()
 
     namespace_dir_ = subdir;
 
+    // has to be known before the first call site is written, not just before the
+    // extensions file is
+    set<t_program*> visited;
+    inherited_extension_owners.clear();
+    collect_inherited_extensions_types(program_, visited, inherited_extension_owners);
+
     while (!member_mapping_scopes.empty())
     {
         cleanup_member_name_mapping(member_mapping_scopes.back().scope_member);
@@ -202,12 +212,15 @@ void t_netstd_generator::reset_indent() {
 
 void t_netstd_generator::pragmas_and_directives(ostream& out)
 {
-    if( target_net_version >= 8) {
+    if( target_net_version >= 10) {
+        out << "// targeting net 10" << '\n';
+        out << "#if( !NET10_0_OR_GREATER)" << '\n';
+    } else if( target_net_version >= 9) {
+        out << "// targeting net 9" << '\n';
+        out << "#if( NET10_0_OR_GREATER || !NET9_0_OR_GREATER)" << '\n';
+    } else if( target_net_version >= 8) {
         out << "// targeting net 8" << '\n';
-        out << "#if( !NET8_0_OR_GREATER)" << '\n';
-    } else if( target_net_version >= 6) {
-        out << "// targeting net 6" << '\n';
-        out << "#if( NET8_0_OR_GREATER || !NET6_0_OR_GREATER)" << '\n';
+        out << "#if( NET9_0_OR_GREATER || !NET8_0_OR_GREATER)" << '\n';
     } else {
         out << "// targeting netstandard 2.x" << '\n';
         out << "#if(! NETSTANDARD2_0_OR_GREATER)" << '\n';
@@ -224,12 +237,20 @@ void t_netstd_generator::pragmas_and_directives(ostream& out)
     // this one must be first
     out << "#pragma warning disable IDE0079  // remove unnecessary pragmas" << '\n';
 
-    if( target_net_version >= 8) {
-      out << "#pragma warning disable IDE0290  // use primary CTOR" << '\n';
-    } else {
+    if( target_net_version >= 9) {
+      out << "#pragma warning disable IDE0130  // unexpected folder structure" << '\n';
+    }
+
+    if( target_net_version < 8) {
       out << "#pragma warning disable IDE0017  // object init can be simplified" << '\n';
       out << "#pragma warning disable IDE0028  // collection init can be simplified" << '\n';
+      out << "#pragma warning disable IDE0305  // collection init can be simplified" << '\n';
+      out << "#pragma warning disable IDE0034  // simplify default expression" << '\n';
+      out << "#pragma warning disable IDE0066  // use switch expression" << '\n';
+      out << "#pragma warning disable IDE0090  // simplify new expression" << '\n';
     }
+
+    out << "#pragma warning disable IDE0290  // use primary CTOR" << '\n';
     out << "#pragma warning disable IDE1006  // parts of the code use IDL spelling" << '\n';
     out << "#pragma warning disable CA1822   // empty " << DEEP_COPY_METHOD_NAME << "() methods still non-static" << '\n';
 
@@ -602,7 +623,14 @@ bool t_netstd_generator::print_const_value(ostream& out, string name, t_type* ty
         if(in_static) {
           out << type_name(type) << " ";
         } else if(type->is_base_type()) {
-          out << "public const " << type_name(type) << " ";
+          // binary (byte[]) and uuid (Guid) cannot be C# `const`; use static readonly
+          t_base_type* bt = static_cast<t_base_type*>(type);
+          bool can_be_const = !bt->is_binary() && bt->get_base() != t_base_type::TYPE_UUID;
+          if(can_be_const) {
+            out << "public const " << type_name(type) << " ";
+          } else {
+            out << "public static " << (target_net_version >= 6 ? "readonly " : "") << type_name(type) << " ";
+          }
         } else  {
           out << "public static " << (target_net_version >= 6 ? "readonly " : "") << type_name(type) << " ";
         }
@@ -726,8 +754,15 @@ void t_netstd_generator::collect_extensions_types(t_type* ttype)
         {
             checked_extension_types[key] = ttype;    // prevent recursion
 
-            t_struct* tstruct = static_cast<t_struct*>(ttype);
-            collect_extensions_types(tstruct);
+            // Only recurse into structs defined in the current program. Structs from
+            // included programs are processed by those programs' own generators, which
+            // generate extension methods for their internal container types. Recursing
+            // into them here would duplicate those extension method signatures (CS0121).
+            if (ttype->get_program() == extensions_owner_)
+            {
+                t_struct* tstruct = static_cast<t_struct*>(ttype);
+                collect_extensions_types(tstruct);
+            }
         }
         return;
     }
@@ -764,9 +799,208 @@ void t_netstd_generator::collect_extensions_types(t_type* ttype)
     }
 }
 
+
+// Determine which container types the generator of an included program collects for
+// itself. Mirrors the collect_extensions_types() calls made while a program's structs,
+// exceptions and services are generated, but with that program as the recursion owner.
+void t_netstd_generator::collect_extensions_types_of_program(t_program* program, map<string, t_type*>& result)
+{
+    map<string, t_type*> saved_collected;
+    map<string, t_type*> saved_checked;
+    t_program* saved_owner = extensions_owner_;
+
+    saved_collected.swap(collected_extension_types);
+    saved_checked.swap(checked_extension_types);
+    extensions_owner_ = program;
+
+    const vector<t_struct*>& objects = program->get_objects();
+    vector<t_struct*>::const_iterator o_iter;
+    for (o_iter = objects.begin(); o_iter != objects.end(); ++o_iter)
+    {
+        collect_extensions_types(*o_iter);
+    }
+
+    const vector<t_service*>& services = program->get_services();
+    vector<t_service*>::const_iterator sv_iter;
+    for (sv_iter = services.begin(); sv_iter != services.end(); ++sv_iter)
+    {
+        const vector<t_function*>& functions = (*sv_iter)->get_functions();
+        vector<t_function*>::const_iterator fn_iter;
+        for (fn_iter = functions.begin(); fn_iter != functions.end(); ++fn_iter)
+        {
+            collect_extensions_types((*fn_iter)->get_arglist());
+            collect_extensions_types((*fn_iter)->get_xceptions());
+            collect_extensions_types((*fn_iter)->get_returntype());
+        }
+    }
+
+    result = collected_extension_types;
+
+    extensions_owner_ = saved_owner;
+    collected_extension_types.swap(saved_collected);
+    checked_extension_types.swap(saved_checked);
+}
+
+// True if the type - or, for a container, any of its element types - is declared in the
+// given program.
+bool t_netstd_generator::uses_type_of_program(t_type* ttype, t_program* program)
+{
+    ttype = resolve_typedef(ttype);
+
+    if (ttype->is_map())
+    {
+        t_map* tmap = static_cast<t_map*>(ttype);
+        return uses_type_of_program(tmap->get_key_type(), program) || uses_type_of_program(tmap->get_val_type(), program);
+    }
+
+    if (ttype->is_set())
+    {
+        return uses_type_of_program(static_cast<t_set*>(ttype)->get_elem_type(), program);
+    }
+
+    if (ttype->is_list())
+    {
+        return uses_type_of_program(static_cast<t_list*>(ttype)->get_elem_type(), program);
+    }
+
+    if (ttype->is_base_type())
+    {
+        return false;
+    }
+
+    return ttype->get_program() == program;
+}
+
+bool t_netstd_generator::uses_type_of_program(t_struct* tstruct, t_program* program)
+{
+    const vector<t_field*>& members = tstruct->get_members();
+    vector<t_field*>::const_iterator m_iter;
+    for (m_iter = members.begin(); m_iter != members.end(); ++m_iter)
+    {
+        if (uses_type_of_program((*m_iter)->get_type(), program))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// True if the code generated for "from" names at least one type declared in "program".
+// Such a pair can only ever be compiled together, so "from" may leave extension methods
+// to "program" instead of generating a second, ambiguous copy of them.
+bool t_netstd_generator::program_depends_on(t_program* from, t_program* program)
+{
+    const vector<t_struct*>& objects = from->get_objects();
+    vector<t_struct*>::const_iterator o_iter;
+    for (o_iter = objects.begin(); o_iter != objects.end(); ++o_iter)
+    {
+        if (uses_type_of_program(*o_iter, program))
+        {
+            return true;
+        }
+    }
+
+    const vector<t_const*>& consts = from->get_consts();
+    vector<t_const*>::const_iterator c_iter;
+    for (c_iter = consts.begin(); c_iter != consts.end(); ++c_iter)
+    {
+        if (uses_type_of_program((*c_iter)->get_type(), program))
+        {
+            return true;
+        }
+    }
+
+    const vector<t_service*>& services = from->get_services();
+    vector<t_service*>::const_iterator sv_iter;
+    for (sv_iter = services.begin(); sv_iter != services.end(); ++sv_iter)
+    {
+        t_service* extends = (*sv_iter)->get_extends();
+        if ((extends != nullptr) && (extends->get_program() == program))
+        {
+            return true;
+        }
+
+        const vector<t_function*>& functions = (*sv_iter)->get_functions();
+        vector<t_function*>::const_iterator fn_iter;
+        for (fn_iter = functions.begin(); fn_iter != functions.end(); ++fn_iter)
+        {
+            if (uses_type_of_program((*fn_iter)->get_returntype(), program)
+                || uses_type_of_program((*fn_iter)->get_arglist(), program)
+                || uses_type_of_program((*fn_iter)->get_xceptions(), program))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// Gather the container types generated by the included programs we can safely leave them
+// to. That requires two things: their generated code has to be part of every build that
+// contains ours, and their extension class has to land in the same C# namespace - a class
+// in another namespace is out of reach of our generated call sites.
+void t_netstd_generator::collect_inherited_extensions_types(t_program* program, set<t_program*>& visited, map<string, t_program*>& result)
+{
+    const vector<t_program*>& includes = program->get_includes();
+    vector<t_program*>::const_iterator incl_iter;
+    for (incl_iter = includes.begin(); incl_iter != includes.end(); ++incl_iter)
+    {
+        t_program* include = *incl_iter;
+        if (!program_depends_on(program, include))
+        {
+            continue;   // an include we generate no reference to may not be around at all
+        }
+
+        if (!visited.insert(include).second)
+        {
+            continue;   // diamond-shaped include graph
+        }
+
+        if (include->get_namespace("netstd") == namespace_name_)
+        {
+            map<string, t_type*> types;
+            collect_extensions_types_of_program(include, types);
+
+            map<string, t_type*>::const_iterator type_iter;
+            for (type_iter = types.begin(); type_iter != types.end(); ++type_iter)
+            {
+                result.insert(std::make_pair(type_iter->first, include));
+            }
+        }
+
+        collect_inherited_extensions_types(include, visited, result);
+    }
+}
+
+// An included program generates extension methods for the container types it uses itself.
+// Whenever we use one of the same containers, both extension classes end up with the very
+// same signature, and since they also share the C# namespace every call site becomes
+// ambiguous (CS0121). Leave those to the included program - wherever our extension class
+// is in scope, theirs is too.
+void t_netstd_generator::remove_inherited_extensions_types(map<string, t_type*>& types)
+{
+    map<string, t_type*>::iterator iter = types.begin();
+    while (iter != types.end())
+    {
+        if (inherited_extension_owners.find(iter->first) != inherited_extension_owners.end())
+        {
+            iter = types.erase(iter);
+        }
+        else
+        {
+            ++iter;
+        }
+    }
+}
+
 void t_netstd_generator::generate_extensions_file()
 {
-    if (collected_extension_types.empty())
+    map<string, t_type*> extension_types = collected_extension_types;
+    remove_inherited_extensions_types(extension_types);
+
+    if (extension_types.empty())
     {
         return;
     }
@@ -775,7 +1009,7 @@ void t_netstd_generator::generate_extensions_file()
     ofstream_with_content_based_conditional_update f_exts;
     f_exts.open(f_exts_name.c_str());
 
-    generate_extensions(f_exts, collected_extension_types);
+    generate_extensions(f_exts, extension_types);
 
     f_exts.close();
 }
@@ -829,7 +1063,6 @@ void t_netstd_generator::generate_extensions(ostream& out, map<string, t_type*> 
             out << indent() << "return null;" << '\n' << '\n';
             indent_down();
 
-            string suffix("");
             string tmp_instance = tmp("tmp");
             if( (target_net_version < 5) && iter->second->is_set()) {
                 out << indent() << "var " << tmp_instance << " = new " << iter->first << "();" << '\n';
@@ -839,28 +1072,28 @@ void t_netstd_generator::generate_extensions(ostream& out, map<string, t_type*> 
             if( iter->second->is_map())
             {
                 t_map* tmap = static_cast<t_map*>(iter->second);
-                string copy_key = get_deep_copy_method_call(tmap->get_key_type(), true, needs_typecast, suffix);
-                string copy_val = get_deep_copy_method_call(tmap->get_val_type(), true, needs_typecast, suffix);
+                string copy_key = deep_copy_expression("pair.Key", tmap->get_key_type(), true, needs_typecast);
+                string copy_val = deep_copy_expression("pair.Value", tmap->get_val_type(), true, needs_typecast);
                 bool null_key = type_can_be_null(tmap->get_key_type());
                 bool null_val = type_can_be_null(tmap->get_val_type());
 
                 out << indent() << "foreach (var pair in source)" << '\n';
                 indent_up();
                 if( target_net_version >= 6) {
-                    out << indent() << tmp_instance << ".Add(pair.Key" << copy_key;
-                    out << ", pair.Value" << copy_val;
+                    out << indent() << tmp_instance << ".Add(" << copy_key;
+                    out << ", " << copy_val;
                 } else {
                     out << indent() << tmp_instance << ".Add(";
                     if( null_key) {
-                        out << "(pair.Key != null) ? pair.Key" << copy_key << " : null";
+                        out << "(pair.Key != null) ? " << copy_key << " : null";
                     } else {
-                        out << "pair.Key" << copy_key;
+                        out << copy_key;
                     }
                     out << ", ";
                     if( null_val) {
-                        out << "(pair.Value != null) ? pair.Value" << copy_val << " : null";
+                        out << "(pair.Value != null) ? " << copy_val << " : null";
                     } else {
-                        out << "pair.Value" << copy_val;
+                        out << copy_val;
                     }
                 }
                 out << ");" << '\n';
@@ -872,27 +1105,27 @@ void t_netstd_generator::generate_extensions(ostream& out, map<string, t_type*> 
                 if (iter->second->is_set())
                 {
                     t_set* tset = static_cast<t_set*>(iter->second);
-                    copy_elm = get_deep_copy_method_call(tset->get_elem_type(), true, needs_typecast, suffix);
+                    copy_elm = deep_copy_expression("elem", tset->get_elem_type(), true, needs_typecast);
                     null_elm = type_can_be_null(tset->get_elem_type());
                 }
                 else // list
                 {
                     t_list* tlist = static_cast<t_list*>(iter->second);
-                    copy_elm = get_deep_copy_method_call(tlist->get_elem_type(), true, needs_typecast, suffix);
+                    copy_elm = deep_copy_expression("elem", tlist->get_elem_type(), true, needs_typecast);
                     null_elm = type_can_be_null(tlist->get_elem_type());
                 }
 
                 out << indent() << "foreach (var elem in source)" << '\n';
                 indent_up();
                 if( target_net_version >= 6) {
-                    out << indent() << tmp_instance << ".Add(elem" << copy_elm;
+                    out << indent() << tmp_instance << ".Add(" << copy_elm;
                 } else {
                     out << indent() << tmp_instance << ".Add(";
                     if( null_elm)
                     {
-                        out << "(elem != null) ? elem" << copy_elm << " : null";
+                        out << "(elem != null) ? " << copy_elm << " : null";
                     } else {
-                        out << "elem" << copy_elm;
+                        out << copy_elm;
                     }
                 }
                 out << ");" << '\n';
@@ -1231,9 +1464,8 @@ void t_netstd_generator::generate_netstd_deepcopy_method(ostream& out, t_struct*
 
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
         bool needs_typecast = false;
-        string suffix("");
         t_type* ttype = (*m_iter)->get_type();
-        string copy_op = get_deep_copy_method_call(ttype, true, needs_typecast, suffix);
+        string copy_op = deep_copy_expression("this." + prop_name(*m_iter), ttype, true, needs_typecast);
 
         bool is_required = field_is_required(*m_iter);
         bool null_allowed = type_can_be_null((*m_iter)->get_type());
@@ -1256,7 +1488,7 @@ void t_netstd_generator::generate_netstd_deepcopy_method(ostream& out, t_struct*
         if( needs_typecast) {
             out << "(" << type_name(ttype) << ")";
         }
-        out << "this." << prop_name(*m_iter) << copy_op;
+        out << copy_op;
         out << (inline_assignment ? "," : ";") << '\n';
 
         generate_null_check_end( out, *m_iter);
@@ -1769,9 +2001,8 @@ void t_netstd_generator::generate_netstd_union_definition(ostream& out, t_struct
             for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter)
             {
                 bool needs_typecast = false;
-                string suffix("");
-                string copy_op = get_deep_copy_method_call((*f_iter)->get_type(), false, needs_typecast, suffix);
-                out << indent() << (*f_iter)->get_key() << " => new " << (*f_iter)->get_name() << "(As_" << (*f_iter)->get_name() << suffix << copy_op << ")," << '\n';
+                string copy_op = deep_copy_expression("As_" + (*f_iter)->get_name(), (*f_iter)->get_type(), false, needs_typecast, true);
+                out << indent() << (*f_iter)->get_key() << " => new " << (*f_iter)->get_name() << "(" << copy_op << ")," << '\n';
             }
             out << indent() << "_ => new ___undefined()" << '\n';
             indent_down();
@@ -1783,11 +2014,10 @@ void t_netstd_generator::generate_netstd_union_definition(ostream& out, t_struct
             for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter)
             {
                 bool needs_typecast = false;
-                string suffix("");
-                string copy_op = get_deep_copy_method_call((*f_iter)->get_type(), false, needs_typecast, suffix);
+                string copy_op = deep_copy_expression("As_" + (*f_iter)->get_name(), (*f_iter)->get_type(), false, needs_typecast, true);
                 out << indent() << "case " << (*f_iter)->get_key() << ":" << '\n';
                 indent_up();
-                out << indent() << "return new " << (*f_iter)->get_name() << "(As_" << (*f_iter)->get_name() << suffix << copy_op << ");" << '\n';
+                out << indent() << "return new " << (*f_iter)->get_name() << "(" << copy_op << ");" << '\n';
                 indent_down();
             }
             out << indent() << "default:" << '\n';
@@ -1881,9 +2111,8 @@ void t_netstd_generator::generate_netstd_union_class(ostream& out, t_struct* tun
         out << indent() << "{" << '\n';
         indent_up();
         bool needs_typecast = false;
-        string suffix("");
-        string copy_op = get_deep_copy_method_call(tfield->get_type(), true, needs_typecast, suffix);
-        out << indent() << "return new " << normalize_name(tfield->get_name()) << "(_data" << copy_op << ");" << '\n';
+        string copy_op = deep_copy_expression("_data", tfield->get_type(), true, needs_typecast);
+        out << indent() << "return new " << normalize_name(tfield->get_name()) << "(" << copy_op << ");" << '\n';
         indent_down();
         out << indent() << "}" << '\n' << '\n';
     }
@@ -2643,7 +2872,7 @@ void t_netstd_generator::generate_process_function_async(ostream& out, t_service
 
     string tmpvar = tmp("tmp");
     out << indent() << "var " << tmpvar << " = $\"Error occurred in {GetType().FullName}: {" << tmpex << ".Message}\";" << '\n';
-    out << indent() << "if(_logger != null)" << '\n';
+    out << indent() << "if ((_logger != null) && _logger.IsEnabled(LogLevel.Error))" << '\n';
     indent_up();
     out << indent() << "_logger.LogError(\"{Exception}, {Message}\", " << tmpex << ", " << tmpvar << ");" << '\n';
     indent_down();
@@ -2888,7 +3117,7 @@ void t_netstd_generator::generate_deserialize_container(ostream& out, t_type* tt
     if( (target_net_version < 5) && ttype->is_set()) {
         out << indent() << prefix << " = new " << type_name(ttype) << "();" << '\n';
     } else {
-        out << indent() << prefix << " = new " << type_name(ttype) << "(" << obj << ".Count);" << '\n';
+        out << indent() << prefix << " = new " << type_name(ttype) << "(TProtocolUtil.PreallocSize(" << obj << ".Count));" << '\n';
     }
     string i = tmp("_i");
     out << indent() << "for(int " << i << " = 0; " << i << " < " << obj << ".Count; ++" << i << ")" << '\n'
@@ -3684,6 +3913,56 @@ string t_netstd_generator::get_deep_copy_method_call(t_type* ttype, bool is_not_
     throw "UNEXPECTED TYPE IN get_deep_copy_method_call: " + ttype->get_name();
 }
 
+// The name of the extension class holding the container extension methods of a program.
+string t_netstd_generator::extensions_class_name(t_program* program)
+{
+    return make_valid_csharp_identifier(program->get_name()) + "Extensions";
+}
+
+// The extension class that carries the DeepCopy() of the given container type. That is
+// ours, unless the container was left to an included program (see THRIFT-6198).
+string t_netstd_generator::extensions_class_of(t_type* ttype)
+{
+    map<string, t_program*>::const_iterator iter = inherited_extension_owners.find(type_name(ttype));
+    return extensions_class_name((iter != inherited_extension_owners.end()) ? iter->second : program_);
+}
+
+// Builds the expression that deep-copies "source".
+//
+// A container's DeepCopy() is an extension method, and the same signature can exist in
+// more than one extension class of a C# namespace - THRIFT-6198 removes the duplicates it
+// can see, but two programs without an include relation between them cannot know of each
+// other (THRIFT-6199). Calling through the class that owns the method rather than through
+// extension method syntax keeps the call site unambiguous however many of those classes
+// happen to be in scope. Structs and unions have an ordinary DeepCopy() instance method
+// and are left alone.
+//
+// null_conditional picks the "source?.DeepCopy()" form for those, which is what the code
+// generated for unions needs.
+string t_netstd_generator::deep_copy_expression(const string& source, t_type* ttype, bool is_not_null, bool& needs_typecast, bool null_conditional)
+{
+    t_type* resolved = resolve_typedef(ttype);
+
+    if (!resolved->is_container())
+    {
+        string suffix("");
+        string copy_op = get_deep_copy_method_call(ttype, is_not_null, needs_typecast, suffix);
+        return source + (null_conditional ? suffix : "") + copy_op;
+    }
+
+    needs_typecast = false;
+
+    // if is_not_null is set, then the surrounding code already explicitly tests against != null
+    string null_check("");
+    if( target_net_version >= 8) {
+        null_check = is_not_null ? "!" : " ?? []";
+    } else if( target_net_version >= 6) {
+        null_check = is_not_null ? "!" : " ?? new()";
+    }
+
+    return extensions_class_of(resolved) + "." + DEEP_COPY_METHOD_NAME + "(" + source + ")" + null_check;
+}
+
 string t_netstd_generator::declare_field(t_field* tfield, bool init, bool allow_nullable, string prefix)
 {
     string result = type_name(tfield->get_type())
@@ -3913,9 +4192,9 @@ void t_netstd_generator::generate_netstd_doc(ostream& out, t_doc* tdoc)
 
 void t_netstd_generator::generate_netstd_doc(ostream& out, t_function* tfunction)
 {
-    if (tfunction->has_doc())
-    {
-        stringstream ps;
+    stringstream ps;
+    if (tfunction->has_doc()) {
+        ps << "<summary>\n" << xml_encode(tfunction->get_doc()) << "</summary>";
         const vector<t_field*>& fields = tfunction->get_arglist()->get_members();
         vector<t_field*>::const_iterator p_iter;
         for (p_iter = fields.begin(); p_iter != fields.end(); ++p_iter)
@@ -3924,18 +4203,38 @@ void t_netstd_generator::generate_netstd_doc(ostream& out, t_function* tfunction
             ps << '\n' << "<param name=\"" << p->get_name() << "\">";
             if (p->has_doc())
             {
-                string str = p->get_doc();
-                str.erase(remove(str.begin(), str.end(), '\n'), str.end());
-                ps << str;
+                ps << xml_encode(p->get_doc());
             }
             ps << "</param>";
         }
+    }
 
-        docstring_comment(out,
-                                   "",
-                                   "/// ",
-                                   "<summary>" + string("\n") + tfunction->get_doc() + "</summary>" + ps.str(),
-                                   "");
+    const vector<t_field*>& exceptions = tfunction->get_xceptions()->get_members();
+    if (!exceptions.empty()) {
+        vector<t_field*>::const_iterator e_iter;
+        for (e_iter = exceptions.begin(); e_iter != exceptions.end(); ++e_iter)
+        {
+            t_field* e = *e_iter;
+            if (!ps.str().empty())
+            {
+                ps << '\n';
+            }
+            ps << "<exception cref=\"" << type_name(e->get_type()) << "\">";
+            if (e->has_doc())
+            {
+                string doc = e->get_doc();
+                while (!doc.empty() && (doc.back() == '\n' || doc.back() == '\r')) {
+                    doc.pop_back();
+                }
+                ps << xml_encode(doc);
+            }
+            ps << "</exception>";
+        }
+    }
+
+    const std::string result_doc = ps.str();
+    if (!result_doc.empty()) {
+        docstring_comment(out, "", "/// ", result_doc, "");
     }
 }
 
@@ -3992,8 +4291,9 @@ THRIFT_REGISTER_GENERATOR(
     "    serial:          Add serialization support to generated classes.\n"
     "    union:           Use new union typing, which includes a static read function for union types.\n"
     "    pascal:          Generate Pascal Case property names according to Microsoft naming convention.\n"
-    "    net6:            Enable features that require net6 and C# 8 or higher.\n"
     "    net8:            Enable features that require net8 and C# 12 or higher.\n"
+    "    net9:            Enable features that require net9 and C# 13 or higher.\n"
+    "    net10:           Enable features that require net10 and C# 14 or higher.\n"
     "    no_deepcopy:     Suppress generation of " + DEEP_COPY_METHOD_NAME + "() method.\n"
     "    async_postfix:   Append \"Async\" to all service methods (maintains compatibility with existing code).\n"
 )

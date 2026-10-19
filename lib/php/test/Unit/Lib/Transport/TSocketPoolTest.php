@@ -19,11 +19,20 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Constraint\Constraint;
+use PHPUnit\Framework\Assert;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
+use ReflectionProperty;
 use Thrift\Exception\TException;
+use Thrift\Transport\TSocket;
 use Thrift\Transport\TSocketPool;
 
 class TSocketPoolTest extends TestCase
@@ -34,29 +43,28 @@ class TSocketPoolTest extends TestCase
     {
         #need to be defined before the TSocketPool class definition
         self::defineFunctionMock('Thrift\Transport', 'function_exists');
+
+        (new ReflectionProperty(TSocketPool::class, 'hasApcuCache'))
+             ->setValue(null, null);
+        (new ReflectionProperty(TSocket::class, 'hasSocketsExtension'))
+             ->setValue(null, null);
     }
 
-    /**
-     * @dataProvider constructDataProvider
-     */
+    #[DataProvider('constructDataProvider')]
     public function testConstruct(
         $hosts,
         $ports,
         $persist,
-        $debugHandler,
+        $logger,
         $expectedServers
     ) {
-        $socketPool = new TSocketPool($hosts, $ports, $persist, $debugHandler);
+        $socketPool = new TSocketPool($hosts, $ports, $persist, $logger);
 
-        $ref = new \ReflectionObject($socketPool);
-        $serversProp = $ref->getProperty('servers_');
-        $serversProp->setAccessible(true);
-
-        $this->assertEquals($expectedServers, $serversProp->getValue($socketPool));
+        $this->assertEquals($expectedServers, (new ReflectionProperty($socketPool, 'servers'))->getValue($socketPool));
     }
 
 
-    public function constructDataProvider()
+    public static function constructDataProvider()
     {
         yield 'one server' => [
             ['localhost'],
@@ -103,11 +111,10 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->addServer('localhost', 9090);
 
-        $ref = new \ReflectionObject($socketPool);
-        $servers = $ref->getProperty('servers_');
-        $servers->setAccessible(true);
-
-        $this->assertEquals([['host' => 'localhost', 'port' => 9090]], $servers->getValue($socketPool));
+        $this->assertEquals(
+            [['host' => 'localhost', 'port' => 9090]],
+            (new ReflectionProperty($socketPool, 'servers'))->getValue($socketPool)
+        );
     }
 
     public function testSetNumRetries(): void
@@ -115,11 +122,7 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->setNumRetries(5);
 
-        $ref = new \ReflectionObject($socketPool);
-        $numRetries = $ref->getProperty('numRetries_');
-        $numRetries->setAccessible(true);
-
-        $this->assertEquals(5, $numRetries->getValue($socketPool));
+        $this->assertEquals(5, (new ReflectionProperty($socketPool, 'numRetries'))->getValue($socketPool));
     }
 
     public function testrSetRetryInterval(): void
@@ -127,11 +130,7 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->setRetryInterval(5);
 
-        $ref = new \ReflectionObject($socketPool);
-        $retryInterval = $ref->getProperty('retryInterval_');
-        $retryInterval->setAccessible(true);
-
-        $this->assertEquals(5, $retryInterval->getValue($socketPool));
+        $this->assertEquals(5, (new ReflectionProperty($socketPool, 'retryInterval'))->getValue($socketPool));
     }
 
     public function testrSetMaxConsecutiveFailures(): void
@@ -139,11 +138,7 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->setMaxConsecutiveFailures(5);
 
-        $ref = new \ReflectionObject($socketPool);
-        $maxConsecutiveFailures = $ref->getProperty('maxConsecutiveFailures_');
-        $maxConsecutiveFailures->setAccessible(true);
-
-        $this->assertEquals(5, $maxConsecutiveFailures->getValue($socketPool));
+        $this->assertEquals(5, (new ReflectionProperty($socketPool, 'maxConsecutiveFailures'))->getValue($socketPool));
     }
 
     public function testrSetRandomize(): void
@@ -151,11 +146,7 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->setRandomize(false);
 
-        $ref = new \ReflectionObject($socketPool);
-        $randomize = $ref->getProperty('randomize_');
-        $randomize->setAccessible(true);
-
-        $this->assertEquals(false, $randomize->getValue($socketPool));
+        $this->assertEquals(false, (new ReflectionProperty($socketPool, 'randomize'))->getValue($socketPool));
     }
 
     public function testrSetAlwaysTryLast(): void
@@ -163,43 +154,49 @@ class TSocketPoolTest extends TestCase
         $socketPool = new TSocketPool([], []);
         $socketPool->setAlwaysTryLast(false);
 
-        $ref = new \ReflectionObject($socketPool);
-        $alwaysTryLast = $ref->getProperty('alwaysTryLast_');
-        $alwaysTryLast->setAccessible(true);
-
-        $this->assertEquals(false, $alwaysTryLast->getValue($socketPool));
+        $this->assertEquals(false, (new ReflectionProperty($socketPool, 'alwaysTryLast'))->getValue($socketPool));
     }
 
-    /**
-     * @dataProvider openDataProvider
-     */
+    #[DataProvider('openDataProvider')]
     public function testOpen(
         $hosts,
         $ports,
         $persist,
-        $debugHandler,
+        $logger,
         $randomize,
         $retryInterval,
         $numRetries,
         $maxConsecutiveFailures,
-        $debug,
         $servers,
         $functionExistCallParams,
         $functionExistResult,
         $apcuFetchCallParams,
         $apcuFetchResult,
         $timeResult,
-        $debugHandlerCall,
+        $loggerCall,
         $apcuStoreCallParams,
         $fsockopenCallParams,
         $fsockopenResult,
         $expectedException,
         $expectedExceptionMessage
     ) {
+        $this->assertCount(count($apcuFetchCallParams), $apcuFetchResult);
+
         $this->getFunctionMock('Thrift\Transport', 'function_exists')
              ->expects($this->exactly(count($functionExistCallParams)))
-             ->withConsecutive(...$functionExistCallParams)
-             ->willReturnOnConsecutiveCalls(...$functionExistResult);
+             ->willReturnCallback(function (...$callArgs) use ($functionExistCallParams, $functionExistResult) {
+                 static $iteration = 0;
+                 $expected = $functionExistCallParams[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                 return $functionExistResult[$iteration++];
+             });
 
         $this->getFunctionMock('Thrift\Transport', 'shuffle')
              ->expects($randomize ? $this->once() : $this->never())
@@ -212,18 +209,54 @@ class TSocketPoolTest extends TestCase
 
         $this->getFunctionMock('Thrift\Transport', 'apcu_fetch')
              ->expects($this->exactly(count($apcuFetchCallParams)))
-             ->withConsecutive(...$apcuFetchCallParams)
-             ->willReturnOnConsecutiveCalls(...$apcuFetchResult);
+             ->willReturnCallback(function (...$callArgs) use ($apcuFetchCallParams, $apcuFetchResult) {
+                 static $iteration = 0;
+                 $expected = $apcuFetchCallParams[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
 
-        $this->getFunctionMock('Thrift\Transport', 'call_user_func')
-             ->expects($this->exactly(count($debugHandlerCall)))
-             ->withConsecutive(...$debugHandlerCall)
-             ->willReturn(true);
+                 return $apcuFetchResult[$iteration++];
+             });
+
+        $loggerMock = $this->createMock(LoggerInterface::class);
+        if (count($loggerCall) > 0) {
+            $loggerMock->expects($this->exactly(count($loggerCall)))
+                   ->method('log')
+                   ->willReturnCallback(function (...$callArgs) use ($loggerCall) {
+                       static $iteration = 0;
+                       $expected = $loggerCall[$iteration++];
+                    foreach ($expected as $i => $exp) {
+                        if ($exp instanceof Constraint) {
+                            $this->assertThat($callArgs[$i], $exp);
+                        } else {
+                            $this->assertSame($exp, $callArgs[$i]);
+                        }
+                    }
+                   });
+        } else {
+            $loggerMock->expects($this->never())->method('log');
+        }
 
         $this->getFunctionMock('Thrift\Transport', 'apcu_store')
              ->expects($this->exactly(count($apcuStoreCallParams)))
-             ->withConsecutive(...$apcuStoreCallParams)
-             ->willReturn(true);
+             ->willReturnCallback(function (...$callArgs) use ($apcuStoreCallParams) {
+                 static $iteration = 0;
+                 $expected = $apcuStoreCallParams[$iteration++];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                 return true;
+             });
 
         $this->getFunctionMock('Thrift\Transport', 'time')
              ->expects($this->exactly(count($timeResult)))
@@ -236,8 +269,19 @@ class TSocketPoolTest extends TestCase
 
         $this->getFunctionMock('Thrift\Transport', $persist ? 'pfsockopen' : 'fsockopen')
              ->expects($this->exactly(count($fsockopenCallParams)))
-             ->withConsecutive(...$fsockopenCallParams)
-             ->willReturnOnConsecutiveCalls(...$fsockopenResult);
+             ->willReturnCallback(function (...$callArgs) use ($fsockopenCallParams, $fsockopenResult) {
+                 static $iteration = 0;
+                 $expected = $fsockopenCallParams[$iteration];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($callArgs[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $callArgs[$i]);
+                    }
+                }
+
+                 return $fsockopenResult[$iteration++];
+             });
 
         $this->getFunctionMock('Thrift\Transport', 'socket_import_stream')
              ->expects(is_null($expectedException) ? $this->once() : $this->never())
@@ -251,7 +295,7 @@ class TSocketPoolTest extends TestCase
         $this->getFunctionMock('Thrift\Transport', 'socket_set_option')
              ->expects(is_null($expectedException) ? $this->once() : $this->never())
              ->with(
-                 $this->anything(), #$socket,
+                 Assert::anything(), #$socket,
                  SOL_TCP, #$level
                  TCP_NODELAY, #$option
                  1 #$value
@@ -263,28 +307,26 @@ class TSocketPoolTest extends TestCase
             $this->expectExceptionMessage($expectedExceptionMessage);
         }
 
-        $socketPool = new TSocketPool($hosts, $ports, $persist, $debugHandler);
+        $socketPool = new TSocketPool($hosts, $ports, $persist, $logger ?? $loggerMock);
         $socketPool->setRandomize($randomize);
         $socketPool->setRetryInterval($retryInterval);
         $socketPool->setNumRetries($numRetries);
         $socketPool->setMaxConsecutiveFailures($maxConsecutiveFailures);
-        $socketPool->setDebug($debug);
 
         $this->assertNull($socketPool->open());
     }
 
-    public function openDataProvider()
+    public static function openDataProvider()
     {
         $default = [
             'hosts' => ['localhost'],
             'ports' => [9090],
             'persist' => false,
-            'debugHandler' => null,
+            'logger' => null,
             'randomize' => true,
             'retryInterval' => 5,
             'numRetries' => 1,
             'maxConsecutiveFailures' => 1,
-            'debug' => false,
             'servers' => [
                 ['host' => 'localhost', 'port' => 9090],
             ],
@@ -299,21 +341,21 @@ class TSocketPoolTest extends TestCase
                 true,
             ],
             'apcuFetchCallParams' => [
-                ['thrift_failtime:localhost:9090~', $this->anything()],
+                ['thrift_failtime:localhost:9090~', Assert::anything()],
             ],
             'apcuFetchResult' => [
                 false,
             ],
             'timeResult' => [],
-            'debugHandlerCall' => [],
+            'loggerCall' => [],
             'apcuStoreCallParams' => [],
             'fsockopenCallParams' => [
                 [
                     'localhost',
                     9090,
-                    $this->anything(), #$errno,
-                    $this->anything(), #$errstr,
-                    $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                    Assert::anything(), #$errno,
+                    Assert::anything(), #$errstr,
+                    Assert::anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
                 ],
             ],
             'fsockopenResult' => [
@@ -334,15 +376,21 @@ class TSocketPoolTest extends TestCase
                     false,
                 ],
                 'apcuFetchCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
-                    ['thrift_consecfails:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
+                    ['thrift_consecfails:localhost:9090~', Assert::anything()],
                 ],
+                'apcuFetchResult' => [false, false],
                 'apcuStoreCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
-                    ['thrift_consecfails:localhost:9090~', $this->anything(), 0],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
+                    ['thrift_consecfails:localhost:9090~', Assert::anything(), 0],
                 ],
                 'timeResult' => [
                     1,
+                ],
+                'loggerCall' => [
+                    [LogLevel::ERROR, 'TSocket: Could not connect to localhost:9090 ( [])'],
+                    [LogLevel::WARNING, 'TSocketPool: marking localhost:9090 as down for 5 secs after 1 failed attempts.'],
+                    [LogLevel::ERROR, 'TSocketPool: All hosts in pool are down. (localhost:9090)'],
                 ],
                 'expectedException' => TException::class,
                 'expectedExceptionMessage' => 'TSocketPool: All hosts in pool are down. (localhost:9090)',
@@ -356,16 +404,16 @@ class TSocketPoolTest extends TestCase
                     [
                         'localhost',
                         9090,
-                        $this->anything(), #$errno,
-                        $this->anything(), #$errstr,
-                        $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                        Assert::anything(), #$errno,
+                        Assert::anything(), #$errstr,
+                        Assert::anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
                     ],
                     [
                         'localhost',
                         9090,
-                        $this->anything(), #$errno,
-                        $this->anything(), #$errstr,
-                        $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                        Assert::anything(), #$errno,
+                        Assert::anything(), #$errstr,
+                        Assert::anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
                     ],
                 ],
                 'fsockopenResult' => [
@@ -373,6 +421,9 @@ class TSocketPoolTest extends TestCase
                     ['php://temp', 'r'],
                 ],
                 'apcuStoreCallParams' => [],
+                'loggerCall' => [
+                    [LogLevel::ERROR, 'TSocket: Could not connect to localhost:9090 ( [])'],
+                ],
             ]
         );
         yield 'last time fail time is not expired' => array_merge(
@@ -383,7 +434,7 @@ class TSocketPoolTest extends TestCase
                     99,
                 ],
                 'apcuStoreCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
                 ],
                 'timeResult' => [
                     100,
@@ -398,14 +449,13 @@ class TSocketPoolTest extends TestCase
                     90,
                 ],
                 'apcuStoreCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
                 ],
                 'timeResult' => [
                     100,
                 ],
-                'debug' => true,
-                'debugHandlerCall' => [
-                    ['error_log', 'TSocketPool: retryInterval (5) has passed for host localhost:9090'],
+                'loggerCall' => [
+                    [LogLevel::DEBUG, 'TSocketPool: retryInterval (5) has passed for host localhost:9090'],
                 ],
             ]
         );
@@ -420,14 +470,15 @@ class TSocketPoolTest extends TestCase
                     true,
                 ],
                 'apcuFetchCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
-                    ['thrift_consecfails:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
+                    ['thrift_consecfails:localhost:9090~', Assert::anything()],
                 ],
                 'apcuFetchResult' => [
                     90,
+                    false,
                 ],
                 'apcuStoreCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
                     ['thrift_consecfails:localhost:9090~', 0],
                 ],
                 'timeResult' => [
@@ -437,12 +488,11 @@ class TSocketPoolTest extends TestCase
                 'fsockopenResult' => [
                     false,
                 ],
-                'debug' => true,
-                'debugHandlerCall' => [
-                    ['error_log', 'TSocketPool: retryInterval (5) has passed for host localhost:9090'],
-                    ['error_log', 'TSocket: Could not connect to localhost:9090 ( [])'],
-                    ['error_log', 'TSocketPool: marking localhost:9090 as down for 5 secs after 1 failed attempts.'],
-                    ['error_log', 'TSocketPool: All hosts in pool are down. (localhost:9090)'],
+                'loggerCall' => [
+                    [LogLevel::DEBUG, 'TSocketPool: retryInterval (5) has passed for host localhost:9090'],
+                    [LogLevel::ERROR, 'TSocket: Could not connect to localhost:9090 ( [])'],
+                    [LogLevel::WARNING, 'TSocketPool: marking localhost:9090 as down for 5 secs after 1 failed attempts.'],
+                    [LogLevel::ERROR, 'TSocketPool: All hosts in pool are down. (localhost:9090)'],
                 ],
                 'expectedException' => TException::class,
                 'expectedExceptionMessage' => 'TSocketPool: All hosts in pool are down. (localhost:9090)',
@@ -459,15 +509,20 @@ class TSocketPoolTest extends TestCase
                     true,
                 ],
                 'apcuFetchCallParams' => [
-                    ['thrift_failtime:localhost:9090~', $this->anything()],
-                    ['thrift_consecfails:localhost:9090~', $this->anything()],
+                    ['thrift_failtime:localhost:9090~', Assert::anything()],
+                    ['thrift_consecfails:localhost:9090~', Assert::anything()],
                 ],
+                'apcuFetchResult' => [false, false],
                 'apcuStoreCallParams' => [
                     ['thrift_consecfails:localhost:9090~', 1],
                 ],
                 'timeResult' => [],
                 'fsockopenResult' => [
                     false,
+                ],
+                'loggerCall' => [
+                    [LogLevel::ERROR, 'TSocket: Could not connect to localhost:9090 ( [])'],
+                    [LogLevel::ERROR, 'TSocketPool: All hosts in pool are down. (localhost:9090)'],
                 ],
                 'expectedException' => TException::class,
                 'expectedExceptionMessage' => 'TSocketPool: All hosts in pool are down. (localhost:9090)',
@@ -489,7 +544,13 @@ class TSocketPoolTest extends TestCase
                     1,
                 ],
                 'apcuFetchCallParams' => [],
+                'apcuFetchResult' => [],
                 'apcuStoreCallParams' => [],
+                'loggerCall' => [
+                    [LogLevel::ERROR, 'TSocket: Could not connect to localhost:9090 ( [])'],
+                    [LogLevel::WARNING, 'TSocketPool: marking localhost:9090 as down for 5 secs after 1 failed attempts.'],
+                    [LogLevel::ERROR, 'TSocketPool: All hosts in pool are down. (localhost:9090)'],
+                ],
                 'expectedException' => TException::class,
                 'expectedExceptionMessage' => 'TSocketPool: All hosts in pool are down. (localhost:9090)',
             ]
@@ -507,16 +568,16 @@ class TSocketPoolTest extends TestCase
                     [
                         'host2',
                         9091,
-                        $this->anything(), #$errno,
-                        $this->anything(), #$errstr,
-                        $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                        Assert::anything(), #$errno,
+                        Assert::anything(), #$errstr,
+                        Assert::anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
                     ],
                     [
                         'host1',
                         9090,
-                        $this->anything(), #$errno,
-                        $this->anything(), #$errstr,
-                        $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+                        Assert::anything(), #$errno,
+                        Assert::anything(), #$errstr,
+                        Assert::anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
                     ],
                 ],
                 'fsockopenResult' => [
@@ -524,16 +585,21 @@ class TSocketPoolTest extends TestCase
                     ['php://temp', 'r'],
                 ],
                 'apcuFetchCallParams' => [
-                    ['thrift_failtime:host2:9091~', $this->anything()],
-                    ['thrift_consecfails:host2:9091~', $this->anything()],
-                    ['thrift_failtime:host1:9090~', $this->anything()],
+                    ['thrift_failtime:host2:9091~', Assert::anything()],
+                    ['thrift_consecfails:host2:9091~', Assert::anything()],
+                    ['thrift_failtime:host1:9090~', Assert::anything()],
                 ],
+                'apcuFetchResult' => [false, false, false],
                 'apcuStoreCallParams' => [
-                    ['thrift_failtime:host2:9091~', $this->anything()],
-                    ['thrift_consecfails:host2:9091~', $this->anything(), 0],
+                    ['thrift_failtime:host2:9091~', Assert::anything()],
+                    ['thrift_consecfails:host2:9091~', Assert::anything(), 0],
                 ],
                 'timeResult' => [
                     1,
+                ],
+                'loggerCall' => [
+                    [LogLevel::ERROR, 'TSocket: Could not connect to host2:9091 ( [])'],
+                    [LogLevel::WARNING, 'TSocketPool: marking host2:9091 as down for 5 secs after 1 failed attempts.'],
                 ],
             ]
         );

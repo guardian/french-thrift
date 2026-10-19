@@ -22,6 +22,8 @@
 #include <ios>
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <stdexcept>
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TCompactProtocol.h>
 #include <thrift/protocol/THeaderProtocol.h>
@@ -181,7 +183,9 @@ bool print_eq(T expected, T actual) {
 #define UUID_TEST(func, value, expected)                                                           \
   cout << #func "(" << value << ") = ";                                                            \
   try {                                                                                            \
-    if (!print_eq(expected, testClient.func(value)))                                               \
+    TUuid ret;                                                                                     \
+    testClient.func(ret, value);                                                                   \
+    if (!print_eq(expected, ret))                                                                  \
       return_code |= ERR_BASETYPES;                                                                \
   } catch (TTransportException&) {                                                                 \
     throw;                                                                                         \
@@ -200,11 +204,6 @@ BOOST_CONSTEXPR_OR_CONST int ERR_UNKNOWN = 64;
 
 int main(int argc, char** argv) {
   cout.precision(19);
-
-  string testDir  = boost::filesystem::system_complete(argv[0]).parent_path().parent_path().parent_path().string();
-  string caPath   = testDir + "/keys/CA.pem";
-  string certPath = testDir + "/keys/client.crt";
-  string keyPath  = testDir + "/keys/client.key";
 
 #if _WIN32
   transport::TWinsockSingleton::create();
@@ -319,9 +318,28 @@ int main(int argc, char** argv) {
   std::shared_ptr<TProtocol> protocol2;  // SecondService for multiplexed
 
   if (ssl) {
-    cout << "Client Certificate File: " << certPath << '\n';
-    cout << "Client Key         File: " << keyPath << '\n';
-    cout << "CA                 File: " << caPath << '\n';
+    boost::filesystem::path testDir = boost::filesystem::system_complete(argv[0]).parent_path();
+    while (!boost::filesystem::exists(testDir / "keys" / "CA.pem")) {
+      boost::filesystem::path parent = testDir.parent_path();
+      if (parent == testDir) {
+        cerr << "Unable to locate test/keys from " << argv[0] << '\n';
+        return ERR_UNKNOWN;
+      }
+      testDir = parent;
+    }
+    string caPath = (testDir / "keys" / "CA.pem").string();
+    string certPath = (testDir / "keys" / "client_v3.crt").string();
+    string keyPath = (testDir / "keys" / "client_v3.key").string();
+
+    auto fileExists = [](const std::string& path) {
+      std::ifstream f(path.c_str());
+      return f.good();
+    };
+
+    cout << "Client Path            : " << testDir.string() << '\n';
+    cout << "Client Certificate File: " << certPath << " (" << std::boolalpha << fileExists(certPath) << ")"<< '\n';
+    cout << "Client Key         File: " << keyPath  << " (" << std::boolalpha << fileExists(keyPath) << ")"<< '\n';
+    cout << "CA                 File: " << caPath   << " (" << std::boolalpha << fileExists(caPath) << ")"<< '\n';
 
     factory = std::shared_ptr<TSSLSocketFactory>(new TSSLSocketFactory());
     factory->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");

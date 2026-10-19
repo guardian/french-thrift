@@ -24,6 +24,30 @@ import (
 	"testing"
 )
 
+func TestCompactProtocolVarintRejectsOverlong(t *testing.T) {
+	// 11 continuation bytes (bit 7 set), no terminating byte
+	payload := bytes.Repeat([]byte{0x80}, 11)
+	trans := NewTMemoryBufferLen(len(payload))
+	trans.Write(payload)
+	p := NewTCompactProtocol(trans)
+	_, err := p.readVarint64()
+	if err == nil {
+		t.Fatal("expected error for varint over 10 bytes, got nil")
+	}
+}
+
+func TestCompactProtocolVarintAcceptsValid10Byte(t *testing.T) {
+	// 9 continuation bytes followed by a terminating byte
+	payload := append(bytes.Repeat([]byte{0x80}, 9), 0x01)
+	trans := NewTMemoryBufferLen(len(payload))
+	trans.Write(payload)
+	p := NewTCompactProtocol(trans)
+	_, err := p.readVarint64()
+	if err != nil {
+		t.Fatalf("unexpected error for valid 10-byte varint: %v", err)
+	}
+}
+
 func TestReadWriteCompactProtocol(t *testing.T) {
 	ReadWriteProtocolTest(t, NewTCompactProtocolFactory())
 
@@ -33,9 +57,18 @@ func TestReadWriteCompactProtocol(t *testing.T) {
 		NewTFramedTransport(NewTMemoryBuffer()),
 	}
 
-	zlib0, _ := NewTZlibTransport(NewTMemoryBuffer(), 0)
-	zlib6, _ := NewTZlibTransport(NewTMemoryBuffer(), 6)
-	zlib9, _ := NewTZlibTransport(NewTFramedTransport(NewTMemoryBuffer()), 9)
+	newTZlibTransport := func(trans TTransport, level int) *TZlibTransport {
+		t.Helper()
+		zlibTrans, err := NewTZlibTransport(trans, level)
+		if err != nil {
+			t.Fatalf("NewTZlibTransport returned error: %v", err)
+		}
+		return zlibTrans
+	}
+
+	zlib0 := newTZlibTransport(NewTMemoryBuffer(), 0)
+	zlib6 := newTZlibTransport(NewTMemoryBuffer(), 6)
+	zlib9 := newTZlibTransport(NewTFramedTransport(NewTMemoryBuffer()), 9)
 	transports = append(transports, zlib0, zlib6, zlib9)
 
 	for _, trans := range transports {

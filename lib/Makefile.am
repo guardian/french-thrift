@@ -34,6 +34,8 @@ PRECROSS_TARGET += precross-java
 # JavaScript unit test depends on java
 # so test only if java, ant & co is available
 SUBDIRS += js
+# The TypeScript test drives the same ant target to fetch its browser libs
+SUBDIRS += ts
 endif
 
 if WITH_KOTLIN
@@ -96,14 +98,16 @@ if WITH_CL
 SUBDIRS += cl
 endif
 
-if WITH_SWIFT
-SUBDIRS += swift
-endif
-
 # All of the libs that don't use Automake need to go in here
 # so they will end up in our release tarballs.
 distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
+
+# The libs below ship as whole directories, which sweeps in generated code and
+# build output present in a built tree.  Strip those from the distribution.
+dist-hook:
+	rm -rf $(distdir)/haxe/test/bin $(distdir)/haxe/test/gen-haxe
+	rm -rf $(distdir)/javame/gen-javame
 
 EXTRA_DIST = \
 	d \

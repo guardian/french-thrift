@@ -19,10 +19,16 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
+use ReflectionProperty;
 use Thrift\Exception\TException;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\TSocket;
@@ -31,14 +37,18 @@ class TSocketTest extends TestCase
 {
     use PHPMock;
 
-    /**
-     * @dataProvider openExceptionDataProvider
-     */
+    protected function setUp(): void
+    {
+        (new ReflectionProperty(TSocket::class, 'hasSocketsExtension'))
+             ->setValue(null, null);
+    }
+
+    #[DataProvider('openExceptionDataProvider')]
     public function testOpenException(
         $host,
         $port,
         $persist,
-        $debugHandler,
+        $logger,
         $fsockopenCallCount,
         $expectedException,
         $expectedMessage,
@@ -63,18 +73,18 @@ class TSocketTest extends TestCase
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $socket->open();
     }
 
-    public function openExceptionDataProvider()
+    public static function openExceptionDataProvider()
     {
         yield 'host is empty' => [
             'host' => '',
             'port' => 9090,
-            'persist' => null,
-            'debugHandler' => false,
+            'persist' => false,
+            'logger' => null,
             'fsockopenCallCount' => 0,
             'expectedException' => TTransportException::class,
             'expectedMessage' => 'Cannot open null host',
@@ -84,7 +94,7 @@ class TSocketTest extends TestCase
             'host' => 'localhost',
             'port' => 0,
             'persist' => false,
-            'debugHandler' => null,
+            'logger' => null,
             'fsockopenCallCount' => 0,
             'expectedException' => TTransportException::class,
             'expectedMessage' => 'Cannot open without port',
@@ -94,7 +104,7 @@ class TSocketTest extends TestCase
             'host' => 'nonexistent-host',
             'port' => 9090,
             'persist' => false,
-            'debugHandler' => null,
+            'logger' => null,
             'fsockopenCallCount' => 1,
             'expectedException' => TException::class,
             'expectedMessage' => 'TSocket: Could not connect to',
@@ -107,7 +117,7 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $handle = fopen('php://memory', 'r+');
         $this->getFunctionMock('Thrift\Transport', 'fsockopen')
              ->expects($this->once())
@@ -139,7 +149,7 @@ class TSocketTest extends TestCase
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
 
         $transport->open();
@@ -149,54 +159,37 @@ class TSocketTest extends TestCase
         $transport->open();
     }
 
-    public function testDebugHandler()
+    public function testPsr3LoggerReceivesErrorLog(): void
     {
         $host = 'nonexistent-host';
         $port = 9090;
-        $false = false;
+        $expectedMessage = 'TSocket: Could not connect to nonexistent-host:9090 (Connection refused [999])';
 
-        $debugHandler = function ($error) {
-            $this->assertEquals(
-                'TSocket: Could not connect to nonexistent-host:9090 (Connection refused [999])',
-                $error
-            );
-        };
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())
+               ->method('log')
+               ->with(LogLevel::ERROR, $expectedMessage);
 
         $this->getFunctionMock('Thrift\Transport', 'fsockopen')
-             ->expects($this->once())
-             ->with(
-                 $host,
-                 $port,
-                 $this->anything(), #$errno,
-                 $this->anything(), #$errstr,
-                 $this->anything() #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
-             )
-             ->willReturnCallback(
-                 function (
-                     string $hostname,
-                     int $port,
-                     &$error_code,
-                     &$error_message,
-                     ?float $timeout
-                 ) {
-                     $error_code = 999;
-                     $error_message = 'Connection refused';
+            ->expects($this->once())
+            ->willReturnCallback(
+                function (
+                    string $hostname,
+                    int $port,
+                    &$error_code,
+                    &$error_message,
+                    ?float $timeout
+                ) {
+                    $error_code = 999;
+                    $error_message = 'Connection refused';
 
-                     return false;
-                 }
-             );
+                    return false;
+                }
+            );
 
-        $transport = new TSocket(
-            $host,
-            $port,
-            $false,
-            $debugHandler
-        );
-        $transport->setDebug(true);
+        $transport = new TSocket($host, $port, false, $logger);
 
-        $this->expectException(\Exception::class);
-        $this->expectExceptionMessage('TSocket: Could not connect to');
-        $this->expectExceptionCode(0);
+        $this->expectException(TException::class);
         $transport->open();
     }
 
@@ -205,7 +198,7 @@ class TSocketTest extends TestCase
         $host = 'persist-localhost';
         $port = 9090;
         $persist = true;
-        $debugHandler = null;
+        $logger = null;
 
         $handle = fopen('php://memory', 'r+');
 
@@ -239,23 +232,20 @@ class TSocketTest extends TestCase
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
 
         $transport->open();
         $this->assertTrue($transport->isOpen());
     }
 
-    /**
-     * @dataProvider open_THRIFT_5132_DataProvider
-     */
-    public function testOpen_THRIFT_5132(
-        $socketImportResult
-    ) {
-        $host = 'localhost';
-        $port = 9090;
+    public function testOpenUnixSocket()
+    {
+        $host = 'unix:///tmp/ipc.sock';
+        $port = -1;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
+        $handle = fopen('php://memory', 'r+');
 
         $this->getFunctionMock('Thrift\Transport', 'fsockopen')
              ->expects($this->once())
@@ -266,34 +256,79 @@ class TSocketTest extends TestCase
                  $this->anything(), #$errstr,
                  $this->anything() #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
              )
-             ->willReturn(fopen('php://input', 'r+'));
+             ->willReturn($handle);
 
         $this->getFunctionMock('Thrift\Transport', 'socket_import_stream')
-             ->expects($this->once())
-             ->willReturn($socketImportResult);
+            ->expects($this->once())
+            ->with($handle)
+            ->willReturn(true);
 
         $this->getFunctionMock('Thrift\Transport', 'socket_set_option')
-             ->expects($socketImportResult ? $this->once() : $this->never())
-             ->with(
-                 $this->anything(), #$socket,
-                 SOL_TCP, #$level
-                 TCP_NODELAY, #$option
-                 1 #$value
-             )
-             ->willReturn(true);
+            ->expects($this->once())
+            ->with(
+                $this->anything(), #$socket,
+                SOL_TCP, #$level
+                TCP_NODELAY, #$option
+                1 #$value
+            )
+            ->willReturn(true);
 
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
+        );
+
+        $transport->open();
+    }
+
+    #[DataProvider('openThrift5132DataProvider')]
+    public function testOpenThrift5132(
+        $socketImportResult
+    ) {
+        $host = 'localhost';
+        $port = 9090;
+        $persist = false;
+        $logger = null;
+
+        $this->getFunctionMock('Thrift\Transport', 'fsockopen')
+            ->expects($this->once())
+            ->with(
+                $host,
+                $port,
+                $this->anything(), #$errno,
+                $this->anything(), #$errstr,
+                $this->anything() #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
+            )
+            ->willReturn(fopen('php://input', 'r+'));
+
+        $this->getFunctionMock('Thrift\Transport', 'socket_import_stream')
+            ->expects($this->once())
+            ->willReturn($socketImportResult);
+
+        $this->getFunctionMock('Thrift\Transport', 'socket_set_option')
+            ->expects($socketImportResult ? $this->once() : $this->never())
+            ->with(
+                $this->anything(), #$socket,
+                SOL_TCP, #$level
+                TCP_NODELAY, #$option
+                1 #$value
+            )
+            ->willReturn(true);
+
+        $transport = new TSocket(
+            $host,
+            $port,
+            $persist,
+            $logger
         );
 
         $transport->open();
         $this->assertTrue($transport->isOpen());
     }
 
-    public function open_THRIFT_5132_DataProvider()
+    public static function openThrift5132DataProvider()
     {
         yield 'socket_import_stream success' => [
             'socketImportResult' => true,
@@ -308,12 +343,12 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
 
         $this->assertFalse($transport->isOpen());
@@ -326,22 +361,17 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
 
         $transport->setSendTimeout(9999);
-        $reflector = new \ReflectionClass($transport);
-        $property = $reflector->getProperty('sendTimeoutSec_');
-        $property->setAccessible(true);
-        $this->assertEquals(9.0, $property->getValue($transport));
-        $property = $reflector->getProperty('sendTimeoutUsec_');
-        $property->setAccessible(true);
-        $this->assertEquals(999000, $property->getValue($transport));
+        $this->assertEquals(9.0, (new ReflectionProperty($transport, 'sendTimeoutSec'))->getValue($transport));
+        $this->assertEquals(999000, (new ReflectionProperty($transport, 'sendTimeoutUsec'))->getValue($transport));
     }
 
     public function testSetRecvTimeout()
@@ -349,42 +379,35 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
 
         $transport->setRecvTimeout(9999);
-        $reflector = new \ReflectionClass($transport);
-        $property = $reflector->getProperty('recvTimeoutSec_');
-        $property->setAccessible(true);
-        $this->assertEquals(9.0, $property->getValue($transport));
-        $property = $reflector->getProperty('recvTimeoutUsec_');
-        $property->setAccessible(true);
-        $this->assertEquals(999000, $property->getValue($transport));
+        $this->assertEquals(9.0, (new ReflectionProperty($transport, 'recvTimeoutSec'))->getValue($transport));
+        $this->assertEquals(999000, (new ReflectionProperty($transport, 'recvTimeoutUsec'))->getValue($transport));
     }
 
-    /**
-     * @dataProvider hostDataProvider
-     */
+    #[DataProvider('hostDataProvider')]
     public function testGetHost($host, $expected)
     {
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $this->assertEquals($expected, $transport->getHost());
     }
 
-    public function hostDataProvider()
+    public static function hostDataProvider()
     {
         yield 'localhost' => ['localhost', 'localhost'];
         yield 'ssl_localhost' => ['ssl://localhost', 'ssl://localhost'];
@@ -396,12 +419,12 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $this->assertEquals($port, $transport->getPort());
     }
@@ -411,29 +434,38 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $transport->setHandle(fopen('php://memory', 'r+'));
-        $reflector = new \ReflectionClass($transport);
-        $property = $reflector->getProperty('handle_');
-        $property->setAccessible(true);
-        $this->assertNotNull($property->getValue($transport));
+        $this->assertNotNull((new ReflectionProperty($transport, 'handle'))->getValue($transport));
 
         $transport->close();
-        $reflector = new \ReflectionClass($transport);
-        $property = $reflector->getProperty('handle_');
-        $property->setAccessible(true);
-        $this->assertNull($property->getValue($transport));
+        $this->assertNull((new ReflectionProperty($transport, 'handle'))->getValue($transport));
     }
 
-    /**
-     * @dataProvider writeFailDataProvider
-     */
+    public function testClosePersistentSocket(): void
+    {
+        $transport = new TSocket('localhost', 9090, true, null);
+        $handle = fopen('php://memory', 'r+');
+        $this->assertIsResource($handle);
+        $transport->setHandle($handle);
+
+        $this->assertNotNull((new ReflectionProperty($transport, 'handle'))->getValue($transport));
+
+        // Guard THRIFT-2151: close() must remain effective even when the
+        // socket was opened in persistent mode.
+        $transport->close();
+
+        $this->assertIsClosedResource($handle);
+        $this->assertNull((new ReflectionProperty($transport, 'handle'))->getValue($transport));
+    }
+
+    #[DataProvider('writeFailDataProvider')]
     public function testWriteFail(
         $streamSelectResult,
         $fwriteCallCount,
@@ -444,7 +476,7 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $handle = fopen('php://memory', 'r+');
 
         $this->getFunctionMock('Thrift\Transport', 'stream_select')
@@ -474,7 +506,7 @@ class TSocketTest extends TestCase
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $transport->setHandle($handle);
 
@@ -486,12 +518,12 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $fileName = sys_get_temp_dir() . '/' . md5(mt_rand(0, time()) . time());
         touch($fileName);
@@ -505,7 +537,7 @@ class TSocketTest extends TestCase
         });
     }
 
-    public function writeFailDataProvider()
+    public static function writeFailDataProvider()
     {
         yield 'stream_select timeout' => [
             'streamSelectResult' => 0,
@@ -535,12 +567,12 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $fileName = sys_get_temp_dir() . '/' . md5(mt_rand(0, time()) . time());
         file_put_contents($fileName, '12345678901234567890');
@@ -553,9 +585,7 @@ class TSocketTest extends TestCase
         });
     }
 
-    /**
-     * @dataProvider readFailDataProvider
-     */
+    #[DataProvider('readFailDataProvider')]
     public function testReadFail(
         $streamSelectResult,
         $freadResult,
@@ -567,7 +597,7 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $handle = fopen('php://memory', 'r+');
 
         $this->getFunctionMock('Thrift\Transport', 'stream_select')
@@ -601,14 +631,14 @@ class TSocketTest extends TestCase
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $transport->setHandle($handle);
 
         $transport->read(5);
     }
 
-    public function readFailDataProvider()
+    public static function readFailDataProvider()
     {
         yield 'stream_select timeout' => [
             'streamSelectResult' => 0,
@@ -657,13 +687,66 @@ class TSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $persist = false;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSocket(
             $host,
             $port,
             $persist,
-            $debugHandler
+            $logger
         );
         $this->assertNUll($transport->flush());
+    }
+
+    public function testDefaultConnectTimeoutIsUsedWhenNotSet(): void
+    {
+        $handle = $this->createSocketStream();
+        $this->getFunctionMock('Thrift\Transport', 'fsockopen')
+             ->expects($this->once())
+             ->with(
+                 'localhost',
+                 9090,
+                 $this->anything(),
+                 $this->anything(),
+                 1.0, // default connect timeout (1s)
+             )
+             ->willReturn($handle);
+
+        $socket = new TSocket('localhost', 9090, false, null);
+        $socket->setSendTimeout(2500);
+
+        $socket->open();
+        $this->assertTrue($socket->isOpen());
+    }
+
+    public function testConnectTimeoutOverridesSendTimeoutDuringOpen(): void
+    {
+        $handle = $this->createSocketStream();
+        $this->getFunctionMock('Thrift\Transport', 'fsockopen')
+             ->expects($this->once())
+             ->with(
+                 'localhost',
+                 9090,
+                 $this->anything(),
+                 $this->anything(),
+                 0.75, // 750ms connect timeout, NOT the 5s sendTimeout below
+             )
+             ->willReturn($handle);
+
+        $socket = new TSocket('localhost', 9090, false, null);
+        $socket->setSendTimeout(5000);
+        $socket->setConnectTimeout(750);
+
+        $socket->open();
+        $this->assertTrue($socket->isOpen());
+    }
+
+    private function createSocketStream()
+    {
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $this->assertIsArray($pair);
+        $this->assertCount(2, $pair);
+        fclose($pair[1]);
+
+        return $pair[0];
     }
 }

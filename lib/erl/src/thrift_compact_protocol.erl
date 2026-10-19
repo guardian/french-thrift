@@ -46,7 +46,11 @@
     read_stack = [] :: iodata(),
     read_value = ?CBOOL_NONE :: cbool(),
     write_stack = [] :: iodata(),
-    write_id = ?ID_NONE :: non_neg_integer()
+    write_id = ?ID_NONE :: non_neg_integer(),
+    % the most a message may take; new/2 settles it
+    max_message_size :: pos_integer() | undefined,
+    % what the message being read may still take; undefined between messages
+    message_bytes_left :: non_neg_integer() | undefined
 }).
 
 -type t_compact() :: #t_compact{}.
@@ -91,9 +95,25 @@ cbool_to_bool(Value) -> Value =:= ?CBOOL_TRUE.
 
 new(Transport) -> new(Transport, _Options = []).
 
-new(Transport, _Options) ->
-    State = #t_compact{transport = Transport},
+%%--------------------------------------------------------------------
+%% Options include:
+%%   {max_message_size, Bytes}  = The longest message to read, in place of the
+%%                                thrift application's max_message_size
+%%--------------------------------------------------------------------
+new(Transport, Options) ->
+    Max = proplists:get_value(max_message_size, max_message_size_options(Options)),
+    State = #t_compact{transport = Transport, max_message_size = max_message_size(Max)},
     thrift_protocol:new(?MODULE, State).
+
+max_message_size_options(Options) when is_list(Options) ->
+    [Opt || Opt = {max_message_size, Max} <- Options, is_integer(Max), Max > 0];
+max_message_size_options(_Options) ->
+    [].
+
+max_message_size(undefined) ->
+    application:get_env(thrift, max_message_size, ?DEFAULT_MAX_MESSAGE_SIZE);
+max_message_size(Max) ->
+    Max.
 
 flush_transport(This = #t_compact{transport = Transport}) ->
     {NewTransport, Result} = thrift_transport:flush(Transport),
@@ -129,13 +149,15 @@ to_varint(Value, Acc) when (Value < 16#80) -> [Acc, Value];
 to_varint(Value, Acc) -> to_varint(Value bsr 7, [Acc, ((Value band 16#7F) bor 16#80)]).
 
 -spec read_varint(t_compact(), non_neg_integer(), non_neg_integer()) ->
-    {t_compact(), {'ok', integer()}}.
-read_varint(This0, Acc, Count) ->
+    {t_compact(), {'ok', integer()} | {error, term()}}.
+read_varint(This0, Acc, Count) when Count < 10 ->
     {This1, {ok, Byte}} = read(This0, byte),
     case (Byte band 16#80) of
         0 -> {This1, {ok, (Byte bsl (7 * Count)) + Acc}};
         _ -> read_varint(This1, ((Byte band 16#7f) bsl (7 * Count)) + Acc, Count + 1)
-    end.
+    end;
+read_varint(This0, _Acc, _Count) ->
+    {This0, {error, {invalid_data, "Variable-length int exceeds 10 bytes"}}}.
 
 write(This0, #protocol_message_begin{
     name = Name,
@@ -244,19 +266,24 @@ write(This = #t_compact{transport = Trans}, Data) ->
 %%
 %%
 
-read(This0, message_begin) ->
-    {This1, {ok, ?PROTOCOL_ID}} = read(This0, ubyte),
+read(This0 = #t_compact{max_message_size = Max}, message_begin) ->
+    {This1, {ok, ?PROTOCOL_ID}} = read(This0#t_compact{message_bytes_left = Max}, ubyte),
     {This2, {ok, VerAndType}} = read(This1, ubyte),
     ?VERSION_1 = VerAndType band ?VERSION_MASK,
     {This3, {ok, SeqId}} = read(This2, ui32),
-    {This4, {ok, Name}} = read(This3, string),
-    {This4, #protocol_message_begin{
-        name = binary_to_list(Name),
-        type = (VerAndType bsr ?TYPE_SHIFT_AMOUNT) band ?TYPE_BITS,
-        seqid = SeqId
-    }};
+    {This4, {ok, NameSz}} = read(This3, ui32),
+    case read_name(This4, NameSz) of
+        {This5, {ok, Name}} ->
+            {This5, #protocol_message_begin{
+                name = binary_to_list(Name),
+                type = (VerAndType bsr ?TYPE_SHIFT_AMOUNT) band ?TYPE_BITS,
+                seqid = SeqId
+            }};
+        {This5, Error} ->
+            {This5, Error}
+    end;
 read(This, message_end) ->
-    {This, ok};
+    {This#t_compact{message_bytes_left = undefined}, ok};
 read(This = #t_compact{read_stack = Stack}, struct_begin) ->
     {This#t_compact{read_stack = [0 | Stack]}, ok};
 read(This = #t_compact{read_stack = [_H | T]}, struct_end) ->
@@ -348,16 +375,22 @@ read(This0, byte) ->
         Else -> {This1, Else}
     end;
 read(This0, i16) ->
-    {This1, {ok, Zigzag}} = read_varint(This0, 0, 0),
-    {This1, {ok, from_zigzag(Zigzag)}};
+    case read_varint(This0, 0, 0) of
+        {This1, {ok, Zigzag}} -> {This1, {ok, from_zigzag(Zigzag)}};
+        {This1, {error, _} = Err} -> {This1, Err}
+    end;
 read(This0, ui32) ->
     read_varint(This0, 0, 0);
 read(This0, i32) ->
-    {This1, {ok, Zigzag}} = read_varint(This0, 0, 0),
-    {This1, {ok, from_zigzag(Zigzag)}};
+    case read_varint(This0, 0, 0) of
+        {This1, {ok, Zigzag}} -> {This1, {ok, from_zigzag(Zigzag)}};
+        {This1, {error, _} = Err} -> {This1, Err}
+    end;
 read(This0, i64) ->
-    {This1, {ok, Zigzag}} = read_varint(This0, 0, 0),
-    {This1, {ok, from_zigzag(Zigzag)}};
+    case read_varint(This0, 0, 0) of
+        {This1, {ok, Zigzag}} -> {This1, {ok, from_zigzag(Zigzag)}};
+        {This1, {error, _} = Err} -> {This1, Err}
+    end;
 read(This0, double) ->
     {This1, Bytes} = read_data(This0, 8),
     case Bytes of
@@ -369,24 +402,47 @@ read(This0, string) ->
     {This1, {ok, Sz}} = read(This0, ui32),
     read_data(This1, Sz).
 
+%% The name of a message, refused before it is read if it is longer than
+%% ?MAX_MESSAGE_NAME_SIZE.
+read_name(This, Sz) when Sz > ?MAX_MESSAGE_NAME_SIZE ->
+    {This, {error, {message_name_exceeds_maximum, ?MAX_MESSAGE_NAME_SIZE}}};
+read_name(This, Sz) ->
+    read_data(This, Sz).
+
 -spec read_data(#t_compact{}, non_neg_integer()) ->
     {#t_compact{}, {ok, binary()} | {error, _Reason}}.
 read_data(This, 0) ->
     {This, {ok, <<>>}};
-read_data(This = #t_compact{transport = Trans}, Len) when is_integer(Len) andalso Len > 0 ->
-    {NewTransport, Result} = thrift_transport:read(Trans, Len),
-    {This#t_compact{transport = NewTransport}, Result}.
+read_data(This0 = #t_compact{transport = Trans}, Len) when is_integer(Len) andalso Len > 0 ->
+    case take(This0, Len) of
+        {ok, This1} ->
+            {NewTransport, Result} = thrift_transport:read(Trans, Len),
+            {This1#t_compact{transport = NewTransport}, Result};
+        Error ->
+            {This0, Error}
+    end.
+
+%% Takes Len bytes from what the message being read may still take, before
+%% they are read. Between messages, each read is held to the maximum on its own.
+take(This = #t_compact{message_bytes_left = undefined, max_message_size = Max}, Len) when
+    Len =< Max
+->
+    {ok, This};
+take(This = #t_compact{message_bytes_left = Left}, Len) when is_integer(Left), Len =< Left ->
+    {ok, This#t_compact{message_bytes_left = Left - Len}};
+take(#t_compact{max_message_size = Max}, _Len) ->
+    {error, {message_size_exceeds_maximum, Max}}.
 
 %%%% FACTORY GENERATION %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% returns a (fun() -> thrift_protocol())
-new_protocol_factory(TransportFactory, _Options) ->
+new_protocol_factory(TransportFactory, Options) ->
     F = fun() ->
         case TransportFactory() of
             {ok, Transport} ->
                 thrift_compact_protocol:new(
                     Transport,
-                    []
+                    max_message_size_options(Options)
                 );
             {error, Error} ->
                 {error, Error}

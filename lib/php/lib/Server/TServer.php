@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Thrift\Server;
 
 use Thrift\Factory\TTransportFactoryInterface;
@@ -12,91 +14,22 @@ use Thrift\Factory\TProtocolFactory;
  */
 abstract class TServer
 {
-    /**
-     * Processor to handle new clients
-     *
-     * @var TProcessor
-     */
-    protected $processor_;
-
-    /**
-     * Server transport to be used for listening
-     * and accepting new clients
-     *
-     * @var TServerTransport
-     */
-    protected $transport_;
-
-    /**
-     * Input transport factory
-     *
-     * @var TTransportFactoryInterface
-     */
-    protected $inputTransportFactory_;
-
-    /**
-     * Output transport factory
-     *
-     * @var TTransportFactoryInterface
-     */
-    protected $outputTransportFactory_;
-
-    /**
-     * Input protocol factory
-     *
-     * @var TProtocolFactory
-     */
-    protected $inputProtocolFactory_;
-
-    /**
-     * Output protocol factory
-     *
-     * @var TProtocolFactory
-     */
-    protected $outputProtocolFactory_;
-
-    /**
-     * Sets up all the factories, etc
-     *
-     * @param object $processor
-     * @param TServerTransport $transport
-     * @param TTransportFactoryInterface $inputTransportFactory
-     * @param TTransportFactoryInterface $outputTransportFactory
-     * @param TProtocolFactory $inputProtocolFactory
-     * @param TProtocolFactory $outputProtocolFactory
-     * @return void
-     */
     public function __construct(
-        $processor,
-        TServerTransport $transport,
-        TTransportFactoryInterface $inputTransportFactory,
-        TTransportFactoryInterface $outputTransportFactory,
-        TProtocolFactory $inputProtocolFactory,
-        TProtocolFactory $outputProtocolFactory
+        protected object $processor,
+        protected TServerTransport $transport,
+        protected TTransportFactoryInterface $inputTransportFactory,
+        protected TTransportFactoryInterface $outputTransportFactory,
+        protected TProtocolFactory $inputProtocolFactory,
+        protected TProtocolFactory $outputProtocolFactory,
     ) {
-        $this->processor_ = $processor;
-        $this->transport_ = $transport;
-        $this->inputTransportFactory_ = $inputTransportFactory;
-        $this->outputTransportFactory_ = $outputTransportFactory;
-        $this->inputProtocolFactory_ = $inputProtocolFactory;
-        $this->outputProtocolFactory_ = $outputProtocolFactory;
     }
 
     /**
      * Serves the server. This should never return
      * unless a problem permits it to do so or it
      * is interrupted intentionally
-     *
-     * @abstract
-     * @return void
      */
-    abstract public function serve();
+    abstract public function serve(): void;
 
-    /**
-     * Stops the server serving
-     *
-     * @abstract
-     * @return void
-     */
-    abstract public function stop();
+    abstract public function stop(): void;
 }

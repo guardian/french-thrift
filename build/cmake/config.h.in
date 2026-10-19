@@ -46,9 +46,6 @@
 
 /************************** DEFINES *************************/
 
-/* Define if the AI_ADDRCONFIG symbol is unavailable */
-#cmakedefine AI_ADDRCONFIG 0
-
 /* Possible value for SIGNED_RIGHT_SHIFT_IS */
 /* TODO: This is just set to 1 for the moment
    port the macro aclocal/ax_signed_right_shift.m4 to CMake to make this work */

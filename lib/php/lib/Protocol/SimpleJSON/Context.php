@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,15 +21,17 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\SimpleJSON;
 
 class Context
 {
-    public function write()
+    public function write(): void
     {
     }
 
-    public function isMapKey()
+    public function isMapKey(): bool
     {
         return false;
     }

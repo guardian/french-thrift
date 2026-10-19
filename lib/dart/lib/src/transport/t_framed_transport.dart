@@ -29,14 +29,19 @@ class TFramedTransport extends TBufferedTransport {
   int _receivedHeaderBytes = 0;
 
   int _bodySize = 0;
-  Uint8List _body;
+  Uint8List? _body;
   int _receivedBodyBytes = 0;
 
-  Completer<Uint8List> _frameCompleter;
+  Completer<Uint8List>? _frameCompleter;
 
-  TFramedTransport(TTransport transport) : _transport = transport {
-    if (transport == null) {
-      throw ArgumentError.notNull("transport");
+  /// Largest frame this transport will accept.
+  final int maxFrameSize;
+
+  TFramedTransport(TTransport transport,
+      {this.maxFrameSize = defaultMaxFrameSize})
+      : _transport = transport {
+    if (maxFrameSize <= 0) {
+      throw ArgumentError.value(maxFrameSize, 'maxFrameSize', 'must be positive');
     }
   }
 
@@ -96,9 +101,12 @@ class TFramedTransport extends TBufferedTransport {
 
       _receivedHeaderBytes = 0;
 
-      if (size < 0) {
-        throw TTransportError(
-            TTransportErrorType.UNKNOWN, "Read a negative frame size: $size");
+      // getUint32 above cannot produce a negative, so the old `size < 0` check
+      // could never fire. What the four bytes can express is up to 4 GiB, and
+      // Uint8List(size) commits all of it before a payload byte has arrived.
+      if (size > maxFrameSize) {
+        throw TTransportError(TTransportErrorType.UNKNOWN,
+            "Frame size ($size) larger than max length ($maxFrameSize)");
       }
 
       _bodySize = size;
@@ -115,7 +123,7 @@ class TFramedTransport extends TBufferedTransport {
   void _readFrameBody() {
     var remainingBodyBytes = _bodySize - _receivedBodyBytes;
 
-    int got = _transport.read(_body, _receivedBodyBytes, remainingBodyBytes);
+    int got = _transport.read(_body!, _receivedBodyBytes, remainingBodyBytes);
     if (got < 0) {
       throw TTransportError(
           TTransportErrorType.UNKNOWN, "Socket closed during frame body read");
@@ -124,7 +132,7 @@ class TFramedTransport extends TBufferedTransport {
     _receivedBodyBytes += got;
 
     if (_receivedBodyBytes == _bodySize) {
-      var body = _body;
+      var body = _body!;
 
       _bodySize = 0;
       _body = null;
@@ -134,7 +142,9 @@ class TFramedTransport extends TBufferedTransport {
 
       var completer = _frameCompleter;
       _frameCompleter = null;
-      completer.complete(Uint8List(0));
+      if (completer != null) {
+        completer.complete(Uint8List(0));
+      }
     } else {
       _registerForReadableBytes();
     }
@@ -154,7 +164,7 @@ class TFramedTransport extends TBufferedTransport {
       _registerForReadableBytes();
     }
 
-    return _frameCompleter.future;
+    return _frameCompleter!.future;
   }
 
   void _registerForReadableBytes() {
@@ -168,8 +178,9 @@ class TFramedTransport extends TBufferedTransport {
       _body = null;
       _receivedBodyBytes = 0;
       _frameCompleter = null;
-
-      completer.completeError(e);
+      if (completer != null) {
+        completer.completeError(e);
+      }
     });
   }
 }

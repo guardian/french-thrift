@@ -152,8 +152,15 @@ abstract class TSaslTransport extends TEndpointTransport {
       throw sendAndThrowMessage(NegotiationStatus.ERROR, "Invalid status " + statusByte);
     }
 
+    // Bound by max frame size rather than max message size. This runs before
+    // either side has authenticated the other, and the buffer below is
+    // allocated from the declared length before readAll blocks for the payload,
+    // so five bytes on the wire commit the whole of it. Max message size
+    // describes a whole message and defaults to 100 MB; the nonblocking SASL
+    // server already holds its own negotiation frames to max frame size
+    // (sasl/SaslNegotiationFrameReader), and this is the same protocol.
     int payloadBytes = EncodingUtils.decodeBigEndian(messageHeader, STATUS_BYTES);
-    if (payloadBytes < 0 || payloadBytes > getConfiguration().getMaxMessageSize() /* 100 MB */) {
+    if (payloadBytes < 0 || payloadBytes > getConfiguration().getMaxFrameSize()) {
       throw sendAndThrowMessage(
           NegotiationStatus.ERROR, "Invalid payload header length: " + payloadBytes);
     }
@@ -402,6 +409,13 @@ abstract class TSaslTransport extends TEndpointTransport {
 
     if (dataLength < 0)
       throw new TTransportException("Read a negative frame size (" + dataLength + ")!");
+
+    int maxFrameSize = getConfiguration().getMaxFrameSize();
+    if (dataLength > maxFrameSize) {
+      throw new TTransportException(
+          TTransportException.CORRUPTED_DATA,
+          "Frame size (" + dataLength + ") larger than max length (" + maxFrameSize + ")!");
+    }
 
     byte[] buff = new byte[dataLength];
     LOGGER.debug("{}: reading data length: {}", getRole(), dataLength);

@@ -293,6 +293,12 @@ func (p *TBinaryProtocol) ReadMessageBegin(ctx context.Context) (name string, ty
 	if p.cfg.GetTBinaryStrictRead() {
 		return name, typeId, seqId, NewTProtocolExceptionWithType(BAD_VERSION, fmt.Errorf("Missing version in ReadMessageBegin"))
 	}
+	// Without a version, size is the length of the name, and it is held to
+	// the same limit as the length of any other string.
+	e = checkSizeForProtocol(size, p.cfg)
+	if e != nil {
+		return name, typeId, seqId, e
+	}
 	name, e2 := p.readStringBody(size)
 	if e2 != nil {
 		return name, typeId, seqId, e2
@@ -355,7 +361,8 @@ func (p *TBinaryProtocol) ReadMapBegin(ctx context.Context) (kType, vType TType,
 		err = NewTProtocolException(e)
 		return
 	}
-	err = checkSizeForProtocol(size32, p.cfg)
+	minElemSize := p.getMinSerializedSize(kType) + p.getMinSerializedSize(vType)
+	err = checkContainerSizeForProtocol(int64(size32), minElemSize, p.trans.RemainingBytes(), p.cfg)
 	if err != nil {
 		return
 	}
@@ -379,7 +386,8 @@ func (p *TBinaryProtocol) ReadListBegin(ctx context.Context) (elemType TType, si
 		err = NewTProtocolException(e)
 		return
 	}
-	err = checkSizeForProtocol(size32, p.cfg)
+	minElemSize := p.getMinSerializedSize(elemType)
+	err = checkContainerSizeForProtocol(int64(size32), minElemSize, p.trans.RemainingBytes(), p.cfg)
 	if err != nil {
 		return
 	}
@@ -404,7 +412,8 @@ func (p *TBinaryProtocol) ReadSetBegin(ctx context.Context) (elemType TType, siz
 		err = NewTProtocolException(e)
 		return
 	}
-	err = checkSizeForProtocol(size32, p.cfg)
+	minElemSize := p.getMinSerializedSize(elemType)
+	err = checkContainerSizeForProtocol(int64(size32), minElemSize, p.trans.RemainingBytes(), p.cfg)
 	if err != nil {
 		return
 	}
@@ -546,16 +555,76 @@ var (
 	_ TConfigurationSetter = (*TBinaryProtocol)(nil)
 )
 
+// Return the minimum number of bytes a type will consume on the wire
+func (p *TBinaryProtocol) getMinSerializedSize(ttype TType) int32 {
+	switch ttype {
+	case STOP:
+		return 1 // T_STOP needs to count itself
+	case VOID:
+		return 1 // T_VOID needs to count itsel∂
+	case BOOL:
+		return 1 // sizeof(int8)
+	case BYTE:
+		return 1 // sizeof(int8)
+	case DOUBLE:
+		return 8 // sizeof(double)
+	case I16:
+		return 2 // sizeof(short)
+	case I32:
+		return 4 // sizeof(int)
+	case I64:
+		return 8 // sizeof(long)
+	case STRING:
+		return 4 // string length
+	case STRUCT:
+		return 1 // empty struct needs at least 1 byte for the T_STOP
+	case MAP:
+		return 4 // element count
+	case SET:
+		return 4 // element count
+	case LIST:
+		return 4 // element count
+	case UUID:
+		return 16 // 16 bytes
+	default:
+		return 1 // unknown type
+	}
+}
+
 // This function is shared between TBinaryProtocol and TCompactProtocol.
 //
 // It tries to read size bytes from trans, in a way that prevents large
-// allocations when size is insanely large (mostly caused by malformed message).
+// allocations when size is insanely large (mostly caused by malformed message),
+// or smaller than bytes.MinRead.
+//
+// Above bytes.MinRead the buffer starts small and doubles as the data arrives,
+// so a size the sender made up costs no more than the bytes it actually sends,
+// and the growth stops at size, so a well-formed message ends up in a buffer
+// holding exactly what it asked for.
 func safeReadBytes(size int32, trans io.Reader) ([]byte, error) {
 	if size < 0 {
 		return nil, nil
 	}
+	if size <= bytes.MinRead {
+		// Allocate size bytes
+		b := make([]byte, size)
+		n, err := io.ReadFull(trans, b)
+		return b[:n], err
+	}
 
-	buf := new(bytes.Buffer)
-	_, err := io.CopyN(buf, trans, int64(size))
-	return buf.Bytes(), err
+	want := int(size)
+	buf := make([]byte, 0, bytes.MinRead)
+	for len(buf) < want {
+		if len(buf) == cap(buf) {
+			grown := make([]byte, len(buf), min(cap(buf)*2, want))
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := trans.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			return buf, err
+		}
+	}
+	return buf, nil
 }

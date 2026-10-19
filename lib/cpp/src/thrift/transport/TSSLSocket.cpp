@@ -152,12 +152,19 @@ void cleanupOpenSSL() {
 #if (OPENSSL_VERSION_NUMBER < OPENSSL_ENGINE_CLEANUP_REQUIRED_BEFORE)
   ENGINE_cleanup();             // https://www.openssl.org/docs/man1.1.0/crypto/ENGINE_cleanup.html - cleanup call is needed before 1.1.0
 #endif
+#if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
   CONF_modules_unload(1);
+#endif
   EVP_cleanup();
   CRYPTO_cleanup_all_ex_data();
-#if OPENSSL_VERSION_NUMBER >= 0x10100000
+#if OPENSSL_VERSION_NUMBER >= 0x10100000 && !defined(LIBRESSL_VERSION_NUMBER)
+  // LibreSSL reports OPENSSL_VERSION_NUMBER as 0x20000000L but has never shipped
+  // OPENSSL_thread_stop(), so it is routed to ERR_remove_state() below, which it
+  // does implement. Do nothing unless an openssl derivative is detected
+#  if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
   // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
   OPENSSL_thread_stop();
+#  endif
 #else
   // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
   // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
@@ -175,6 +182,54 @@ static char uppercase(char c);
 
 // SSLContext implementation
 SSLContext::SSLContext(const SSLProtocol& protocol) {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+  // OpenSSL 4.0 removed the single-version SSLv3_method() / TLSv1_method() /
+  // TLSv1_1_method() / TLSv1_2_method() family. The documented replacement is
+  // TLS_method() pinned to one version with SSL_CTX_set_min_proto_version() and
+  // SSL_CTX_set_max_proto_version(), both available since 1.1.0. Selecting the
+  // replacement from 1.1.0 onwards rather than only on 4.0 keeps a single code
+  // path under test, instead of one that no CI configuration ever compiles.
+  const SSL_METHOD* method = TLS_method();
+  int version = 0;
+  switch (protocol) {
+  case SSLTLS:
+    // Version-flexible: the protocol floor is set through SSL_CTX_set_options()
+    // below, as it was before.
+    break;
+#if !defined(OPENSSL_NO_SSL3) && OPENSSL_VERSION_NUMBER < 0x40000000L
+  case SSLv3:
+    // SSLv3_method() is only gone in 4.0, which removes SSLv3 altogether, so
+    // below that it is kept rather than expressed as a TLS_method() window:
+    // SSL_CTX_set_min_proto_version() honours the security level and would
+    // refuse SSL3_VERSION at the default level, where SSLv3_method() does not.
+    // This is also the one arm no CI configuration compiles, so leaving it
+    // alone keeps it behaving exactly as before.
+    method = SSLv3_method();
+    break;
+#endif
+  case TLSv1_0:
+    version = TLS1_VERSION;
+    break;
+  case TLSv1_1:
+    version = TLS1_1_VERSION;
+    break;
+  case TLSv1_2:
+    version = TLS1_2_VERSION;
+    break;
+  default:
+    /// UNKNOWN PROTOCOL!
+    throw TSSLException("SSL_CTX_new: Unknown protocol");
+  }
+
+  ctx_ = SSL_CTX_new(method);
+  if (ctx_ != nullptr && version != 0
+      && (SSL_CTX_set_min_proto_version(ctx_, version) != 1
+          || SSL_CTX_set_max_proto_version(ctx_, version) != 1)) {
+    // The requested version is not available in this build of the library.
+    SSL_CTX_free(ctx_);
+    ctx_ = nullptr;
+  }
+#else
   if (protocol == SSLTLS) {
     ctx_ = SSL_CTX_new(SSLv23_method());
 #ifndef OPENSSL_NO_SSL3
@@ -191,6 +246,7 @@ SSLContext::SSLContext(const SSLProtocol& protocol) {
     /// UNKNOWN PROTOCOL!
     throw TSSLException("SSL_CTX_new: Unknown protocol");
   }
+#endif
 
   if (ctx_ == nullptr) {
     string errors;
@@ -199,11 +255,18 @@ SSLContext::SSLContext(const SSLProtocol& protocol) {
   }
   SSL_CTX_set_mode(ctx_, SSL_MODE_AUTO_RETRY);
 
-  // Disable horribly insecure SSLv2 and SSLv3 protocols but allow a handshake
-  // with older clients so they get a graceful denial.
+  // Keep version-flexible negotiation for current protocol versions while setting
+  // the default protocol floor at TLSv1.2.
   if (protocol == SSLTLS) {
-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv2);
-      SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv3);   // THRIFT-3164
+    SSL_CTX_set_options(ctx_,
+                        SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1
+                            | SSL_OP_NO_TLSv1_1);
+  }
+}
+
+SSLContext::SSLContext(SSL_CTX* ctx) : ctx_(ctx) {
+  if (ctx_ == nullptr) {
+    throw TSSLException("SSLContext: ctx must not be null");
   }
 }
 
@@ -381,21 +444,25 @@ void TSSLSocket::close() {
       if (rc < 0) {
         string errors;
         buildErrors(errors, errno_copy, error);
-        GlobalOutput(("SSL_shutdown: " + errors).c_str());
+        TOutput::instance()(("SSL_shutdown: " + errors).c_str());
       }
     } catch (TTransportException& te) {
       // Don't emit an exception because this method is called by the
       // destructor. There's also not much that a user can do to recover, so
       // just clean up as much as possible without throwing, similar to the rc
       // < 0 case above.
-      GlobalOutput.printf("SSL_shutdown: %s", te.what());
+      TOutput::instance().printf("SSL_shutdown: %s", te.what());
     }
     SSL_free(ssl_);
     ssl_ = nullptr;
     handshakeCompleted_ = false;
-#if OPENSSL_VERSION_NUMBER >= 0x10100000
+#if OPENSSL_VERSION_NUMBER >= 0x10100000 && !defined(LIBRESSL_VERSION_NUMBER)
+    // LibreSSL has no OPENSSL_thread_stop(); see cleanupOpenSSL() above.
+    // Do nothing unless an openssl derivative is detected
+#  if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
     // https://www.openssl.org/docs/man1.1.1/man3/OPENSSL_thread_stop.html
     OPENSSL_thread_stop();
+#  endif
 #else
     // ERR_remove_state() was deprecated in OpenSSL 1.0.0 and ERR_remove_thread_state()
     // was deprecated in OpenSSL 1.1.0; these functions and should not be used.
@@ -601,7 +668,7 @@ void TSSLSocket::initializeHandshakeParams() {
   int flags;
   if ((flags = THRIFT_FCNTL(socket_, THRIFT_F_GETFL, 0)) < 0
       || THRIFT_FCNTL(socket_, THRIFT_F_SETFL, flags | THRIFT_O_NONBLOCK) < 0) {
-    GlobalOutput.perror("thriftServerEventHandler: set THRIFT_O_NONBLOCK (THRIFT_FCNTL) ",
+    TOutput::instance().perror("thriftServerEventHandler: set THRIFT_O_NONBLOCK (THRIFT_FCNTL) ",
                         THRIFT_GET_SOCKET_ERROR);
     ::THRIFT_CLOSESOCKET(socket_);
     return;
@@ -703,7 +770,7 @@ void TSSLSocket::initializeHandshake() {
 }
 
 void TSSLSocket::authorize() {
-  int rc = SSL_get_verify_result(ssl_);
+  long rc = SSL_get_verify_result(ssl_);
   if (rc != X509_V_OK) { // verify authentication result
     throw TSSLException(string("SSL_get_verify_result(), ") + X509_verify_cert_error_string(rc));
   }
@@ -746,6 +813,12 @@ void TSSLSocket::authorize() {
   }
 
   // extract subjectAlternativeName
+  //
+  // Whether the certificate carried a dNSName at all is tracked separately
+  // from whether one matched: RFC 6125 6.4.4 and RFC 9525 6.3 make the
+  // subjectAltName the identity once it is present, so commonName below is
+  // consulted only for a certificate that carries no dNSName.
+  bool hasDnsName = false;
   auto* alternatives
       = (STACK_OF(GENERAL_NAME)*)X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr);
   if (alternatives != nullptr) {
@@ -755,10 +828,15 @@ void TSSLSocket::authorize() {
       if (name == nullptr) {
         continue;
       }
+#if OPENSSL_VERSION_NUMBER >= 0x10100000
+      const char* data = (const char*)ASN1_STRING_get0_data(name->d.ia5);
+#else
       char* data = (char*)ASN1_STRING_data(name->d.ia5);
+#endif
       int length = ASN1_STRING_length(name->d.ia5);
       switch (name->type) {
       case GEN_DNS:
+        hasDnsName = true;
         if (host.empty()) {
           host = (server() ? getPeerHost() : getHost());
         }
@@ -781,9 +859,32 @@ void TSSLSocket::authorize() {
   }
 
   // extract commonName
-  X509_NAME* name = X509_get_subject_name(cert);
+  //
+  // Skipped entirely when the certificate presented a dNSName: it has already
+  // had its say, and a non-matching one is an answer, not an absence.
+  //
+  // OpenSSL 4.0 made X509_get_subject_name(), X509_NAME_get_entry() and
+  // X509_NAME_ENTRY_get_data() return const pointers. The const types are
+  // adopted from 3.0 rather than only from 4.0, so that the 3.x libraries CI
+  // does build against keep this path compiled. 3.0 is the floor rather than
+  // 1.1.0 because 3.0 is also where X509_NAME_get_index_by_NID() became const:
+  // 1.1.1 still declares it as taking a non-const X509_NAME*, so a const name
+  // does not compile there. Below the floor all three getters return non-const
+  // pointers, which every consumer below accepts either way. LibreSSL is
+  // excluded explicitly, as in the guards above, so that it stays on the
+  // non-const arm; that arm compiles against it however it chooses to qualify
+  // its own getters.
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+  const X509_NAME* name = hasDnsName ? nullptr : X509_get_subject_name(cert);
+#else
+  X509_NAME* name = hasDnsName ? nullptr : X509_get_subject_name(cert);
+#endif
   if (name != nullptr) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+    const X509_NAME_ENTRY* entry;
+#else
     X509_NAME_ENTRY* entry;
+#endif
     unsigned char* utf8;
     int last = -1;
     while (decision == AccessManager::SKIP) {
@@ -793,7 +894,11 @@ void TSSLSocket::authorize() {
       entry = X509_NAME_get_entry(name, last);
       if (entry == nullptr)
         continue;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+      const ASN1_STRING* common = X509_NAME_ENTRY_get_data(entry);
+#else
       ASN1_STRING* common = X509_NAME_ENTRY_get_data(entry);
+#endif
       int size = ASN1_STRING_to_UTF8(&utf8, common);
       if (host.empty()) {
         host = (server() ? getPeerHost() : getHost());
@@ -857,7 +962,7 @@ unsigned int TSSLSocket::waitForEvent(bool wantRead) {
       return TSSL_EINTR; // repeat operation
     }
     int errno_copy = THRIFT_GET_SOCKET_ERROR;
-    GlobalOutput.perror("TSSLSocket::read THRIFT_POLL() ", errno_copy);
+    TOutput::instance().perror("TSSLSocket::read THRIFT_POLL() ", errno_copy);
     throw TTransportException(TTransportException::UNKNOWN, "Unknown", errno_copy);
   } else if (ret > 0){
     if (fds[1].revents & THRIFT_POLLIN) {
@@ -873,25 +978,60 @@ unsigned int TSSLSocket::waitForEvent(bool wantRead) {
 uint64_t TSSLSocketFactory::count_ = 0;
 Mutex TSSLSocketFactory::mutex_;
 bool TSSLSocketFactory::manualOpenSSLInitialization_ = false;
+bool TSSLSocketFactory::didWeInitializeOpenSSL_ = false;
 
 TSSLSocketFactory::TSSLSocketFactory(SSLProtocol protocol) : server_(false) {
+  initializeOpenSSLState();
+  try {
+    ctx_ = std::make_shared<SSLContext>(protocol);
+  } catch (...) {
+    cleanupOpenSSLState();
+    throw;
+  }
+}
+
+TSSLSocketFactory::TSSLSocketFactory(const SSLContextFactory& contextFactory) : server_(false) {
+  if (!contextFactory) {
+    throw TSSLException("SSLContextFactory must not be empty");
+  }
+  initializeOpenSSLState();
+  try {
+    std::shared_ptr<SSLContext> ctx = contextFactory();
+    if (ctx == nullptr) {
+      throw TSSLException("SSLContextFactory must not return null");
+    }
+    ctx_ = ctx;
+  } catch (...) {
+    cleanupOpenSSLState();
+    throw;
+  }
+}
+
+void TSSLSocketFactory::initializeOpenSSLState() {
   Guard guard(mutex_);
   if (count_ == 0) {
     if (!manualOpenSSLInitialization_) {
+      didWeInitializeOpenSSL_ = true;
       initializeOpenSSL();
     }
     randomize();
   }
   count_++;
-  ctx_ = std::make_shared<SSLContext>(protocol);
 }
 
 TSSLSocketFactory::~TSSLSocketFactory() {
+  cleanupOpenSSLState();
+}
+
+void TSSLSocketFactory::cleanupOpenSSLState() {
   Guard guard(mutex_);
   ctx_.reset();
-  count_--;
-  if (count_ == 0 && !manualOpenSSLInitialization_) {
+  if (count_ > 0) {
+    count_--;
+  }
+  if (count_ == 0 && didWeInitializeOpenSSL_) {
     cleanupOpenSSL();
+    didWeInitializeOpenSSL_ = false;
   }
 }
 
@@ -1123,6 +1263,10 @@ int TSSLSocketFactory::passwordCallback(char* password, int size, int, void* dat
   return length;
 }
 
+void TSSLSocketFactory::setManualOpenSSLInitialization(bool manualOpenSSLInitialization) {
+  manualOpenSSLInitialization_ = manualOpenSSLInitialization;
+}
+
 // extract error messages from error queue
 void buildErrors(string& errors, int errno_copy, int sslerrno) {
   unsigned long errorCode;
@@ -1200,6 +1344,12 @@ Decision DefaultClientAccessManager::verify(const sockaddr_storage& sa,
  * @return True, if "host" matches "pattern". False otherwise.
  */
 bool matchName(const char* host, const char* pattern, int size) {
+  // RFC 6125 §6.4.3: wildcard must not appear outside the leftmost label.
+  bool past_first_dot = false;
+  for (int k = 0; k < size; k++) {
+    if (pattern[k] == '.') { past_first_dot = true; continue; }
+    if (pattern[k] == '*' && past_first_dot) return false;
+  }
   bool match = false;
   int i = 0, j = 0;
   while (i < size && host[j] != '\0') {

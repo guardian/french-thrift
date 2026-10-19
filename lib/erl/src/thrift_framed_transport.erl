@@ -21,6 +21,8 @@
 
 -behaviour(thrift_transport).
 
+-include("thrift_constants.hrl").
+
 %% constructor
 -export([new/1]).
 %% protocol callbacks
@@ -67,34 +69,57 @@ read(State = #t_framed{wrapped = Wrapped, read_buffer = Buffer}, Len) when
             {State#t_framed{read_buffer = Remaining}, {ok, Result}}
     end.
 
-read_exact(State = #t_framed{wrapped = Wrapped, read_buffer = Buffer}, Len) when
+read_exact(State = #t_framed{read_buffer = Buffer}, Len) when
     is_integer(Len), Len >= 0
 ->
     Binary = iolist_to_binary(Buffer),
-    case iolist_size(Binary) of
-        %% read buffer is larger than requested read size
-        X when X >= Len ->
-            {Result, Remaining} = split_binary(Binary, Len),
-            {State#t_framed{read_buffer = Remaining}, {ok, Result}};
-        %% read buffer is insufficient for requested read size
-        _ ->
-            case next_frame(Wrapped) of
-                {NewState, {ok, Frame}} ->
-                    read_exact(
-                        State#t_framed{wrapped = NewState, read_buffer = [Buffer, Frame]},
-                        Len
-                    );
-                {NewState, Error} ->
-                    {State#t_framed{wrapped = NewState}, Error}
-            end
+    read_exact(State, Len, [Binary], byte_size(Binary)).
+
+%% The frames a read needs are collected newest first, together with their
+%% total size, and flattened once there are enough bytes. Flattening what was
+%% collected on every pass instead copied it again for each frame added.
+read_exact(State, Len, Acc, Size) when Size >= Len ->
+    {Result, Remaining} = split_binary(iolist_to_binary(lists:reverse(Acc)), Len),
+    {State#t_framed{read_buffer = Remaining}, {ok, Result}};
+read_exact(State = #t_framed{wrapped = Wrapped}, Len, Acc, Size) ->
+    case next_frame(Wrapped) of
+        {NewState, {ok, Frame}} ->
+            read_exact(
+                State#t_framed{wrapped = NewState}, Len, [Frame | Acc], Size + iolist_size(Frame)
+            );
+        {NewState, Error} ->
+            {State#t_framed{wrapped = NewState, read_buffer = lists:reverse(Acc)}, Error}
     end.
 
 next_frame(Transport) ->
     case thrift_transport:read_exact(Transport, 4) of
         {NewState, {ok, <<FrameLength:32/integer-signed-big>>}} ->
-            thrift_transport:read_exact(NewState, FrameLength);
+            %% The length is four bytes the peer chose and read_exact/2
+            %% accumulates whatever it says, so check it before reading. A
+            %% negative one does not merely over-read: read_exact/2's Len >= 0
+            %% guard does not match it, and the resulting function_clause is
+            %% unhandled.
+            case check_frame_length(FrameLength) of
+                ok ->
+                    thrift_transport:read_exact(NewState, FrameLength);
+                {error, Reason} ->
+                    {NewState, {error, Reason}}
+            end;
         Error ->
             Error
+    end.
+
+max_frame_size() ->
+    application:get_env(thrift, max_frame_size, ?DEFAULT_MAX_FRAME_SIZE).
+
+check_frame_length(FrameLength) when FrameLength < 0 ->
+    {error, {framing_error, negative_frame_size, FrameLength}};
+check_frame_length(FrameLength) ->
+    case max_frame_size() of
+        Max when FrameLength > Max ->
+            {error, {framing_error, frame_size_exceeds_maximum, FrameLength, Max}};
+        _ ->
+            ok
     end.
 
 write(State = #t_framed{write_buffer = Buffer}, Data) ->

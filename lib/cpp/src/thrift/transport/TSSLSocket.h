@@ -23,6 +23,7 @@
 // Put this first to avoid WIN32 build failure
 #include <thrift/transport/TSocket.h>
 
+#include <functional>
 #include <openssl/ssl.h>
 #include <string>
 #include <thrift/concurrency/Mutex.h>
@@ -33,14 +34,15 @@ namespace transport {
 
 class AccessManager;
 class SSLContext;
+typedef std::function<std::shared_ptr<SSLContext>()> SSLContextFactory;
 
 enum SSLProtocol {
-  SSLTLS  = 0,  // Supports SSLv2 and SSLv3 handshake but only negotiates at TLSv1_0 or later.
+  SSLTLS  = 0,  // Supports version-flexible TLS negotiation with TLSv1_2 as the default floor.
 //SSLv2   = 1,  // HORRIBLY INSECURE!
   SSLv3   = 2,  // Supports SSLv3 only - also horribly insecure!
-  TLSv1_0 = 3,  // Supports TLSv1_0 or later.
-  TLSv1_1 = 4,  // Supports TLSv1_1 or later.
-  TLSv1_2 = 5,  // Supports TLSv1_2 or later.
+  TLSv1_0 = 3,  // Supports TLSv1_0 only.
+  TLSv1_1 = 4,  // Supports TLSv1_1 only.
+  TLSv1_2 = 5,  // Supports TLSv1_2 only.
   LATEST  = TLSv1_2
 };
 
@@ -210,6 +212,12 @@ public:
    * @param protocol The SSL/TLS protocol to use.
    */
   TSSLSocketFactory(SSLProtocol protocol = SSLTLS);
+  /**
+   * Constructor
+   *
+   * @param contextFactory Function invoked during construction to return a custom OpenSSL context.
+   */
+  TSSLSocketFactory(const SSLContextFactory& contextFactory);
   virtual ~TSSLSocketFactory();
   /**
    * Create an instance of TSSLSocket with a fresh new socket.
@@ -306,9 +314,8 @@ public:
    * @param manager  The AccessManager instance
    */
   virtual void access(std::shared_ptr<AccessManager> manager) { access_ = manager; }
-  static void setManualOpenSSLInitialization(bool manualOpenSSLInitialization) {
-    manualOpenSSLInitialization_ = manualOpenSSLInitialization;
-  }
+
+  static void setManualOpenSSLInitialization(bool manualOpenSSLInitialization);
 
 protected:
   std::shared_ptr<SSLContext> ctx_;
@@ -327,7 +334,10 @@ private:
   std::shared_ptr<AccessManager> access_;
   static concurrency::Mutex mutex_;
   static uint64_t count_;
-  THRIFT_EXPORT static bool manualOpenSSLInitialization_;
+  static bool manualOpenSSLInitialization_;
+  static bool didWeInitializeOpenSSL_;  // in that case we also perform de-init
+  void initializeOpenSSLState();
+  void cleanupOpenSSLState();
   void setup(std::shared_ptr<TSSLSocket> ssl);
   static int passwordCallback(char* password, int size, int, void* data);
 };
@@ -355,6 +365,21 @@ public:
 class SSLContext {
 public:
   SSLContext(const SSLProtocol& protocol = SSLTLS);
+  /**
+   * Wrap an existing OpenSSL SSL_CTX.
+   *
+   * Takes ownership of @a ctx; the caller must not call SSL_CTX_free on it.
+   * The context must remain valid for the lifetime of this SSLContext and any
+   * TSSLSocket instances created from it (see TSSLSocketFactory lifetime notes).
+   *
+   * Unlike SSLContext(SSLProtocol) with the default SSLTLS protocol, this
+   * constructor does not apply a minimum TLS version (no SSL_OP_NO_TLSv1*).
+   * Configure protocol options on @a ctx before wrapping if a version floor
+   * is required.
+   *
+   * @param ctx  OpenSSL context to wrap (ownership transferred)
+   */
+  explicit SSLContext(SSL_CTX* ctx);
   virtual ~SSLContext();
   SSL* createSSL();
   SSL_CTX* get() { return ctx_; }

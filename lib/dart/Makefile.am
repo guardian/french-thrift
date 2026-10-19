@@ -17,6 +17,9 @@
 # under the License.
 #
 
+# DART and DARTPUB come from configure. "pub" as a standalone program is gone
+# as of Dart 3, so DARTPUB is "$(DART) pub".
+
 all-local:
 	$(DARTPUB) get
 
@@ -27,6 +30,7 @@ clean-local:
 	find . -type d -name "packages" | xargs $(RM) -r
 
 check-local: all
+	$(DART) test
 
 distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am

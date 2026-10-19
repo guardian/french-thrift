@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Thrift\Server;
 
 use Thrift\Exception\TTransportException;
@@ -13,35 +15,43 @@ class TSimpleServer extends TServer
 {
     /**
      * Flag for the main serving loop
-     *
-     * @var bool
      */
-    private $stop_ = false;
+    private bool $stop = false;
 
     /**
      * Listens for new client using the supplied
-     * transport. It handles TTransportExceptions
-     * to avoid timeouts etc killing it
-     *
-     * @return void
+     * transport and serves one client at a time
+     * until stop() is called. It handles
+     * TTransportExceptions from accept(), so that
+     * timeouts etc do not end it. Whatever ends a
+     * client's connection - the client closing it,
+     * a transport error or a request that cannot
+     * be read - ends only that connection, which
+     * is then closed.
      */
-    public function serve()
+    public function serve(): void
     {
-        $this->transport_->listen();
+        $this->transport->listen();
 
-        while (!$this->stop_) {
+        while (!$this->stop) {
             try {
-                $transport = $this->transport_->accept();
-
-                if ($transport != null) {
-                    $inputTransport = $this->inputTransportFactory_->getTransport($transport);
-                    $outputTransport = $this->outputTransportFactory_->getTransport($transport);
-                    $inputProtocol = $this->inputProtocolFactory_->getProtocol($inputTransport);
-                    $outputProtocol = $this->outputProtocolFactory_->getProtocol($outputTransport);
-                    while ($this->processor_->process($inputProtocol, $outputProtocol)) {
-                    }
-                }
+                $transport = $this->transport->accept();
             } catch (TTransportException $e) {
+                continue;
+            }
+
+            try {
+                try {
+                    $inputTransport = $this->inputTransportFactory->getTransport($transport);
+                    $outputTransport = $this->outputTransportFactory->getTransport($transport);
+                    $inputProtocol = $this->inputProtocolFactory->getProtocol($inputTransport);
+                    $outputProtocol = $this->outputProtocolFactory->getProtocol($outputTransport);
+                    while ($this->processor->process($inputProtocol, $outputProtocol)) {
+                    }
+                } finally {
+                    $transport->close();
+                }
+            } catch (\Throwable $e) {
             }
         }
     }
@@ -49,12 +59,10 @@ class TSimpleServer extends TServer
     /**
      * Stops the server running. Kills the transport
      * and then stops the main serving loop
-     *
-     * @return void
      */
-    public function stop()
+    public function stop(): void
     {
-        $this->transport_->close();
-        $this->stop_ = true;
+        $this->transport->close();
+        $this->stop = true;
     }
 }

@@ -31,21 +31,29 @@ env:
     --without-nodets
     --without-lua
     --without-rs
-    --without-swift
 
 permissions:
   contents: read
 
 jobs:
-  # TODO windows and macos
+  # The Windows compiler build lives in cmake.yml. This workflow drives the
+  # autotools build, which has no native Windows toolchain.
   compiler:
     strategy:
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
       fail-fast: false
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -56,7 +64,7 @@ jobs:
         run: ./bootstrap.sh
 
       - name: Run configure
-        run: ./configure --disable-debug --disable-tests --disable-libs
+        run: ./configure --disable-debug --disable-libs
 
       - name: Run make
         run: make -j$(nproc)
@@ -67,34 +75,125 @@ jobs:
       - name: Run thrift version
         run: /usr/local/bin/thrift -version
 
-      # only upload while building ubuntu-22.04
+      - name: Run thrift audit tests
+        run: make -C test/audit check
+
+      - name: Test Delphi UUIDv8 GUID determinism
+        run: |
+          # Run the Delphi generator twice on the same input and verify identical output.
+          # Tests: cross-platform determinism, service inheritance, struct field-order.
+          THRIFT=/usr/local/bin/thrift
+          INPUT=test/delphi/UuidV8Test.thrift
+
+          mkdir -p /tmp/delphi-guid-run1 /tmp/delphi-guid-run2
+          $THRIFT --gen delphi --out /tmp/delphi-guid-run1 $INPUT
+          $THRIFT --gen delphi --out /tmp/delphi-guid-run2 $INPUT
+          diff -r /tmp/delphi-guid-run1 /tmp/delphi-guid-run2
+
+          # Also verify GUIDs are non-empty (grep for the GUID attribute pattern)
+          grep -qP "^\s+\['\{[0-9A-F]{8}-[0-9A-F]{4}-8[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}\}'\]" \
+            /tmp/delphi-guid-run1/UuidV8Test.pas \
+            && echo "UUIDv8 GUIDs found in output" \
+            || { echo "ERROR: No UUIDv8 GUIDs found in Delphi output"; exit 1; }
+
+          # Verify that Point and PointReversed have DIFFERENT GUIDs (field-order sensitivity)
+          POINT_GUID=$(grep -A1 "IPoint = interface" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | tr -d ' ')
+          POINTREV_GUID=$(grep -A1 "IPointReversed = interface" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | tr -d ' ')
+          [ "$POINT_GUID" != "$POINTREV_GUID" ] \
+            && echo "Field-order sensitivity OK (Point vs PointReversed GUIDs differ)" \
+            || { echo "ERROR: Point and PointReversed have the same GUID — field order not hashed"; exit 1; }
+
+          # Verify that BaseService and ExtendedService have DIFFERENT GUIDs (parent hash included)
+          BASE_GUID=$(grep -A1 "Iface = interface$" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | head -1 | tr -d ' ')
+          EXT_GUID=$(grep -A1 "Iface = interface(.*Base" /tmp/delphi-guid-run1/UuidV8Test.pas | grep "^\s*\['" | head -1 | tr -d ' ')
+          [ "$BASE_GUID" != "$EXT_GUID" ] \
+            && echo "Parent-hash inclusion OK (BaseService vs ExtendedService GUIDs differ)" \
+            || { echo "ERROR: BaseService and ExtendedService have the same GUID — parent not hashed"; exit 1; }
+
+          echo "All Delphi UUIDv8 GUID determinism tests passed."
+
+      # For the jobs that run on ubuntu-24.04.
       - name: Archive built thrift compiler
-        if: matrix.os == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp/thrift
           retention-days: 3
 
-  lib-php:
-    needs: compiler
-    runs-on: ubuntu-22.04
+      # For lib-c_glib, which runs on ubuntu-22.04. The ubuntu-24.04 build
+      # does not start there: it needs glibc 2.38, and ubuntu-22.04 has 2.35.
+      - name: Archive built thrift compiler (ubuntu-22.04)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thrift-compiler-ubuntu-22.04
+          path: compiler/cpp/thrift
+          retention-days: 3
+
+  compiler-macos:
     strategy:
       matrix:
-        php-version: [7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3]
+        os: &macos_versions [macos-15-intel, macos-15, macos-26, xcode-27]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          brew install automake bison flex boost libevent openssl libtool pkg-config
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: ./configure --disable-debug --disable-tests --disable-libs
+
+      - name: Run make
+        run: make -j$(sysctl -n hw.ncpu)
+
+      - name: Run install
+        run: sudo make install
+
+      - name: Run thrift version
+        run: /usr/local/bin/thrift -version
+
+      - name: Archive built thrift compiler (macOS)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thrift-compiler-${{ matrix.os }}
+          path: compiler/cpp/thrift
+          retention-days: 3
+
+  lib-php:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        php-version: [8.2, 8.3, 8.4, 8.5]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: ${{ matrix.php-version }}
-          extensions: mbstring, intl, xml, curl
+          extensions: intl, xml, curl
           ini-values: "error_reporting=E_ALL"
 
       - name: Install Dependencies
-        run: composer install
+        run: |
+          rm -f ~/.composer/auth.json ~/.config/composer/auth.json
+          composer install
 
       - name: Run bootstrap
         run: ./bootstrap.sh
@@ -103,7 +202,11 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-php/with-php/' | sed 's/without-php_extension/with-php_extension/' )
 
-      - uses: actions/download-artifact@v4
+      # "make install" copies only the files lib/php/Makefile.am lists.
+      - name: Check the PHP install lists
+        run: make -C lib/php check-install-lists
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -116,34 +219,68 @@ jobs:
       - name: Build Thrift Classes
         run: |
           mkdir -p ./lib/php/test/Resources/packages/php
+          mkdir -p ./lib/php/test/Resources/packages/phpi
           mkdir -p ./lib/php/test/Resources/packages/phpv
           mkdir -p ./lib/php/test/Resources/packages/phpvo
           mkdir -p ./lib/php/test/Resources/packages/phpjs
           mkdir -p ./lib/php/test/Resources/packages/phpcm
+          mkdir -p ./lib/php/test/Resources/packages/phprec
+          mkdir -p ./lib/php/test/Resources/packages/phprecoop
+          mkdir -p ./lib/php/test/Resources/packages/phpreci
           compiler/cpp/thrift --gen php:nsglobal="Basic" -r --out ./lib/php/test/Resources/packages/php lib/php/test/Resources/ThriftTest.thrift
+          compiler/cpp/thrift --gen php:inlined,nsglobal="BasicInline" -r --out ./lib/php/test/Resources/packages/phpi lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:validate,nsglobal="Validate" -r --out ./lib/php/test/Resources/packages/phpv lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:validate,oop,nsglobal="ValidateOop" -r --out ./lib/php/test/Resources/packages/phpvo lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:json,nsglobal="Json" -r --out ./lib/php/test/Resources/packages/phpjs lib/php/test/Resources/ThriftTest.thrift
           compiler/cpp/thrift --gen php:classmap,server,rest,nsglobal="Classmap" -r --out ./lib/php/test/Resources/packages/phpcm lib/php/test/Resources/ThriftTest.thrift
+          compiler/cpp/thrift --gen php:nsglobal="PhpRec" -r --out ./lib/php/test/Resources/packages/phprec lib/php/test/Resources/RecursionDepth.thrift
+          compiler/cpp/thrift --gen php:oop,nsglobal="PhpRecOop" -r --out ./lib/php/test/Resources/packages/phprecoop lib/php/test/Resources/RecursionDepth.thrift
+          compiler/cpp/thrift --gen php:inlined,nsglobal="PhpRecInline" -r --out ./lib/php/test/Resources/packages/phpreci lib/php/test/Resources/RecursionDepth.thrift
 
       - name: Run Tests
         run: vendor/bin/phpunit -c lib/php/phpunit.xml
 
+      - name: Build PHP cross test extension
+        if: matrix.php-version == '8.3'
+        run: make -C lib/php src/ext/thrift_protocol/modules/thrift_protocol.so
+
+      - name: Run make precross for php test
+        if: matrix.php-version == '8.3'
+        run: make -C test/php precross
+
+      - name: Upload php precross artifacts
+        if: matrix.php-version == '8.3'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: php-precross
+          if-no-files-found: error
+          path: |
+            lib/php/src/ext/thrift_protocol/modules/thrift_protocol.so
+            test/php/gen-php/
+            test/php/gen-php-classmap/
+          retention-days: 3
+
   lib-go:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       matrix:
         go:
-          - '1.22'
-          - '1.23'
+          - '1.26'
+          - '1.27'
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -157,7 +294,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-go/with-go/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -180,8 +317,8 @@ jobs:
         run: make -C test/go precross
 
       - name: Upload go precross artifacts
-        if: matrix.go == '1.23'
-        uses: actions/upload-artifact@v4
+        if: matrix.go == '1.27'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-precross
           if-no-files-found: error
@@ -191,17 +328,23 @@ jobs:
 
   lib-java-kotlin:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       GRADLE_VERSION: "8.4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 17
           cache: "gradle"
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -235,7 +378,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-java/with-java/' | sed 's/without-kotlin/with-kotlin/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -253,7 +396,7 @@ jobs:
         run: make -C lib/java install
 
       - name: Upload java libthrift artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: libthrift
           if-no-files-found: error
@@ -266,12 +409,13 @@ jobs:
         run: make -C lib/java precross
 
       - name: Upload java precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: java-precross
           if-no-files-found: error
           path: |
             lib/java/build/functionalTestJar/
+            lib/java/build/runnonblockingclient
             lib/java/build/runclient
             lib/java/build/runnonblockingserver
             lib/java/build/runserver
@@ -288,7 +432,7 @@ jobs:
         run: make -C lib/kotlin precross
 
       - name: Upload kotlin precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kotlin-precross
           if-no-files-found: error
@@ -297,13 +441,67 @@ jobs:
             lib/kotlin/cross-test-server/build/install/TestServer/
           retention-days: 3
 
+  lib-javame:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      # lib/javame has no build harness -- no Makefile.am, no configure.ac
+      # entry -- so it is compiled here directly, together with the code its
+      # tests generate. THttpClient.java is left out: it needs the
+      # javax.microedition API, which no JDK provides and which is not
+      # available under a license an ASF build can use.
+      - name: Compile lib/javame and its tests
+        working-directory: lib/javame
+        run: |
+          ../../compiler/cpp/thrift --gen javame -o . test/RecursionDepth.thrift
+          javac -d "$RUNNER_TEMP/javame" \
+            $(find src -name '*.java' ! -name 'THttpClient.java') \
+            gen-javame/*.java test/*.java
+
+      # Every test/Test*.java has a main that exits non-zero on a failed check.
+      - name: Run the lib/javame tests
+        working-directory: lib/javame
+        run: |
+          for test in test/Test*.java; do
+            java -cp "$RUNNER_TEMP/javame" "$(basename "$test" .java)"
+          done
+
   lib-netstd:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
+    defaults:
+      run:
+        shell: bash  # required by net install script
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -311,10 +509,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends $BUILD_DEPS
           sudo apt-get install -y --no-install-recommends curl openssl ca-certificates
 
-#      the sdk is installed by default, but keep this step for reference
-#      - name: Set up .NET SDK
-#        run: |
-#          sudo apt-get install -y --no-install-recommends dotnet-sdk-8.0
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show .NET SDKs
+        run: dotnet --list-sdks
 
       - name: Run bootstrap
         run: ./bootstrap.sh
@@ -323,7 +524,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-netstd/with-netstd/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -349,7 +550,7 @@ jobs:
         run: make -C test/netstd precross
 
       - name: Upload netstd precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: netstd-precross
           if-no-files-found: error
@@ -358,20 +559,127 @@ jobs:
             test/netstd/Server/bin/Release/
           retention-days: 3
 
-  lib-swift:
-    needs: compiler
-    runs-on: ubuntu-22.04
+      # Builds the tutorial and runs its client against its server (smoketest.sh)
+      - name: Run make check for tutorial/netstd
+        timeout-minutes: 15
+        run: make -C tutorial/netstd check
+
+  lib-netstd-codegen:
+    needs: [compiler]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        dotnet-version: [8, 9, 10]
+      fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Run bootstrap
-        run: ./bootstrap.sh
+      - name: Set up .NET SDK ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "${{ matrix.dotnet-version }}.0.x"
 
-      - name: Run configure
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
         run: |
-          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-swift/with-swift/')
+          chmod a+x compiler/cpp/thrift
+          echo "$GITHUB_WORKSPACE/compiler/cpp" >> "$GITHUB_PATH"
+          compiler/cpp/thrift -version
 
-      - uses: actions/download-artifact@v4
+      - name: Run netstd codegen tests
+        shell: pwsh
+        run: |
+          lib/netstd/Tests/codegen/run-NetStd-Codegen-Tests.ps1 `
+            -TargetVersions @("net${{ matrix.dotnet-version }}")
+
+  lib-haxe-codegen:
+    needs: [compiler]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Set up Haxe
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y haxe
+          haxelib setup ~/haxelib
+          haxe --version
+
+      - name: Install Haxe dependencies
+        run: |
+          haxelib install uuid --quiet
+          haxelib install crypto --quiet
+          haxelib dev thrift ${{ github.workspace }}/lib/haxe
+          haxelib path thrift
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          echo "$GITHUB_WORKSPACE/compiler/cpp" >> "$GITHUB_PATH"
+          compiler/cpp/thrift -version
+
+      - name: Run Haxe codegen tests
+        shell: pwsh
+        run: |
+          lib/haxe/codegen/run-Haxe-Codegen-Tests.ps1
+
+      # The autotools `make check` path for the Haxe library is disabled
+      # (--without-haxe) because it drives the cpp/php hxml targets; run the
+      # library unit tests directly on the lightweight neko target instead,
+      # reusing the toolchain (Haxe+neko, uuid, thrift compiler) set up above.
+      # The harness throws and Sys.exit(1)s on a failed assertion, so a failing
+      # test fails this step.
+      #
+      # Only the standalone "Normal" mode (StreamTest + RecursionLimitTest) is
+      # run. Multiplex needs a client+server; "constants" (ConstantsTest) is
+      # omitted for now because it constructs a TMemoryStream, which currently
+      # fails on the neko target -- run it here once that is fixed.
+      - name: Run Haxe library unit tests (neko)
+        run: |
+          cd lib/haxe/test
+          rm -rf gen-haxe bin
+          thrift --gen haxe -r ../../../test/ThriftTest.thrift
+          thrift --gen haxe -r ../../../contrib/async-test/aggr.thrift
+          thrift --gen haxe -r ../../../lib/rb/benchmark/Benchmark.thrift
+          thrift --gen haxe -r ../../../test/Recursive.thrift
+          thrift --gen haxe -r ../../../test/ConstantsDemo.thrift
+          haxe --cwd . neko.hxml
+          neko bin/Test.n
+
+  lib-st:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # The Pharo release line to test against. "stable" is deliberately not
+      # used: it will move to Pharo 14 one day and turn this job red for
+      # reasons that have nothing to do with Thrift. Verified against the
+      # 13.1 snapshot this line currently serves.
+      PHARO_RELEASE: "130"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -381,26 +689,38 @@ jobs:
           chmod a+x compiler/cpp/thrift
           compiler/cpp/thrift -version
 
-      - name: Run make precross for swift
-        run: make -C test/swift precross
+      # lib/st cannot be built the way the other bindings are: it is not in
+      # configure.ac and not in a SUBDIRS, so there is no "make check" to hang
+      # this on. It is a Squeak/Pharo file-in, and the tests are SUnit suites.
+      - name: Install Pharo
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$RUNNER_TEMP/pharo"
+          cd "$RUNNER_TEMP/pharo"
+          curl -sSL "https://get.pharo.org/64/${PHARO_RELEASE}+vm" | bash
+          ./pharo Pharo.image eval "Smalltalk version"
 
-      - name: Upload swift precross artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: swift-precross
-          if-no-files-found: error
-          path: |
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestServer
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestClient
-          retention-days: 3
+      # The script does the asserting: Pharo prints a failed test and still
+      # exits 0, so the run and pass counts are the only signal there is.
+      - name: Run the lib/st tests
+        run: |
+          ./lib/st/test/run-tests.sh \
+            --thrift "$PWD/compiler/cpp/thrift" \
+            --pharo "$RUNNER_TEMP/pharo"
 
   lib-rust:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      TOOLCHAIN_VERSION: 1.65.0
+      TOOLCHAIN_VERSION: 1.99.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -424,7 +744,7 @@ jobs:
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-rs/with-rs/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -437,8 +757,10 @@ jobs:
       - name: Run make for rust
         run: make -C lib/rs
 
-      - name: Run make check for rust
-        run: make -C lib/rs check
+      - name: Run make checks for rust
+        run: |
+          make -C lib/rs check
+          make -C lib/rs check-rustls
 
       - name: Run make test for rust
         run: make -C lib/rs/test check
@@ -447,7 +769,7 @@ jobs:
         run: make -C test/rs precross
 
       - name: Upload rust precross artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rs-precross
           if-no-files-found: error
@@ -461,14 +783,19 @@ jobs:
 
   lib-python:
     needs: compiler
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       matrix:
-        python-version:
-          - "3.x"
+        python-version: &python_versions ["3.10", "3.11", "3.12", "3.13", "3.14"]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
 
       - name: Install dependencies
         run: |
@@ -477,25 +804,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends curl openssl ca-certificates
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Python setup
         run: |
-          python -m pip install --upgrade pip setuptools wheel flake8 six tornado twisted zope.interface
+          python -m pip install --upgrade pip setuptools wheel flake8 "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
           python --version
           pip --version
 
       - name: Run bootstrap
         run: ./bootstrap.sh
 
-      - name: Run configure 3.x
-        if: matrix.python-version == '3.x'
+      - name: Run configure
         run: |
           ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-py3/with-py3/')
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: thrift-compiler
           path: compiler/cpp
@@ -511,84 +837,957 @@ jobs:
       - name: Run make install for python
         run: sudo make -C lib/py install
 
-      # - name: Run make install-exec-hook for python
-      #   run: sudo make -C lib/py install-exec-hook
-
-      - name: Run make check for python
+      - name: Run make check for python libs
         run: make -C lib/py check
+
+      - name: Run make check for python code
+        run: make -C test/py check
+
+      - name: Run make precross for python
+        if: matrix.python-version == '3.12'
+        run: make -C test/py precross
+
+      - name: Upload python precross artifacts
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: py-precross
+          if-no-files-found: error
+          path: |
+            lib/py/build/lib.*
+            test/py/gen-py
+            test/py/TestClient.py
+            test/py/TestServer.py
+            test/py/util.py
+          retention-days: 3
+
+  lib-python-macos:
+    needs: compiler-macos
+    strategy:
+      matrix:
+        os: *macos_versions
+        python-version: *python_versions
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          brew install automake bison flex boost libevent openssl libtool pkg-config
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Python setup
+        run: |
+          python -m pip install --upgrade pip setuptools wheel flake8 "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
+          python --version
+          pip --version
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-py3/with-py3/')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler-${{ matrix.os }}
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for python
+        run: make -C lib/py
+
+      - name: Run make install for python
+        run: |
+          sudo make -C lib/py install PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+
+      - name: Run make for python libs
+        run: make -C lib/py
+
+      - name: Run make check for python libs
+        run: make -C lib/py check
+
+      - name: Run make check for python code
+        run: make -C test/py check
+
+  lib-nodejs:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed -E 's/without-node([tj])s/with-node\1s/g')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run js tests
+        run: make -C lib/nodejs check
+
+      - name: Run ts tests
+        run: make -C lib/nodets check
+
+      - name: Run js precross
+        run: make -C lib/nodejs precross
+
+      - name: Run ts precross
+        run: make -C lib/nodets precross
+
+      - name: Upload nodejs precross artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nodejs-precross
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            lib/nodejs/test/gen-nodejs
+            lib/nodets/test/gen-nodejs
+            lib/nodets/test-compiled
+          retention-days: 3
+
+  lib-js:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GRADLE_VERSION: "8.4"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: "gradle"
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      # ant fetches the browser test libraries, and lib/Makefile.am builds
+      # lib/js inside the WITH_JAVA block for exactly that reason.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends $BUILD_DEPS
+          sudo apt-get install -y wget unzip ant
+
+      - name: Setup gradle
+        run: |
+          wget https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip -q -O /tmp/gradle-$GRADLE_VERSION-bin.zip
+          (echo "3e1af3ae886920c3ac87f7a91f816c0c7c436f276a6eefdb3da152100fef72ae  /tmp/gradle-$GRADLE_VERSION-bin.zip" | sha256sum -c -)
+          unzip -d /tmp /tmp/gradle-$GRADLE_VERSION-bin.zip
+          sudo mv /tmp/gradle-$GRADLE_VERSION /usr/local/gradle
+          sudo ln -s /usr/local/gradle/bin/gradle /usr/local/bin
+          gradle --version
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for js
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-java/with-java/'))
+          echo "$summary"
+          # lib/js has no --with-js of its own; it is built inside the WITH_JAVA
+          # block, and its check-local is guarded by HAVE_NPM.  Insist on both,
+          # so that a missing prerequisite cannot turn this job into a green
+          # run that tests nothing.
+          echo "$summary" | grep -qE "Building Java Library [.]+ : yes"
+          command -v npm
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      # lib/js/test/build.xml stops unless lib/java/build/libs holds two jars:
+      # the library, and its test classes, which gradle builds only as testJar.
+      - name: Build the java library and its test jar
+        run: |
+          make -C lib/java
+          gradle -p lib/java testJar -Prelease=true --console=plain
+
+      # Generates the test code, starts the test servers and drives the QUnit
+      # pages in headless Chrome.  The ant half of the check skips its own
+      # browser test when phantomjs is missing, so the grep is the guard:
+      # grunt reports the QUnit totals, and a run that executed no test at
+      # all would otherwise still exit 0.
+      - name: Run make check for js
+        shell: bash
+        run: |
+          set -o pipefail
+          make -C lib/js check 2>&1 | tee /tmp/lib-js-check.log
+          grep -aqE "[0-9]+ tests completed" /tmp/lib-js-check.log
+
+      - name: Upload log files from a failed run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: lib-js-check-log
+          path: /tmp/lib-js-check.log
+          retention-days: 3
+
+  lib-ts:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      # ant fetches the browser test libraries, and lib/Makefile.am builds
+      # lib/ts inside the WITH_JAVA block for exactly that reason.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends $BUILD_DEPS ant
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for ts
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-java/with-java/'))
+          echo "$summary"
+          # lib/ts has no --with-ts of its own; it is built inside the WITH_JAVA
+          # block, and its check-local is guarded by HAVE_NPM.  Insist on both,
+          # so that a missing prerequisite cannot turn this job into a green
+          # run that tests nothing.
+          echo "$summary" | grep -qE "Building Java Library [.]+ : yes"
+          command -v npm
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      # Generates the test code, compiles test/*.ts, bundles it and drives the
+      # QUnit pages in headless Chrome.  The grep is the guard: grunt reports
+      # the QUnit totals, and a run that executed no test at all would
+      # otherwise still exit 0.
+      - name: Run make check for ts
+        shell: bash
+        run: |
+          set -o pipefail
+          make -C lib/ts check 2>&1 | tee /tmp/lib-ts-check.log
+          grep -qE "[0-9]+ tests completed" /tmp/lib-ts-check.log
+
+      - name: Upload log files from a failed run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: lib-ts-check-log
+          path: /tmp/lib-ts-check.log
+          retention-days: 3
+
+  lib-dart:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        # The floor lib/dart/pubspec.yaml declares, and the version
+        # build/docker/ubuntu-*/Dockerfile pins. Keep LANGUAGES.md in step.
+        sdk: ["3.2.0", "3.13.3"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends $BUILD_DEPS
+
+      # Has to run before configure, which looks for dart on PATH.
+      - name: Set up Dart SDK
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: ${{ matrix.sdk }}
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for dart
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-dart/with-dart/'))
+          echo "$summary"
+          # configure disables a binding it cannot find rather than failing, and
+          # every step below would then pass without running a single test. A
+          # green job that tests nothing is what this one exists to end, so
+          # insist that Dart was actually found.
+          echo "$summary" | grep -qE "Building Dart Library [.]+ : yes"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for dart
+        run: make -C lib/dart
+
+      # dart pub get, then dart test over lib/dart/test.
+      - name: Run make check for dart
+        run: make -C lib/dart check
+
+      # Generates the cross-test client's stubs and runs the recursion-depth
+      # regression test from THRIFT-6056.
+      - name: Run make check for test/dart
+        run: make -C test/dart check
+
+  lib-cpp:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends g++ $BUILD_DEPS locales
+          sudo locale-gen en_US.UTF-8
+          sudo locale-gen de_DE.UTF-8
+          sudo update-locale
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed -E 's/without-cpp/with-cpp/g')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for cpp
+        run: make -j$(nproc) -C lib/cpp
+
+      - name: Run make check for lib/cpp
+        run: make -j$(nproc) -C lib/cpp check
+
+      - name: Run make check for test/cpp
+        run: make -j$(nproc) -C test/cpp check
+
+      - name: Run make precross for cpp test
+        run: make -j$(nproc) -C test/cpp precross
+
+      - name: Upload cpp precross artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpp-precross
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            test/cpp/TestClient
+            test/cpp/TestServer
+            test/cpp/.libs/TestClient
+            test/cpp/.libs/TestServer
+            lib/cpp/.libs/*.so
+          retention-days: 3
+
+      - name: Upload log files from failed test runs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: lib-cpp-test-log
+          path: lib/cpp/test/*.xml
+          retention-days: 3
+
+  lib-c_glib:
+    needs: compiler
+    # Not ubuntu-24.04: with the GLib 2.80 there, testapplicationexception,
+    # testfdtransport and testthriftfdreadcheck stop on GLib criticals
+    # (THRIFT-5680). With the GLib 2.72 of ubuntu-22.04 they pass.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends g++ $BUILD_DEPS libglib2.0-dev zlib1g-dev
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for c_glib
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed -e 's/without-c_glib/with-c_glib/' -e 's/without-cpp/with-cpp/'))
+          echo "$summary"
+          # configure disables a binding it cannot find rather than failing, and
+          # the steps below would then pass without running a single test. A
+          # green job that tests nothing is worse than no job, so insist that
+          # GLib was actually found. The C++ library is needed as well: the C++
+          # interop tests in lib/c_glib/test link it, and configure looks for
+          # zlib, which the c_glib zlib transport links, only when C++ is
+          # enabled.
+          echo "$summary" | grep -qE "Building C [(]GLib[)] Library [.]+ : yes"
+          echo "$summary" | grep -qE "Building C[+][+] Library [.]+ : yes"
+          echo "$summary" | grep -qE "Build TZlibTransport [.]+ : yes"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler-ubuntu-22.04
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      # Only the two libraries the C++ interop tests link.
+      - name: Run make for cpp
+        run: make -j$(nproc) -C lib/cpp libthrift.la libthriftz.la
+
+      # Also generates the code lib/c_glib/test compiles, which the check-am
+      # below does not do by itself.
+      - name: Run make for c_glib
+        run: make -j$(nproc) -C lib/c_glib
+
+      # testthrifttest links test/c_glib's thrift_test_handler.o.
+      - name: Run make precross for c_glib test
+        run: make -j$(nproc) -C test/c_glib precross
+
+      # check-am, as plain check also enters lib/c_glib/test/fuzz, whose fuzz
+      # targets have no main() unless clang builds them.
+      - name: Run make check for c_glib
+        run: make -C lib/c_glib/test check-am
+
+  lib-d:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Keep in sync with build/docker/ubuntu-*/Dockerfile.
+      D_VERSION: 2.087.0
+      DEIMOS_LIBEVENT_REF: v2.0.2+2.0.16
+      DEIMOS_OPENSSL_REF: v2.0.0+1.1.0h
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends g++ wget ca-certificates $BUILD_DEPS
+
+      - name: Install dmd
+        run: |
+          wget -q "http://downloads.dlang.org/releases/2.x/$D_VERSION/dmd_$D_VERSION-0_amd64.deb"
+          # apt rather than dpkg, so that the deb's libcurl4 dependency is resolved.
+          sudo apt-get install -y --no-install-recommends "./dmd_$D_VERSION-0_amd64.deb"
+          rm -f "dmd_$D_VERSION-0_amd64.deb"
+          dmd --version
+
+      # The deimos bindings are D headers for libevent and OpenSSL; the docker
+      # images install them but this runner does not. lib/d now builds its
+      # OpenSSL modules against the OpenSSL 3.x ubuntu-24.04 ships -- THRIFT-6185
+      # taught it to call SSL_get1_peer_certificate and the ERR_new/ERR_set_*
+      # family in place of the SSL_get_peer_certificate and ERR_put_error that
+      # 3.0 removed -- so installing the OpenSSL bindings here makes configure
+      # report "Building D SSL tests ... yes" and covers the five
+      # OpenSSL-dependent modules.
+      - name: Install deimos libevent and OpenSSL bindings
+        run: |
+          sudo mkdir -p /usr/include/dmd/druntime/import/deimos /usr/include/dmd/druntime/import/C
+          git clone -q -b "$DEIMOS_LIBEVENT_REF" https://github.com/D-Programming-Deimos/libevent.git deimos-libevent
+          sudo mv deimos-libevent/deimos/* /usr/include/dmd/druntime/import/deimos/
+          sudo mv deimos-libevent/C/* /usr/include/dmd/druntime/import/C/
+          rm -rf deimos-libevent
+          git clone -q -b "$DEIMOS_OPENSSL_REF" https://github.com/D-Programming-Deimos/openssl.git deimos-openssl
+          sudo mv deimos-openssl/deimos/* /usr/include/dmd/druntime/import/deimos/
+          rm -rf deimos-openssl
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for d
+        run: |
+          # \b keeps --without-dart from matching before --without-d does.
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/--without-d\b/--with-d/'))
+          echo "$summary"
+          # configure disables a binding it cannot find rather than failing, and
+          # the steps below would then pass without running a single test. A
+          # green job that tests nothing is worse than no job, so insist that
+          # dmd was actually found, and that the OpenSSL modules are in the build
+          # rather than silently dropped for a missing dependency.
+          echo "$summary" | grep -qE "Building D Library [.]+ : yes"
+          echo "$summary" | grep -qE "Building D SSL tests [.]+ : yes"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for d
+        run: make -C lib/d
+
+      # Builds and runs every module's unit tests in both debug and release
+      # mode, then the lib/d/test client pool and transport tests. It takes
+      # under 3 minutes; the limit makes a hung test fail the step instead of
+      # holding the job until its 60 minute timeout.
+      - name: Run make check for d
+        timeout-minutes: 15
+        run: make -C lib/d check
+
+  lib-ruby:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.ruby-version == 'head' }}
+    name: lib-ruby (${{ matrix.ruby-version }}) ${{ matrix.skip-build-ext && 'noext' || '' }}
+    strategy:
+      matrix:
+        ruby-version: ["3.0", "3.1", "3.2", "3.3", "3.4", "4.0", "head"]
+        skip-build-ext: [false]
+        include:
+          - ruby-version: "3.0"
+            skip-build-ext: true
+      fail-fast: false
+    env:
+      SKIP_BUILD_EXT: ${{ matrix.skip-build-ext && '1' || '' }}
+      BUNDLER_VERSION: ${{ case(matrix.ruby-version == 'head', '0', '2.2.34') }} # Bundler version is managed via setup-ruby action, not Bundler itself
+      BUNDLE_WITHOUT: ${{ case(matrix.ruby-version == 'head', 'thin_http_server', '') }} # thin pulls in eventmachine, which does not compile on Ruby 4.1+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          # Old bundler used the internal constant of Pathname, that was not private due to a typo.
+          # https://github.com/ruby/rubygems/pull/9529
+          bundler: ${{ case(matrix.ruby-version == 'head', 'default', 'Gemfile.lock') }}
+          bundler-cache: true
+          working-directory: lib/rb
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure
+        run: |
+          ./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-ruby/with-ruby/')
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for ruby
+        run: make -C lib/rb
+
+      - name: Run make check for lib/rb
+        run: make -C lib/rb check
+
+      - name: Run make check for test/rb
+        run: make -C test/rb check
+
+      - name: Run make precross for ruby test
+        run: make -C test/rb precross
+
+      - name: Upload ruby precross artifacts
+        # has to match the version used in cross-test
+        if: matrix.ruby-version == '4.0' && matrix.skip-build-ext == false
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rb-precross
+          if-no-files-found: error
+          path: |
+            test/rb/gen-rb/*
+            lib/rb/ext/*.so
+          retention-days: 3
+
+  lib-erl:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        # OTP and rebar3 are one axis, not two: rebar3 3.18.0 -- the version
+        # build/docker/ubuntu-*/Dockerfile installs, next to OTP 25.3.2.9 --
+        # does not load on OTP 27 or later, and 3.27.0 does not load on OTP 25.
+        # OTP 29 is left out because the eunit-only meck 0.9.2 dependency does
+        # not compile there any more, deprecated 'catch' having become an
+        # error; add it here once THRIFT-6186 is closed.
+        include:
+          - otp-version: "25.3"
+            rebar3-version: "3.18.0"
+          - otp-version: "26.2"
+            rebar3-version: "3.27.0"
+          - otp-version: "27.3"
+            rebar3-version: "3.27.0"
+          - otp-version: "28.5"
+            rebar3-version: "3.27.0"
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends $BUILD_DEPS
+
+      # Has to run before configure, which locates erl and erlc on PATH.
+      - name: Set up Erlang/OTP
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ matrix.otp-version }}
+          rebar3-version: ${{ matrix.rebar3-version }}
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for erlang
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-erlang/with-erlang/'))
+          echo "$summary"
+          # configure disables a binding it cannot find rather than failing, and
+          # the steps below would then pass without running a single test. A
+          # green job that tests nothing is worse than no job, so insist that
+          # Erlang was actually found.
+          echo "$summary" | grep -qE "Building Erlang Library [.]+ : yes"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for erlang
+        run: make -C lib/erl
+
+      # Generates the test sources with the compiler above, then rebar3 eunit.
+      - name: Run make check for erlang
+        run: make -C lib/erl check
+
+  lib-lua:
+    needs: compiler
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        # The floor configure.ac requires, and the version
+        # build/docker/ubuntu-{jammy,noble}/Dockerfile install. Keep
+        # LANGUAGES.md in step.
+        lua-version: ["5.3", "5.4"]
+      fail-fast: false
+    env:
+      # Not LUA_VERSION, which configure sets itself from the interpreter it finds.
+      MATRIX_LUA_VERSION: ${{ matrix.lua-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends $BUILD_DEPS "lua$MATRIX_LUA_VERSION" "liblua$MATRIX_LUA_VERSION-dev"
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      - name: Run configure for lua
+        run: |
+          summary=$(./configure $(echo $CONFIG_ARGS_FOR_LIBS | sed 's/without-lua/with-lua/'))
+          echo "$summary"
+          # configure disables a binding it cannot find rather than failing, and
+          # the steps below would then pass without running a single test. A
+          # green job that tests nothing is worse than no job, so insist that
+          # Lua was actually found, and that it is the version this leg is for.
+          echo "$summary" | grep -qE "Building Lua Library [.]+ : yes"
+          echo "$summary" | grep -E "Using Lua version" | grep -qF "Lua $MATRIX_LUA_VERSION."
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thrift-compiler
+          path: compiler/cpp
+
+      - name: Run thrift-compiler
+        run: |
+          chmod a+x compiler/cpp/thrift
+          compiler/cpp/thrift -version
+
+      - name: Run make for lua
+        run: make -C lib/lua
+
+      # Generates the types test_recursion_depth.lua needs, then runs the
+      # scripts in lib/lua/test. Those preload pure-Lua stand-ins for the C
+      # modules, so it is the cross test below that loads the ones built above.
+      - name: Run make check for lua
+        run: make -C lib/lua check
+
+      - name: Run make precross for lua
+        run: make -C test/lua precross
+
+      # The Lua client against the Lua server, over each transport and protocol
+      # test/tests.json lists for Lua.
+      - name: Run cross test for lua
+        run: python3 test/test.py --server lua --client lua
+
+      - name: Upload log files from failed cross test runs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: lib-lua-cross-test-log_${{ matrix.lua-version }}
+          path: test/log/
+          retention-days: 3
 
   cross-test:
     needs:
+      - lib-php
       - lib-java-kotlin
-      - lib-swift
       - lib-rust
       - lib-go
       - lib-python
-    runs-on: ubuntu-22.04
+      - lib-cpp
+      - lib-ruby
+      - lib-nodejs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       matrix:
-        server_lang: ['java', 'kotlin', 'go', 'rs', 'swift']
+        # kotlin cross test are failing -> see THRIFT-5879
+        server_lang: ['java', 'go', 'rs', 'cpp', 'py', 'rb', 'rb.thin', 'rb.puma', 'rb.falcon', 'php', 'nodejs', 'nodets']
         # we always use comma join as many client langs as possible, to reduce the number of jobs
-        client_lang: ['java,kotlin', 'go,rs', 'swift']
+        client_lang: ['java,kotlin', 'go,rs,cpp,py,php,nodejs,nodets,rb']
       fail-fast: false
+    env:
+      BUNDLE_WITH: falcon_http_server
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.x"
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install "tornado>=6.3.0" "twisted>=24.3.0" "zope.interface>=6.1"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: "8.3"
+          extensions: intl, xml, curl, sockets
+          ini-values: "error_reporting=E_ALL"
+
+      - name: Install PHP dependencies
+        run: |
+          rm -f ~/.composer/auth.json ~/.config/composer/auth.json
+          composer install --no-progress --prefer-dist
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           # here we intentionally use an older version so that we also verify Java 17 compiles to it
           java-version: 8
           cache: "gradle"
 
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: test/rb
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
       - name: Install openssl and certificates (for SSL tests)
         run: |
           sudo apt-get update -yq
-          sudo apt-get install -y --no-install-recommends openssl ca-certificates
+          sudo apt-get install -y --no-install-recommends \
+            openssl \
+            ca-certificates \
+            libboost-all-dev \
+            libevent-dev
 
       - name: Download java precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: java-precross
           path: lib/java/build
 
       - name: Download kotlin precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kotlin-precross
           path: lib/kotlin
 
-      - name: Download swift precross artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: swift-precross
-          path: test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug
-
       - name: Download rust precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rs-precross
           path: test/rs/bin
 
       - name: Download go precross artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: go-precross
           path: test/go/bin
 
+      - name: Download cpp precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cpp-precross
+          path: .
+
+      - name: Download python precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: py-precross
+          path: .
+
+      - name: Download ruby precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rb-precross
+          path: .
+
+      - name: Download php precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: php-precross
+          path: .
+
+      - name: Prepare PHP cross test extensions
+        run: |
+          mkdir -p test/php/php_ext_dir
+          ln -sf ../../../lib/php/src/ext/thrift_protocol/modules/thrift_protocol.so test/php/php_ext_dir/
+          ln -sf "$(php-config --extension-dir)/sockets.so" test/php/php_ext_dir/
+
+      - name: Download nodejs and nodets precross artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nodejs-precross
+          path: lib
+
       - name: Set back executable flags
         run: |
-          chmod a+x \
-            lib/java/build/run* \
-            lib/kotlin/cross-test-client/build/install/TestClient/bin/* \
-            lib/kotlin/cross-test-server/build/install/TestServer/bin/* \
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/* \
-            test/rs/bin/* \
-            test/go/bin/*
+          chmod a+x lib/java/build/run*
+          chmod a+x lib/kotlin/cross-test-client/build/install/TestClient/bin/*
+          chmod a+x lib/kotlin/cross-test-server/build/install/TestServer/bin/*
+          chmod a+x test/rs/bin/*
+          chmod a+x test/go/bin/*
+          chmod a+x test/cpp/*
+          chmod a+x test/cpp/.libs/*
+          chmod a+x lib/cpp/.libs/*.so
+          chmod a+x test/py/*.py
+          chmod a+x lib/rb/ext/*.so
+
+      - name: Installs for nodets and nodejs
+        run: |
+          npm ci
+          npm ci --prefix lib/nodejs/test
+
+      - name: Create tmp domain socket folder
+        run: mkdir /tmp/v0.16
 
       - name: Run cross test
         env:
@@ -601,10 +1800,9 @@ jobs:
             --client ${{ matrix.client_lang }}
 
       - name: Upload log files from failed cross test runs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: cross-test-log_${{ matrix.server_lang }}-${{ matrix.client_lang }}
           path: test/log/
           retention-days: 3
-

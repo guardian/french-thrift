@@ -21,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * HTTP client for Thrift
@@ -33,188 +34,128 @@ use Thrift\Factory\TStringFuncFactory;
  */
 class TCurlClient extends TTransport
 {
+    /**
+     * The port a URL without one refers to, by scheme.
+     */
+    private const DEFAULT_PORTS = ['http' => 80, 'https' => 443];
+
+    /** @var \CurlHandle|null */
     private static $curlHandle;
 
     /**
-     * The host to connect to
-     *
-     * @var string
-     */
-    protected $host_;
-
-    /**
-     * The port to connect on
-     *
-     * @var int
-     */
-    protected $port_;
-
-    /**
      * The URI to request
-     *
-     * @var string
      */
-    protected $uri_;
-
-    /**
-     * The scheme to use for the request, i.e. http, https
-     *
-     * @var string
-     */
-    protected $scheme_;
+    protected string $uri;
 
     /**
      * Buffer for the HTTP request data
-     *
-     * @var string
      */
-    protected $request_;
+    protected string $request = '';
 
     /**
-     * Buffer for the HTTP response data.
-     *
-     * @var binary string
+     * Buffer for the HTTP response data. `false` reflects a failed curl_exec.
      */
-    protected $response_;
+    protected string|false|null $response = null;
 
     /**
-     * Read timeout
-     *
-     * @var float
+     * Offset of the first unread byte in $response.
      */
-    protected $timeout_;
+    private int $responsePos = 0;
 
     /**
-     * Connection timeout
-     *
-     * @var float
+     * Read timeout in seconds.
      */
-    protected $connectionTimeout_;
+    protected ?float $timeout = null;
+
+    /**
+     * Connection timeout in seconds.
+     */
+    protected ?float $connectionTimeout = null;
 
     /**
      * http headers
      *
-     * @var array
+     * @var array<string, string|int>
      */
-    protected $headers_;
+    protected array $headers = [];
 
     /**
      * Make a new HTTP client.
-     *
-     * @param string $host
-     * @param int $port
-     * @param string $uri
      */
-    public function __construct($host, $port = 80, $uri = '', $scheme = 'http')
-    {
-        if ((TStringFuncFactory::create()->strlen($uri) > 0) && ($uri[0] != '/')) {
-            $uri = '/' . $uri;
-        }
-        $this->scheme_ = $scheme;
-        $this->host_ = $host;
-        $this->port_ = $port;
-        $this->uri_ = $uri;
-        $this->request_ = '';
-        $this->response_ = null;
-        $this->timeout_ = null;
-        $this->connectionTimeout_ = null;
-        $this->headers_ = array();
+    public function __construct(
+        protected string $host,
+        protected int $port = 80,
+        string $uri = '',
+        protected string $scheme = 'http',
+    ) {
+        $this->uri = ($uri === '' || str_starts_with($uri, '/')) ? $uri : '/' . $uri;
     }
 
-    /**
-     * Set read timeout
-     *
-     * @param float $timeout
-     */
-    public function setTimeoutSecs($timeout)
+    public function setTimeoutSecs(?float $timeout): void
     {
-        $this->timeout_ = $timeout;
+        $this->timeout = $timeout;
     }
 
-    /**
-     * Set connection timeout
-     *
-     * @param float $connectionTimeout
-     */
-    public function setConnectionTimeoutSecs($connectionTimeout)
+    public function setConnectionTimeoutSecs(?float $connectionTimeout): void
     {
-        $this->connectionTimeout_ = $connectionTimeout;
+        $this->connectionTimeout = $connectionTimeout;
     }
 
-    /**
-     * Whether this transport is open.
-     *
-     * @return boolean true if open
-     */
-    public function isOpen()
+    public function isOpen(): bool
     {
         return true;
     }
 
-    /**
-     * Open the transport for reading/writing
-     *
-     * @throws TTransportException if cannot open
-     */
-    public function open()
+    public function open(): void
     {
     }
 
-    /**
-     * Close the transport.
-     */
-    public function close()
+    public function close(): void
     {
-        $this->request_ = '';
-        $this->response_ = null;
+        $this->request = '';
+        $this->response = null;
+        $this->responsePos = 0;
     }
 
     /**
-     * Read some data into the array.
-     *
-     * @param int $len How much to read
-     * @return string The data that has been read
      * @throws TTransportException if cannot read any more data
      */
-    public function read($len)
+    public function read(int $len): string
     {
-        if ($len >= strlen($this->response_)) {
-            return $this->response_;
-        } else {
-            $ret = substr($this->response_, 0, $len);
-            $this->response_ = substr($this->response_, $len);
-
-            return $ret;
+        $response = (string) $this->response;
+        if ($len >= strlen($response) - $this->responsePos) {
+            return substr($response, $this->responsePos);
         }
+
+        $ret = substr($response, $this->responsePos, $len);
+        $this->responsePos += strlen($ret);
+
+        return $ret;
     }
 
     /**
      * Guarantees that the full amount of data is read. Since TCurlClient gets entire payload at
      * once, parent readAll cannot be used.
      *
-     * @return string The data, of exact length
      * @throws TTransportException if cannot read data
      */
-    public function readAll($len)
+    public function readAll(int $len): string
     {
         $data = $this->read($len);
 
-        if (TStringFuncFactory::create()->strlen($data) !== $len) {
-            throw new TTransportException('TCurlClient could not read '.$len.' bytes');
+        if (strlen($data) !== $len) {
+            throw new TTransportException('TCurlClient could not read ' . $len . ' bytes');
         }
 
         return $data;
     }
 
     /**
-     * Writes some data into the pending buffer
-     *
-     * @param string $buf The data to write
      * @throws TTransportException if writing fails
      */
-    public function write($buf)
+    public function write(string $buf): void
     {
-        $this->request_ .= $buf;
+        $this->request .= $buf;
     }
 
     /**
@@ -222,63 +163,75 @@ class TCurlClient extends TTransport
      *
      * @throws TTransportException if a writing error occurs
      */
-    public function flush()
+    public function flush(): void
     {
         if (!self::$curlHandle) {
-            register_shutdown_function(array('Thrift\\Transport\\TCurlClient', 'closeCurlHandle'));
+            register_shutdown_function(['Thrift\\Transport\\TCurlClient', 'closeCurlHandle']);
             self::$curlHandle = curl_init();
             curl_setopt(self::$curlHandle, CURLOPT_RETURNTRANSFER, true);
             curl_setopt(self::$curlHandle, CURLOPT_USERAGENT, 'PHP/TCurlClient');
             curl_setopt(self::$curlHandle, CURLOPT_CUSTOMREQUEST, 'POST');
-            curl_setopt(self::$curlHandle, CURLOPT_FOLLOWLOCATION, true);
-            curl_setopt(self::$curlHandle, CURLOPT_MAXREDIRS, 1);
+            // curl follows no redirect; flush() follows one itself, within the origin of the URL.
+            curl_setopt(self::$curlHandle, CURLOPT_FOLLOWLOCATION, false);
         }
         // God, PHP really has some esoteric ways of doing simple things.
-        $host = $this->host_ . ($this->port_ != 80 ? ':' . $this->port_ : '');
-        $fullUrl = $this->scheme_ . "://" . $host . $this->uri_;
+        $host = $this->host . ($this->port != 80 ? ':' . $this->port : '');
+        $origin = $this->scheme . "://" . $host;
+        $fullUrl = $origin . $this->uri;
 
-        $headers = array();
-        $defaultHeaders = array(
+        $headers = [];
+        $defaultHeaders = [
             'Accept' => 'application/x-thrift',
             'Content-Type' => 'application/x-thrift',
-            'Content-Length' => TStringFuncFactory::create()->strlen($this->request_)
-        );
-        foreach (array_merge($defaultHeaders, $this->headers_) as $key => $value) {
+            'Content-Length' => strlen($this->request)
+        ];
+        foreach (array_merge($defaultHeaders, $this->headers) as $key => $value) {
             $headers[] = "$key: $value";
         }
 
         curl_setopt(self::$curlHandle, CURLOPT_HTTPHEADER, $headers);
 
-        if ($this->timeout_ > 0) {
-            if ($this->timeout_ < 1.0) {
+        if ($this->timeout > 0) {
+            if ($this->timeout < 1.0) {
                 // Timestamps smaller than 1 second are ignored when CURLOPT_TIMEOUT is used
-                curl_setopt(self::$curlHandle, CURLOPT_TIMEOUT_MS, 1000 * $this->timeout_);
+                curl_setopt(self::$curlHandle, CURLOPT_TIMEOUT_MS, 1000 * $this->timeout);
             } else {
-                curl_setopt(self::$curlHandle, CURLOPT_TIMEOUT, $this->timeout_);
+                curl_setopt(self::$curlHandle, CURLOPT_TIMEOUT, $this->timeout);
             }
         }
-        if ($this->connectionTimeout_ > 0) {
-            if ($this->connectionTimeout_ < 1.0) {
+        if ($this->connectionTimeout > 0) {
+            if ($this->connectionTimeout < 1.0) {
                 // Timestamps smaller than 1 second are ignored when CURLOPT_CONNECTTIMEOUT is used
-                curl_setopt(self::$curlHandle, CURLOPT_CONNECTTIMEOUT_MS, 1000 * $this->connectionTimeout_);
+                curl_setopt(self::$curlHandle, CURLOPT_CONNECTTIMEOUT_MS, 1000 * $this->connectionTimeout);
             } else {
-                curl_setopt(self::$curlHandle, CURLOPT_CONNECTTIMEOUT, $this->connectionTimeout_);
+                curl_setopt(self::$curlHandle, CURLOPT_CONNECTTIMEOUT, $this->connectionTimeout);
             }
         }
-        curl_setopt(self::$curlHandle, CURLOPT_POSTFIELDS, $this->request_);
-        $this->request_ = '';
+        curl_setopt(self::$curlHandle, CURLOPT_POSTFIELDS, $this->request);
+        $this->request = '';
 
         curl_setopt(self::$curlHandle, CURLOPT_URL, $fullUrl);
-        $this->response_ = curl_exec(self::$curlHandle);
-        $responseError = curl_error(self::$curlHandle);
-
+        $this->response = curl_exec(self::$curlHandle);
         $code = curl_getinfo(self::$curlHandle, CURLINFO_HTTP_CODE);
 
+        // Follow one redirect, and only within the origin of the URL: the request goes
+        // out again, with its headers and body, to the new path and query.
+        if ($this->response !== false && $code >= 300 && $code < 400) {
+            $redirectUrl = $this->redirectWithinOrigin($origin, curl_getinfo(self::$curlHandle, CURLINFO_REDIRECT_URL));
+            if ($redirectUrl !== null) {
+                $fullUrl = $redirectUrl;
+                curl_setopt(self::$curlHandle, CURLOPT_URL, $fullUrl);
+                $this->response = curl_exec(self::$curlHandle);
+                $code = curl_getinfo(self::$curlHandle, CURLINFO_HTTP_CODE);
+            }
+        }
+        $this->responsePos = 0;
+        $responseError = curl_error(self::$curlHandle);
+
         // Handle non 200 status code / connect failure
-        if ($this->response_ === false || $code !== 200) {
-            curl_close(self::$curlHandle);
+        if ($this->response === false || $code !== 200) {
             self::$curlHandle = null;
-            $this->response_ = null;
+            $this->response = null;
             $error = 'TCurlClient: Could not connect to ' . $fullUrl;
             if ($responseError) {
                 $error .= ', ' . $responseError;
@@ -290,21 +243,52 @@ class TCurlClient extends TTransport
         }
     }
 
-    public static function closeCurlHandle()
+    public static function closeCurlHandle(): void
     {
-        try {
-            if (self::$curlHandle) {
-                curl_close(self::$curlHandle); #This function has no effect. Prior to PHP 8.0.0, this function was used to close the resource.
-                self::$curlHandle = null;
-            }
-        } catch (\Exception $x) {
-            #it's not possible to throw an exception by calling a function that has no effect
-            error_log('There was an error closing the curl handle: ' . $x->getMessage());
-        }
+        // Dropping the reference frees the handle. curl_close() has had no effect
+        // since PHP 8.0, and PHP 8.5 deprecates it.
+        self::$curlHandle = null;
     }
 
-    public function addHeaders($headers)
+    /**
+     * @param array<string, string|int> $headers
+     */
+    public function addHeaders(array $headers): void
     {
-        $this->headers_ = array_merge($this->headers_, $headers);
+        $this->headers = array_merge($this->headers, $headers);
+    }
+
+    /**
+     * The URL to send the request to again after a redirect to $location: the
+     * path and query of $location, under $origin. Null when $location is not a
+     * URL with the scheme, host and port of $origin.
+     */
+    private function redirectWithinOrigin(string $origin, mixed $location): ?string
+    {
+        $target = is_string($location) ? $this->originOf($location) : null;
+        if ($target === null || $target !== $this->originOf($origin)) {
+            return null;
+        }
+        $path = parse_url($location, PHP_URL_PATH);
+        $query = parse_url($location, PHP_URL_QUERY);
+
+        return $origin . (is_string($path) ? $path : '/') . (is_string($query) ? '?' . $query : '');
+    }
+
+    /**
+     * The scheme, host and port of $url, with the port the scheme implies when
+     * $url names none. Null when $url has no scheme or host.
+     *
+     * @return array{string, string, int|null}|null
+     */
+    private function originOf(string $url): ?array
+    {
+        $parts = parse_url($url);
+        if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+            return null;
+        }
+        $scheme = strtolower($parts['scheme']);
+
+        return [$scheme, strtolower($parts['host']), $parts['port'] ?? self::DEFAULT_PORTS[$scheme] ?? null];
     }
 }

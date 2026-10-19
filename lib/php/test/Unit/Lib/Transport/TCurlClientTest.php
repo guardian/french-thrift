@@ -19,10 +19,16 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Constraint\Constraint;
+use PHPUnit\Framework\Assert;
+use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionProperty;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\TCurlClient;
 
@@ -36,10 +42,7 @@ class TCurlClientTest extends TestCase
         $transport = new TCurlClient($host);
         $transport->setTimeoutSecs(1000);
 
-        $ref = new \ReflectionClass($transport);
-        $prop = $ref->getProperty('timeout_');
-        $prop->setAccessible(true);
-        $this->assertEquals(1000, $prop->getValue($transport));
+        $this->assertEquals(1000, (new ReflectionProperty($transport, 'timeout'))->getValue($transport));
     }
 
     public function testSetConnectionTimeoutSecs()
@@ -48,10 +51,7 @@ class TCurlClientTest extends TestCase
         $transport = new TCurlClient($host);
         $transport->setConnectionTimeoutSecs(1000);
 
-        $ref = new \ReflectionClass($transport);
-        $prop = $ref->getProperty('connectionTimeout_');
-        $prop->setAccessible(true);
-        $this->assertEquals(1000, $prop->getValue($transport));
+        $this->assertEquals(1000, (new ReflectionProperty($transport, 'connectionTimeout'))->getValue($transport));
     }
 
     public function testIsOpen()
@@ -73,17 +73,12 @@ class TCurlClientTest extends TestCase
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('request_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, 'testRequest');
-        $propResponse = $ref->getProperty('response_');
-        $propResponse->setAccessible(true);
-        $propResponse->setValue($transport, 'testResponse');
+        (new ReflectionProperty($transport, 'request'))->setValue($transport, 'testRequest');
+        (new ReflectionProperty($transport, 'response'))->setValue($transport, 'testResponse');
 
         $this->assertNull($transport->close());
-        $this->assertEmpty($propRequest->getValue($transport));
-        $this->assertEmpty($propResponse->getValue($transport));
+        $this->assertEmpty((new ReflectionProperty($transport, 'request'))->getValue($transport));
+        $this->assertEmpty((new ReflectionProperty($transport, 'response'))->getValue($transport));
     }
 
     public function testRead()
@@ -91,19 +86,15 @@ class TCurlClientTest extends TestCase
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propResponse = $ref->getProperty('response_');
-        $propResponse->setAccessible(true);
-        $propResponse->setValue($transport, '1234567890');
+        (new ReflectionProperty($transport, 'response'))->setValue($transport, '1234567890');
 
         $response = $transport->read(5);
         $this->assertEquals('12345', $response);
-        $this->assertEquals('67890', $propResponse->getValue($transport));
 
         $response = $transport->read(5);
         $this->assertEquals('67890', $response);
         # The response does not cleaned after reading full answer, maybe it should be fixed
-        $this->assertEquals('67890', $propResponse->getValue($transport));
+        $this->assertEquals('67890', $transport->read(5));
     }
 
     public function testReadAll()
@@ -111,25 +102,39 @@ class TCurlClientTest extends TestCase
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propResponse = $ref->getProperty('response_');
-        $propResponse->setAccessible(true);
-        $propResponse->setValue($transport, '1234567890');
+        (new ReflectionProperty($transport, 'response'))->setValue($transport, '1234567890');
 
         $response = $transport->readAll(5);
         $this->assertEquals('12345', $response);
-        $this->assertEquals('67890', $propResponse->getValue($transport));
+        $this->assertEquals('67890', $transport->readAll(5));
     }
 
-    public function testReadAll_THRIFT_4656()
+    public function testReadAfterFlushStartsAtTheNewResponse()
+    {
+        $this->getFunctionMock('Thrift\\Transport', 'register_shutdown_function');
+        $this->getFunctionMock('Thrift\\Transport', 'curl_init')->expects($this->any())->willReturn(true);
+        $this->getFunctionMock('Thrift\\Transport', 'curl_setopt')->expects($this->any())->willReturn(true);
+        $this->getFunctionMock('Thrift\\Transport', 'curl_exec')
+             ->expects($this->exactly(2))
+             ->willReturnOnConsecutiveCalls('abcdef', '123456');
+        $this->getFunctionMock('Thrift\\Transport', 'curl_error')->expects($this->any())->willReturn('');
+        $this->getFunctionMock('Thrift\\Transport', 'curl_getinfo')->expects($this->any())->willReturn(200);
+
+        $transport = new TCurlClient('localhost');
+        $transport->flush();
+        $this->assertEquals('ab', $transport->read(2));
+
+        $transport->flush();
+        $this->assertEquals('123', $transport->read(3));
+        $this->assertEquals('456', $transport->readAll(3));
+    }
+
+    public function testReadAllThrift4656()
     {
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propResponse = $ref->getProperty('response_');
-        $propResponse->setAccessible(true);
-        $propResponse->setValue($transport, '');
+        (new ReflectionProperty($transport, 'response'))->setValue($transport, '');
 
         $this->expectException(TTransportException::class);
         $this->expectExceptionMessage('TCurlClient could not read 5 bytes');
@@ -143,13 +148,10 @@ class TCurlClientTest extends TestCase
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('request_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, '1234567890');
+        (new ReflectionProperty($transport, 'request'))->setValue($transport, '1234567890');
 
         $transport->write('12345');
-        $this->assertEquals('123456789012345', $propRequest->getValue($transport));
+        $this->assertEquals('123456789012345', (new ReflectionProperty($transport, 'request'))->getValue($transport));
     }
 
     public function testAddHeaders()
@@ -157,18 +159,16 @@ class TCurlClientTest extends TestCase
         $host = 'localhost';
         $transport = new TCurlClient($host);
 
-        $ref = new \ReflectionClass($transport);
-        $propRequest = $ref->getProperty('headers_');
-        $propRequest->setAccessible(true);
-        $propRequest->setValue($transport, ['test' => '1234567890']);
+        (new ReflectionProperty($transport, 'headers'))->setValue($transport, ['test' => '1234567890']);
 
         $transport->addHeaders(['test2' => '12345']);
-        $this->assertEquals(['test' => '1234567890', 'test2' => '12345'], $propRequest->getValue($transport));
+        $this->assertEquals(
+            ['test' => '1234567890', 'test2' => '12345'],
+            (new ReflectionProperty($transport, 'headers'))->getValue($transport)
+        );
     }
 
-    /**
-     * @dataProvider flushDataProvider
-     */
+    #[DataProvider('flushDataProvider')]
     public function testFlush(
         $host,
         $port,
@@ -187,37 +187,48 @@ class TCurlClientTest extends TestCase
         $expectedCode = null
     ) {
         $this->getFunctionMock('Thrift\\Transport', 'register_shutdown_function')
-             ->expects($this->once())
-             ->with(
-                 $this->callback(
-                     function ($arg) {
-                         return is_array(
-                                 $arg
-                             ) && $arg[0] === 'Thrift\\Transport\\TCurlClient' && $arg[1] === 'closeCurlHandle';
-                     }
-                 )
-             );
+            ->expects($this->once())
+            ->with(
+                $this->callback(
+                    function ($arg) {
+                        return is_array($arg)
+                            && $arg[0] === 'Thrift\\Transport\\TCurlClient'
+                            && $arg[1] === 'closeCurlHandle';
+                    }
+                )
+            );
         $this->getFunctionMock('Thrift\\Transport', 'curl_init')
              ->expects($this->once());
 
         $this->getFunctionMock('Thrift\\Transport', 'curl_setopt')
-             ->expects($this->any())
-             ->withConsecutive(...$curlSetOptCalls)
-             ->willReturn(true);
+             ->expects($this->exactly(count($curlSetOptCalls)))
+             ->willReturnCallback(function (...$args) use ($curlSetOptCalls) {
+                 static $iteration = 0;
+                 $expected = $curlSetOptCalls[$iteration++];
+                foreach ($expected as $i => $exp) {
+                    if ($exp instanceof Constraint) {
+                        $this->assertThat($args[$i], $exp);
+                    } else {
+                        $this->assertSame($exp, $args[$i]);
+                    }
+                }
+
+                 return true;
+             });
 
         $this->getFunctionMock('Thrift\\Transport', 'curl_exec')
              ->expects($this->once())
-             ->with($this->anything())
+             ->with(Assert::anything())
              ->willReturn($response);
 
         $this->getFunctionMock('Thrift\\Transport', 'curl_error')
              ->expects($this->once())
-             ->with($this->anything())
+             ->with(Assert::anything())
              ->willReturn($responseError);
 
         $this->getFunctionMock('Thrift\\Transport', 'curl_getinfo')
              ->expects($this->once())
-             ->with($this->anything(), CURLINFO_HTTP_CODE)
+             ->with(Assert::anything(), CURLINFO_HTTP_CODE)
              ->willReturn($responseCode);
 
         if (!is_null($expectedException)) {
@@ -226,8 +237,7 @@ class TCurlClientTest extends TestCase
             $this->expectExceptionCode($expectedCode);
 
             $this->getFunctionMock('Thrift\\Transport', 'curl_close')
-                 ->expects($this->once())
-                 ->with($this->anything());
+                 ->expects($this->never());
         }
 
         $transport = new TCurlClient($host, $port, $uri, $scheme);
@@ -245,7 +255,7 @@ class TCurlClientTest extends TestCase
         $transport->flush();
     }
 
-    public function flushDataProvider()
+    public static function flushDataProvider()
     {
         $request = 'request';
 
@@ -259,13 +269,12 @@ class TCurlClientTest extends TestCase
             'timeout' => null,
             'connectionTimeout' => null,
             'curlSetOptCalls' => [
-                [$this->anything(), CURLOPT_RETURNTRANSFER, true],
-                [$this->anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
-                [$this->anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
-                [$this->anything(), CURLOPT_FOLLOWLOCATION, true],
-                [$this->anything(), CURLOPT_MAXREDIRS, 1],
+                [Assert::anything(), CURLOPT_RETURNTRANSFER, true],
+                [Assert::anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
+                [Assert::anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
+                [Assert::anything(), CURLOPT_FOLLOWLOCATION, false],
                 [
-                    $this->anything(),
+                    Assert::anything(),
                     CURLOPT_HTTPHEADER,
                     [
                         'Accept: application/x-thrift',
@@ -273,8 +282,8 @@ class TCurlClientTest extends TestCase
                         'Content-Length: ' . strlen($request),
                     ],
                 ],
-                [$this->anything(), CURLOPT_POSTFIELDS, $request],
-                [$this->anything(), CURLOPT_URL, 'http://localhost'],
+                [Assert::anything(), CURLOPT_POSTFIELDS, $request],
+                [Assert::anything(), CURLOPT_URL, 'http://localhost'],
             ],
             'response' => 'response',
             'responseError' => '',
@@ -287,13 +296,12 @@ class TCurlClientTest extends TestCase
             [
                 'headers' => ['test' => '1234567890'],
                 'curlSetOptCalls' => [
-                    [$this->anything(), CURLOPT_RETURNTRANSFER, true],
-                    [$this->anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
-                    [$this->anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
-                    [$this->anything(), CURLOPT_FOLLOWLOCATION, true],
-                    [$this->anything(), CURLOPT_MAXREDIRS, 1],
+                    [Assert::anything(), CURLOPT_RETURNTRANSFER, true],
+                    [Assert::anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
+                    [Assert::anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
+                    [Assert::anything(), CURLOPT_FOLLOWLOCATION, false],
                     [
-                        $this->anything(),
+                        Assert::anything(),
                         CURLOPT_HTTPHEADER,
                         [
                             'Accept: application/x-thrift',
@@ -302,8 +310,8 @@ class TCurlClientTest extends TestCase
                             'test: 1234567890',
                         ],
                     ],
-                    [$this->anything(), CURLOPT_POSTFIELDS, $request],
-                    [$this->anything(), CURLOPT_URL, 'http://localhost'],
+                    [Assert::anything(), CURLOPT_POSTFIELDS, $request],
+                    [Assert::anything(), CURLOPT_URL, 'http://localhost'],
                 ],
             ]
         );
@@ -312,13 +320,12 @@ class TCurlClientTest extends TestCase
             [
                 'uri' => 'test1234567890',
                 'curlSetOptCalls' => [
-                    [$this->anything(), CURLOPT_RETURNTRANSFER, true],
-                    [$this->anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
-                    [$this->anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
-                    [$this->anything(), CURLOPT_FOLLOWLOCATION, true],
-                    [$this->anything(), CURLOPT_MAXREDIRS, 1],
+                    [Assert::anything(), CURLOPT_RETURNTRANSFER, true],
+                    [Assert::anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
+                    [Assert::anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
+                    [Assert::anything(), CURLOPT_FOLLOWLOCATION, false],
                     [
-                        $this->anything(),
+                        Assert::anything(),
                         CURLOPT_HTTPHEADER,
                         [
                             'Accept: application/x-thrift',
@@ -326,24 +333,23 @@ class TCurlClientTest extends TestCase
                             'Content-Length: ' . strlen($request),
                         ],
                     ],
-                    [$this->anything(), CURLOPT_POSTFIELDS, $request],
-                    [$this->anything(), CURLOPT_URL, 'http://localhost/test1234567890'],
+                    [Assert::anything(), CURLOPT_POSTFIELDS, $request],
+                    [Assert::anything(), CURLOPT_URL, 'http://localhost/test1234567890'],
                 ],
             ]
         );
         yield 'timeout' => array_merge(
             $default,
             [
-                'timeout' => 10,
-                'connectionTimeout' => 10,
+                'timeout' => 10.0,
+                'connectionTimeout' => 10.0,
                 'curlSetOptCalls' => [
-                    [$this->anything(), CURLOPT_RETURNTRANSFER, true],
-                    [$this->anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
-                    [$this->anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
-                    [$this->anything(), CURLOPT_FOLLOWLOCATION, true],
-                    [$this->anything(), CURLOPT_MAXREDIRS, 1],
+                    [Assert::anything(), CURLOPT_RETURNTRANSFER, true],
+                    [Assert::anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
+                    [Assert::anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
+                    [Assert::anything(), CURLOPT_FOLLOWLOCATION, false],
                     [
-                        $this->anything(),
+                        Assert::anything(),
                         CURLOPT_HTTPHEADER,
                         [
                             'Accept: application/x-thrift',
@@ -351,10 +357,10 @@ class TCurlClientTest extends TestCase
                             'Content-Length: ' . strlen($request),
                         ],
                     ],
-                    [$this->anything(), CURLOPT_TIMEOUT, 10],
-                    [$this->anything(), CURLOPT_CONNECTTIMEOUT, 10],
-                    [$this->anything(), CURLOPT_POSTFIELDS, $request],
-                    [$this->anything(), CURLOPT_URL, 'http://localhost'],
+                    [Assert::anything(), CURLOPT_TIMEOUT, 10.0],
+                    [Assert::anything(), CURLOPT_CONNECTTIMEOUT, 10.0],
+                    [Assert::anything(), CURLOPT_POSTFIELDS, $request],
+                    [Assert::anything(), CURLOPT_URL, 'http://localhost'],
                 ],
             ]
         );
@@ -364,13 +370,12 @@ class TCurlClientTest extends TestCase
                 'timeout' => 0.1,
                 'connectionTimeout' => 0.1,
                 'curlSetOptCalls' => [
-                    [$this->anything(), CURLOPT_RETURNTRANSFER, true],
-                    [$this->anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
-                    [$this->anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
-                    [$this->anything(), CURLOPT_FOLLOWLOCATION, true],
-                    [$this->anything(), CURLOPT_MAXREDIRS, 1],
+                    [Assert::anything(), CURLOPT_RETURNTRANSFER, true],
+                    [Assert::anything(), CURLOPT_USERAGENT, 'PHP/TCurlClient'],
+                    [Assert::anything(), CURLOPT_CUSTOMREQUEST, 'POST'],
+                    [Assert::anything(), CURLOPT_FOLLOWLOCATION, false],
                     [
-                        $this->anything(),
+                        Assert::anything(),
                         CURLOPT_HTTPHEADER,
                         [
                             'Accept: application/x-thrift',
@@ -378,10 +383,10 @@ class TCurlClientTest extends TestCase
                             'Content-Length: ' . strlen($request),
                         ],
                     ],
-                    [$this->anything(), CURLOPT_TIMEOUT_MS, 100],
-                    [$this->anything(), CURLOPT_CONNECTTIMEOUT_MS, 100],
-                    [$this->anything(), CURLOPT_POSTFIELDS, $request],
-                    [$this->anything(), CURLOPT_URL, 'http://localhost'],
+                    [Assert::anything(), CURLOPT_TIMEOUT_MS, 100.0],
+                    [Assert::anything(), CURLOPT_CONNECTTIMEOUT_MS, 100.0],
+                    [Assert::anything(), CURLOPT_POSTFIELDS, $request],
+                    [Assert::anything(), CURLOPT_URL, 'http://localhost'],
                 ],
             ]
         );
@@ -406,18 +411,155 @@ class TCurlClientTest extends TestCase
         );
     }
 
+    /**
+     * flush() follows one redirect, and only within the origin of the URL it
+     * requested: the same scheme, host and port. The request is sent again to
+     * the path and query of the redirect target, under the scheme, host and
+     * port of that URL. Any other redirect fails the request.
+     */
+    #[DataProvider('redirectDataProvider')]
+    public function testFlushFollowsOneRedirectWithinTheOrigin(
+        $scheme,
+        $port,
+        $exchanges,
+        $expectedUrls,
+        $expectedResponse
+    ) {
+        $this->getFunctionMock('Thrift\\Transport', 'register_shutdown_function');
+        $this->getFunctionMock('Thrift\\Transport', 'curl_init')->expects($this->once())->willReturn(true);
+        $this->getFunctionMock('Thrift\\Transport', 'curl_error')->expects($this->once())->willReturn('');
+
+        $urls = [];
+        $this->getFunctionMock('Thrift\\Transport', 'curl_setopt')
+             ->expects($this->atLeastOnce())
+             ->willReturnCallback(function ($handle, $option, $value) use (&$urls) {
+                if ($option === CURLOPT_URL) {
+                    $urls[] = $value;
+                }
+
+                 return true;
+             });
+
+        $exchange = -1;
+        $this->getFunctionMock('Thrift\\Transport', 'curl_exec')
+             ->expects($this->exactly(count($expectedUrls)))
+             ->willReturnCallback(function () use (&$exchange) {
+                 $exchange++;
+
+                 return 'response ' . $exchange;
+             });
+        $this->getFunctionMock('Thrift\\Transport', 'curl_getinfo')
+             ->expects($this->atLeastOnce())
+             ->willReturnCallback(function ($handle, $option) use (&$exchange, $exchanges) {
+                 [$code, $location] = $exchanges[$exchange];
+                if ($option === CURLINFO_HTTP_CODE) {
+                    return $code;
+                }
+                 $this->assertSame(CURLINFO_REDIRECT_URL, $option);
+
+                 return $location;
+             });
+
+        $transport = new TCurlClient('localhost', $port, '/rpc', $scheme);
+        $transport->write('request');
+        try {
+            $transport->flush();
+            $response = $transport->read(64);
+        } catch (TTransportException $e) {
+            $response = null;
+        }
+
+        $this->assertSame($expectedUrls, $urls);
+        $this->assertSame($expectedResponse, $response);
+    }
+
+    public static function redirectDataProvider()
+    {
+        yield 'same origin' => [
+            'http', 80,
+            [[302, 'http://localhost/moved'], [200, false]],
+            ['http://localhost/rpc', 'http://localhost/moved'],
+            'response 1',
+        ];
+        yield 'the query is kept' => [
+            'http', 80,
+            [[307, 'http://localhost/moved?a=1&b=2'], [200, false]],
+            ['http://localhost/rpc', 'http://localhost/moved?a=1&b=2'],
+            'response 1',
+        ];
+        yield 'host in another case' => [
+            'http', 80,
+            [[301, 'HTTP://LocalHost/moved'], [200, false]],
+            ['http://localhost/rpc', 'http://localhost/moved'],
+            'response 1',
+        ];
+        yield 'default port named' => [
+            'http', 80,
+            [[308, 'http://localhost:80/moved'], [200, false]],
+            ['http://localhost/rpc', 'http://localhost/moved'],
+            'response 1',
+        ];
+        yield 'https on port 443' => [
+            'https', 443,
+            [[307, 'https://localhost/moved'], [200, false]],
+            ['https://localhost:443/rpc', 'https://localhost:443/moved'],
+            'response 1',
+        ];
+        yield 'https with the port left at 80, which the URL leaves out' => [
+            'https', 80,
+            [[302, 'https://localhost:443/moved'], [200, false]],
+            ['https://localhost/rpc', 'https://localhost/moved'],
+            'response 1',
+        ];
+        yield 'another host' => [
+            'http', 80,
+            [[302, 'http://example.com/moved']],
+            ['http://localhost/rpc'],
+            null,
+        ];
+        yield 'another port' => [
+            'http', 80,
+            [[307, 'http://localhost:8080/moved']],
+            ['http://localhost/rpc'],
+            null,
+        ];
+        yield 'another scheme' => [
+            'http', 80,
+            [[301, 'https://localhost/moved']],
+            ['http://localhost/rpc'],
+            null,
+        ];
+        yield 'user info in front of another host' => [
+            'http', 80,
+            [[302, 'http://localhost@example.com/moved']],
+            ['http://localhost/rpc'],
+            null,
+        ];
+        yield 'no location' => [
+            'http', 80,
+            [[302, false]],
+            ['http://localhost/rpc'],
+            null,
+        ];
+        yield 'a second redirect' => [
+            'http', 80,
+            [[302, 'http://localhost/moved'], [302, 'http://localhost/again']],
+            ['http://localhost/rpc', 'http://localhost/moved'],
+            null,
+        ];
+    }
+
     public function testCloseCurlHandle()
     {
         $this->getFunctionMock('Thrift\\Transport', 'curl_close')
-             ->expects($this->once())
-             ->with('testHandle');
+             ->expects($this->never());
 
         $transport = new TCurlClient('localhost');
-        $ref = new \ReflectionClass($transport);
-        $prop = $ref->getProperty('curlHandle');
-        $prop->setAccessible(true);
-        $prop->setValue($transport, 'testHandle');
+        $curlHandle = new ReflectionProperty($transport, 'curlHandle');
+        $curlHandle->setValue($transport, 'testHandle');
 
         $transport::closeCurlHandle();
+
+        $this->assertNull($curlHandle->getValue($transport));
     }
 }

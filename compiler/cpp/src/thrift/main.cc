@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
+#include <cstring>
 #include <string>
 #include <algorithm>
 #include <sys/types.h>
@@ -152,6 +153,8 @@ bool gen_recurse = false;
  * Flags to control thrift audit
  */
 bool g_audit = false;
+bool g_audit_allow_optional_field_removal = false;
+bool g_audit_allow_required_field_to_default = false;
 
 /**
  * Flag to control return status
@@ -164,27 +167,35 @@ bool g_generator_failure = false;
  * Win32 doesn't have realpath, so use fallback implementation in that case,
  * otherwise this just calls through to realpath
  */
-char* saferealpath(const char* path, char* resolved_path) {
+char* saferealpath(const char* path, char* resolved_path, size_t resolved_path_size) {
 #ifdef _WIN32
   char buf[MAX_PATH];
   char* basename;
+  const char* source;
+  size_t source_len;
   DWORD len = GetFullPathNameA(path, MAX_PATH, buf, &basename);
   if (len == 0 || len > MAX_PATH - 1) {
-    strcpy(resolved_path, path);
+    source = path;
   } else {
-    strcpy(resolved_path, buf);
+    source = buf;
   }
+
+  source_len = strlen(source);
+  if (source_len >= resolved_path_size) {
+    return nullptr;
+  }
+  strcpy(resolved_path, source);
 
   // Replace backslashes with forward slashes so the
   // rest of the code behaves correctly.
-  size_t resolved_len = strlen(resolved_path);
-  for (size_t i = 0; i < resolved_len; i++) {
+  for (size_t i = 0; i < source_len; i++) {
     if (resolved_path[i] == '\\') {
       resolved_path[i] = '/';
     }
   }
   return resolved_path;
 #else
+  (void) resolved_path_size;
   return realpath(path, resolved_path);
 #endif
 }
@@ -337,7 +348,7 @@ string include_file(string filename) {
     // Realpath!
     char rp[THRIFT_PATH_MAX];
     // cppcheck-suppress uninitvar
-    if (saferealpath(filename.c_str(), rp) == nullptr) {
+    if (saferealpath(filename.c_str(), rp, THRIFT_PATH_MAX) == nullptr) {
       pwarning(0, "Cannot open include file %s\n", filename.c_str());
       return std::string();
     }
@@ -360,7 +371,7 @@ string include_file(string filename) {
       // Realpath!
       char rp[THRIFT_PATH_MAX];
       // cppcheck-suppress uninitvar
-      if (saferealpath(sfilename.c_str(), rp) == nullptr) {
+      if (saferealpath(sfilename.c_str(), rp, THRIFT_PATH_MAX) == nullptr) {
         continue;
       }
 
@@ -703,6 +714,11 @@ void help() {
   fprintf(stderr, "\n");
   fprintf(stderr, "Options related to audit operation\n");
   fprintf(stderr, "   --audit OldFile   Old Thrift file to be audited with 'file'\n");
+  fprintf(stderr, "   --audit-allow-optional-field-removal\n");
+  fprintf(stderr, "                Allow explicitly optional fields to be removed\n");
+  fprintf(stderr, "   --audit-allow-required-field-to-default\n");
+  fprintf(stderr, "                Allow required fields to use default requiredness\n");
+  fprintf(stderr, "                Binding-dependent; includes service method arguments\n");
   fprintf(stderr, "  -Iold dir    Add a directory to the list of directories\n");
   fprintf(stderr, "                searched for include directives for old thrift file\n");
   fprintf(stderr, "  -Inew dir    Add a directory to the list of directories\n");
@@ -731,6 +747,8 @@ void help() {
  * runtime.
  */
 void validate_const_rec(std::string name, t_type* type, t_const_value* value) {
+  type = type->get_true_type();
+
   if (type->is_void()) {
     throw "type error: cannot declare a void const: " + name;
   }
@@ -1172,12 +1190,16 @@ int main(int argc, char** argv) {
         char old_thrift_file_rp[THRIFT_PATH_MAX];
 
         // cppcheck-suppress uninitvar
-        if (saferealpath(arg, old_thrift_file_rp) == nullptr) {
+        if (saferealpath(arg, old_thrift_file_rp, THRIFT_PATH_MAX) == nullptr) {
           failure("Could not open input file with realpath: %s", arg);
         }
         old_input_file = string(old_thrift_file_rp);
       } else if (strcmp(arg, "-audit-nofatal") == 0) {
         g_audit_fatal = false;
+      } else if (strcmp(arg, "-audit-allow-optional-field-removal") == 0) {
+        g_audit_allow_optional_field_removal = true;
+      } else if (strcmp(arg, "-audit-allow-required-field-to-default") == 0) {
+        g_audit_allow_required_field_to_default = true;
       } else if (strcmp(arg, "-Iold") == 0) {
         arg = argv[++i];
         if (arg == nullptr) {
@@ -1230,7 +1252,7 @@ int main(int argc, char** argv) {
       usage();
     }
     // cppcheck-suppress uninitvar
-    if (saferealpath(argv[i], new_thrift_file_rp) == nullptr) {
+    if (saferealpath(argv[i], new_thrift_file_rp, THRIFT_PATH_MAX) == nullptr) {
       failure("Could not open input file with realpath: %s", argv[i]);
     }
     string new_input_file(new_thrift_file_rp);
@@ -1256,7 +1278,7 @@ int main(int argc, char** argv) {
       usage();
     }
     // cppcheck-suppress uninitvar
-    if (saferealpath(argv[i], rp) == nullptr) {
+    if (saferealpath(argv[i], rp, THRIFT_PATH_MAX) == nullptr) {
       failure("Could not open input file with realpath: %s", argv[i]);
     }
     string input_file(rp);

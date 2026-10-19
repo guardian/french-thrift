@@ -124,33 +124,33 @@ func TestEquals(t *testing.T) {
 func genBasicFoo() *equalstest.BasicEqualsFoo {
 	return &equalstest.BasicEqualsFoo{
 		BoolFoo:      true,
-		OptBoolFoo:   thrift.BoolPtr(true),
+		OptBoolFoo:   new(true),
 		I8Foo:        1,
-		OptI8Foo:     thrift.Int8Ptr(1),
+		OptI8Foo:     new(int8(1)),
 		I16Foo:       2,
-		OptI16Foo:    thrift.Int16Ptr(2),
+		OptI16Foo:    new(int16(2)),
 		I32Foo:       3,
-		OptI32Foo:    thrift.Int32Ptr(3),
+		OptI32Foo:    new(int32(3)),
 		I64Foo:       4,
-		OptI64Foo:    thrift.Int64Ptr(4),
+		OptI64Foo:    new(int64(4)),
 		DoubleFoo:    5,
-		OptDoubleFoo: thrift.Float64Ptr(6),
+		OptDoubleFoo: new(float64(6)),
 		StrFoo:       "6",
-		OptStrFoo:    thrift.StringPtr("6"),
+		OptStrFoo:    new("6"),
 		BinFoo:       []byte("7"),
 		OptBinFoo:    []byte("7"),
 		EnumFoo:      equalstest.EnumFoo_e1,
-		OptEnumFoo:   equalstest.EnumFooPtr(equalstest.EnumFoo_e1),
+		OptEnumFoo:   new(equalstest.EnumFoo_e1),
 		MyByteFoo:    equalstest.Mybyte(8),
-		OptMyByteFoo: equalstest.MybytePtr(8),
+		OptMyByteFoo: new(equalstest.Mybyte(8)),
 		MyStrFoo:     equalstest.Mystr("9"),
-		OptMyStrFoo:  equalstest.MystrPtr(equalstest.Mystr("9")),
+		OptMyStrFoo:  new(equalstest.Mystr("9")),
 		MyBinFoo:     equalstest.Mybin("10"),
 		OptMyBinFoo:  equalstest.Mybin("10"),
 		UUIDFoo:      equalstestUUID1,
-		OptUUIDFoo:   thrift.TuuidPtr(equalstestUUID1),
+		OptUUIDFoo:   new(equalstestUUID1),
 		MyUUIDFoo:    equalstest.Myuuid(equalstestUUID1),
-		OptMyUUIDFoo: equalstest.MyuuidPtr(equalstest.Myuuid(equalstestUUID1)),
+		OptMyUUIDFoo: new(equalstest.Myuuid(equalstestUUID1)),
 	}
 }
 
@@ -283,4 +283,57 @@ func genInt64StringMap(length int) map[int64]string {
 		ret[int64(i)] = strconv.Itoa(i)
 	}
 	return ret
+}
+
+func TestMapEqualsDetectsMissingKey(t *testing.T) {
+	a := &equalstest.MapEqualsFoo{I64StrMapFoo: map[int64]string{1: ""}}
+	b := &equalstest.MapEqualsFoo{I64StrMapFoo: map[int64]string{2: ""}}
+	if a.Equals(b) {
+		t.Error("maps with different key sets must not be equal even when the zero value matches")
+	}
+}
+
+// A Thrift set is unordered, but Go represents it as a slice. Two values
+// holding the same members in a different order are equal.
+func TestSetEqualsIgnoresOrder(t *testing.T) {
+	tgt, src := genSetFoo(), genSetFoo()
+	reverse := func(s []int64) []int64 {
+		out := make([]int64, len(s))
+		for i, v := range s {
+			out[len(s)-1-i] = v
+		}
+		return out
+	}
+	src.I64SetFoo = reverse(src.I64SetFoo)
+	src.StructSetFoo[0], src.StructSetFoo[1] = src.StructSetFoo[1], src.StructSetFoo[0]
+	if !tgt.Equals(src) {
+		t.Error("reordering a set field must not change equality")
+	}
+
+	// Membership still has to match.
+	src = genSetFoo()
+	src.I64SetFoo[0] = -1
+	if tgt.Equals(src) {
+		t.Error("changing a set member must change equality")
+	}
+
+	// So does multiplicity, for a value assembled in memory.
+	tgt, src = genSetFoo(), genSetFoo()
+	tgt.I64SetFoo = []int64{1, 1, 2}
+	src.I64SetFoo = []int64{1, 2, 2}
+	if tgt.Equals(src) {
+		t.Error("sets differing in multiplicity must not be equal")
+	}
+}
+
+// A Thrift list is ordered, so its comparison stays position by position.
+func TestListEqualsKeepsOrder(t *testing.T) {
+	tgt, src := genListFoo(), genListFoo()
+	if !tgt.Equals(src) {
+		t.Error("identical lists must be equal")
+	}
+	src.I64ListFoo[0], src.I64ListFoo[1] = src.I64ListFoo[1], src.I64ListFoo[0]
+	if tgt.Equals(src) {
+		t.Error("reordering a list field must change equality")
+	}
 }

@@ -43,7 +43,7 @@ final class TCompactProtocol(Transport = TTransport) if (
    *   stringSizeLimit = If positive, the string length is limited to the
    *     given number of bytes.
    */
-  this(Transport trans, int containerSizeLimit = 0, int stringSizeLimit = 0) {
+  this(Transport trans, int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
     trans_ = trans;
     this.containerSizeLimit = containerSizeLimit;
     this.stringSizeLimit = stringSizeLimit;
@@ -68,7 +68,7 @@ final class TCompactProtocol(Transport = TTransport) if (
    * data is received. If the limit is exceeded, a SIZE_LIMIT-type
    * TProtocolException is thrown.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_CONTAINER_SIZE_LIMIT.
    */
   int containerSizeLimit;
 
@@ -80,7 +80,7 @@ final class TCompactProtocol(Transport = TTransport) if (
    * data is received. If the limit is exceeded, a SIZE_LIMIT-type
    * TProtocolException is thrown.
    *
-   * Defaults to zero (no limit).
+   * Defaults to DEFAULT_STRING_SIZE_LIMIT.
    */
   int stringSizeLimit;
 
@@ -608,10 +608,10 @@ private:
  * TCompactProtocol construction helper to avoid having to explicitly specify
  * the transport type, i.e. to allow the constructor being called using IFTI
  * (see $(LINK2 http://d.puremagic.com/issues/show_bug.cgi?id=6082, D Bugzilla
- * enhancement requet 6082)).
+ * enhancement request 6082)).
  */
 TCompactProtocol!Transport tCompactProtocol(Transport)(Transport trans,
-  int containerSizeLimit = 0, int stringSizeLimit = 0
+  int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT
 ) if (isTTransport!Transport)
 {
   return new TCompactProtocol!Transport(trans,
@@ -661,6 +661,9 @@ unittest {
   import thrift.internal.test.protocol;
   testContainerSizeLimit!(TCompactProtocol!())();
   testStringSizeLimit!(TCompactProtocol!())();
+  testSizeLimitDefaults!(TCompactProtocol!())();
+  testFactorySizeLimits!(TCompactProtocol!(), TCompactProtocolFactory!())();
+  testSkipDepthLimit!(TCompactProtocol!())();
 }
 
 /**
@@ -677,16 +680,17 @@ class TCompactProtocolFactory(Transports...) if (
   allSatisfy!(isTTransport, Transports)
 ) : TProtocolFactory {
   ///
-  this(int containerSizeLimit = 0, int stringSizeLimit = 0) {
-    containerSizeLimit_ = 0;
-    stringSizeLimit_ = 0;
+  this(int containerSizeLimit = DEFAULT_CONTAINER_SIZE_LIMIT, int stringSizeLimit = DEFAULT_STRING_SIZE_LIMIT) {
+    containerSizeLimit_ = containerSizeLimit;
+    stringSizeLimit_ = stringSizeLimit;
   }
 
   TProtocol getProtocol(TTransport trans) const {
     foreach (Transport; TypeTuple!(Transports, TTransport)) {
       auto concreteTrans = cast(Transport)trans;
       if (concreteTrans) {
-        return new TCompactProtocol!Transport(concreteTrans);
+        return new TCompactProtocol!Transport(concreteTrans,
+          containerSizeLimit_, stringSizeLimit_);
       }
     }
     throw new TProtocolException(

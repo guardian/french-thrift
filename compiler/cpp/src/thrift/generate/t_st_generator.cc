@@ -94,6 +94,7 @@ public:
 
   void generate_st_struct(std::ostream& out, t_struct* tstruct, bool is_exception);
   void generate_accessors(std::ostream& out, t_struct* tstruct);
+  void generate_serialization(std::ostream& out, t_struct* tstruct);
 
   /**
    * Service-level generation functions
@@ -179,13 +180,6 @@ void t_st_generator::init_generator() {
 
   st_class_def(f_, program_name_);
   generate_class_side_definition();
-
-  // Generate enums
-  vector<t_enum*> enums = program_->get_enums();
-  vector<t_enum*>::iterator en_iter;
-  for (en_iter = enums.begin(); en_iter != enums.end(); ++en_iter) {
-    generate_enum(*en_iter);
-  }
 }
 
 string t_st_generator::class_name() {
@@ -516,6 +510,35 @@ void t_st_generator::generate_st_struct(std::ostream& out,
       << "\tcategory: '" << generated_category() << "'!\n\n";
 
   generate_accessors(out, tstruct);
+  generate_serialization(out, tstruct);
+}
+
+/**
+ * Gives a struct class the two methods that serialize it.
+ *
+ * Nested structs used to be expanded textually wherever they appeared, which
+ * meant a type that (directly or indirectly) contained itself expanded for
+ * ever: the generator recursed until its own stack ran out (THRIFT-6062).
+ * Emitting the code once per struct and calling it removes the recursion from
+ * the generator, and lets recursive types be generated at all.
+ *
+ * It also makes the depth guard mean something. Inlined, the
+ * incrementRecursionDepth pairs counted lexical nesting, which is fixed at
+ * generation time; here each struct counts one level per actual call, so the
+ * limit applies to how deep the *data* is.
+ */
+void t_st_generator::generate_serialization(std::ostream& out, t_struct* tstruct) {
+  string cls = capitalize(type_name(tstruct));
+
+  st_method(out, cls, "writeTo: oprot");
+  out << struct_writer(tstruct, "self");
+  st_close_method(out);
+
+  st_class_method(out, cls, "readFrom: iprot");
+  out << "^ " << struct_reader(tstruct, tstruct->get_name());
+  st_close_method(out);
+
+  out << '\n';
 }
 
 bool t_st_generator::is_vowel(char c) {
@@ -706,9 +729,10 @@ string t_st_generator::struct_writer(t_struct* tstruct, string sname) {
   const vector<t_field*>& fields = tstruct->get_sorted_members();
   vector<t_field*>::const_iterator fld_iter;
 
-  out << "[oprot writeStructBegin: "
-      << "(TStruct new name: '" + tstruct->get_name() + "')." << '\n';
+  out << "[oprot incrementRecursionDepth." << '\n';
   indent_up();
+  out << indent() << "[oprot writeStructBegin: "
+      << "(TStruct new name: '" + tstruct->get_name() + "')." << '\n';
 
   for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
     bool optional = (*fld_iter)->get_req() == t_field::T_OPTIONAL;
@@ -735,7 +759,8 @@ string t_st_generator::struct_writer(t_struct* tstruct, string sname) {
     out << "." << '\n';
   }
 
-  out << indent() << "oprot writeFieldStop; writeStructEnd] value";
+  out << indent()
+      << "oprot writeFieldStop; writeStructEnd] ensure: [oprot decrementRecursionDepth]] value";
   indent_down();
 
   return out.str();
@@ -759,10 +784,11 @@ string t_st_generator::struct_reader(t_struct* tstruct, string clsName = "") {
   // This is nasty, but without it we'll break things by prefixing TResult.
   string name = ((capitalize(clsName) == "TResult") ? capitalize(clsName) : prefix(clsName));
   out << indent() << val << " := " << name << " new." << '\n';
+  out << indent() << "iprot incrementRecursionDepth." << '\n';
 
-  out << indent() << "iprot readStructBegin." << '\n' << indent() << "[" << desc
-      << " := iprot readFieldBegin." << '\n' << indent() << desc
-      << " type = TType stop] whileFalse: [|" << found << "|" << '\n';
+  out << indent() << "[iprot readStructBegin." << '\n'
+      << indent() << "[" << desc << " := iprot readFieldBegin." << '\n'
+      << indent() << desc << " type = TType stop] whileFalse: [|" << found << "|" << '\n';
   indent_up();
 
   for (fld_iter = fields.begin(); fld_iter != fields.end(); ++fld_iter) {
@@ -779,7 +805,8 @@ string t_st_generator::struct_reader(t_struct* tstruct, string clsName = "") {
   out << indent() << found << " ifNil: [iprot skip: " << desc << " type]]." << '\n';
   indent_down();
 
-  out << indent() << "oprot readStructEnd." << '\n' << indent() << val << "] value";
+  out << indent() << "iprot readStructEnd] ensure: [iprot decrementRecursionDepth]." << '\n'
+      << indent() << val << "] value";
   indent_down();
 
   return out.str();
@@ -792,26 +819,26 @@ string t_st_generator::write_val(t_type* t, string fname) {
     t_base_type::t_base tbase = ((t_base_type*)t)->get_base();
     switch (tbase) {
     case t_base_type::TYPE_DOUBLE:
-      return "iprot writeDouble: " + fname + " asFloat";
+      return "oprot writeDouble: " + fname + " asFloat";
       break;
     case t_base_type::TYPE_I8:
     case t_base_type::TYPE_I16:
     case t_base_type::TYPE_I32:
     case t_base_type::TYPE_I64:
-      return "iprot write" + capitalize(type_name(t)) + ": " + fname + " asInteger";
+      return "oprot write" + capitalize(type_name(t)) + ": " + fname + " asInteger";
     default:
-      return "iprot write" + capitalize(type_name(t)) + ": " + fname;
+      return "oprot write" + capitalize(type_name(t)) + ": " + fname;
     }
   } else if (t->is_map()) {
     return map_writer((t_map*)t, fname);
   } else if (t->is_struct() || t->is_xception()) {
-    return struct_writer((t_struct*)t, fname);
+    return fname + " writeTo: oprot";
   } else if (t->is_list()) {
     return list_writer((t_list*)t, fname);
   } else if (t->is_set()) {
     return set_writer((t_set*)t, fname);
   } else if (t->is_enum()) {
-    return "iprot writeI32: " + fname;
+    return "oprot writeI32: " + fname;
   } else {
     throw "Sorry, I don't know how to write this: " + type_name(t);
   }
@@ -825,7 +852,11 @@ string t_st_generator::read_val(t_type* t) {
   } else if (t->is_map()) {
     return map_reader((t_map*)t);
   } else if (t->is_struct() || t->is_xception()) {
-    return struct_reader((t_struct*)t);
+    // Parenthesised: a read_val result is used as a keyword argument, and
+    // "coll add: Foo readFrom: iprot" would parse as one add:readFrom: send.
+    // Every other branch returns a primary or a bracketed block, so this is
+    // the only one that needs it.
+    return "(" + prefix(type_name(t)) + " readFrom: iprot)";
   } else if (t->is_list()) {
     return list_reader((t_list*)t);
   } else if (t->is_set()) {
@@ -894,10 +925,15 @@ void t_st_generator::generate_recv_method(t_function* function) {
     result.append(exception);
   }
 
+  // The envelope is read with iprot, like the struct inside it. A client that
+  // never calls outProtocol: has oprot and iprot pointing at the same object,
+  // which is why reading the envelope from oprot went unnoticed; one that does
+  // would read the reply from the protocol it writes to. The flush is a write
+  // side operation and stays on oprot.
   st_method(f_, client_class_name(), "recv" + capitalize(funname));
-  f_ << "| f msg res | " << '\n' << indent() << "msg := oprot readMessageBegin." << '\n' << indent()
+  f_ << "| msg res | " << '\n' << indent() << "msg := iprot readMessageBegin." << '\n' << indent()
      << "self validateRemoteMessage: msg." << '\n' << indent()
-     << "res := " << struct_reader(&result) << "." << '\n' << indent() << "oprot readMessageEnd."
+     << "res := " << struct_reader(&result) << "." << '\n' << indent() << "iprot readMessageEnd."
      << '\n' << indent() << "oprot transport flush." << '\n' << indent()
      << "res exception ifNotNil: [res exception signal]." << '\n' << indent() << "^ res";
   st_close_method(f_);

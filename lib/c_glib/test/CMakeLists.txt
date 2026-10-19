@@ -31,6 +31,7 @@ set(testgenc_SOURCES
     gen-c_glib/t_test_empty_service.c
     gen-c_glib/t_test_inherited.c
     gen-c_glib/t_test_optional_required_test_types.c
+    gen-c_glib/t_test_recursion_limit_test_types.c
     gen-c_glib/t_test_reverse_order_service.c
     gen-c_glib/t_test_second_service.c
     gen-c_glib/t_test_service_for_exception_with_a_map.c
@@ -43,6 +44,7 @@ set(testgenc_SOURCES
     gen-c_glib/t_test_empty_service.h
     gen-c_glib/t_test_inherited.h
     gen-c_glib/t_test_optional_required_test_types.h
+    gen-c_glib/t_test_recursion_limit_test_types.h
     gen-c_glib/t_test_reverse_order_service.h
     gen-c_glib/t_test_second_service.h
     gen-c_glib/t_test_service_for_exception_with_a_map.h
@@ -84,9 +86,17 @@ add_executable(testframedtransport testframedtransport.c)
 target_link_libraries(testframedtransport thrift_c_glib)
 add_test(NAME testframedtransport COMMAND testframedtransport)
 
+add_executable(testframedreadbudget testframedreadbudget.c)
+target_link_libraries(testframedreadbudget thrift_c_glib)
+add_test(NAME testframedreadbudget COMMAND testframedreadbudget)
+
 add_executable(testfdtransport testfdtransport.c)
 target_link_libraries(testfdtransport thrift_c_glib)
 add_test(NAME testfdtransport COMMAND testfdtransport)
+
+add_executable(testreadallprogress testreadallprogress.c)
+target_link_libraries(testreadallprogress thrift_c_glib)
+add_test(NAME testreadallprogress COMMAND testreadallprogress)
 
 add_executable(testmemorybuffer testmemorybuffer.c)
 target_link_libraries(testmemorybuffer thrift_c_glib)
@@ -96,6 +106,15 @@ add_executable(testsimpleserver testsimpleserver.c)
 target_link_libraries(testsimpleserver thrift_c_glib)
 add_test(NAME testsimpleserver COMMAND testsimpleserver)
 
+add_executable(testmultiplexedprocessor testmultiplexedprocessor.c)
+target_link_libraries(testmultiplexedprocessor thrift_c_glib)
+add_test(NAME testmultiplexedprocessor COMMAND testmultiplexedprocessor)
+
+add_executable(testdispatchprocessor testdispatchprocessor.c)
+target_link_libraries(testdispatchprocessor testgenc)
+target_link_libraries(testdispatchprocessor thrift_c_glib)
+add_test(NAME testdispatchprocessor COMMAND testdispatchprocessor)
+
 add_executable(testdebugproto testdebugproto.c)
 target_link_libraries(testdebugproto testgenc)
 add_test(NAME testdebugproto COMMAND testdebugproto)
@@ -103,6 +122,16 @@ add_test(NAME testdebugproto COMMAND testdebugproto)
 add_executable(testoptionalrequired testoptionalrequired.c)
 target_link_libraries(testoptionalrequired testgenc)
 add_test(NAME testoptionalrequired COMMAND testoptionalrequired)
+
+add_executable(testrecursionlimit testrecursionlimit.c)
+target_link_libraries(testrecursionlimit testgenc)
+target_link_libraries(testrecursionlimit thrift_c_glib)
+add_test(NAME testrecursionlimit COMMAND testrecursionlimit)
+
+add_executable(testfinalize testfinalize.c)
+target_link_libraries(testfinalize testgenc)
+target_link_libraries(testfinalize thrift_c_glib)
+add_test(NAME testfinalize COMMAND testfinalize)
 
 add_executable(testthriftbinaryreadcheck testthriftbinaryreadcheck.c)
 target_link_libraries(testthriftbinaryreadcheck testgenc)
@@ -134,6 +163,11 @@ if(WITH_ZLIB)
   target_link_libraries(testzlibtransport testgenc ${ZLIB_LIBRARIES})
   target_link_libraries(testzlibtransport thrift_c_glib_zlib)
   add_test(NAME testzlibtransport COMMAND testzlibtransport)
+
+  add_executable(testzlibshortread testzlibshortread.c)
+  target_link_libraries(testzlibshortread ${ZLIB_LIBRARIES})
+  target_link_libraries(testzlibshortread thrift_c_glib_zlib)
+  add_test(NAME testzlibshortread COMMAND testzlibshortread)
 endif(WITH_ZLIB)
 
 include_directories("${PROJECT_SOURCE_DIR}/test/c_glib/src" "${CMAKE_CURRENT_BINARY_DIR}/gen-c_glib")
@@ -212,6 +246,12 @@ add_custom_command(OUTPUT
     gen-c_glib/t_test_optional_required_test_types.c
     gen-c_glib/t_test_optional_required_test_types.h
     COMMAND ${THRIFT_COMPILER} --gen c_glib ${PROJECT_SOURCE_DIR}/test/OptionalRequiredTest.thrift
+)
+
+add_custom_command(OUTPUT
+    gen-c_glib/t_test_recursion_limit_test_types.c
+    gen-c_glib/t_test_recursion_limit_test_types.h
+    COMMAND ${THRIFT_COMPILER} --gen c_glib ${CMAKE_CURRENT_SOURCE_DIR}/RecursionLimitTest.thrift
 )
 
 add_custom_command(OUTPUT

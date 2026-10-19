@@ -850,6 +850,7 @@ var buffer : TThriftMemoryStream;
     surrogatePairs: Array[0..1] of Char;
     off : Integer;
     tmp : TBytes;
+    maxSize, count : Int64;
 begin
   highSurogate := #0;
   buffer := TThriftMemoryStream.Create;
@@ -859,8 +860,14 @@ begin
 
     ReadJSONSyntaxChar( QUOTE[0]);
 
+    maxSize := Transport.Configuration.MaxMessageSize;
+    count   := 0;
+
     while TRUE do begin
       ch := FReader.Read;
+      Inc( count);
+      if count > maxSize
+      then raise TTransportExceptionMessageSizeLimit.Create('Message size exceeds limit: '+IntToStr(maxSize));
 
       if (ch = QUOTE[0])
       then Break;
@@ -873,6 +880,7 @@ begin
 
       // distuinguish between \uNNNN and \?
       ch := FReader.Read;
+      Inc( count);
       if (ch <> ESCSEQ[1])
       then begin
         off := Pos( Char(ch), ESCAPE_CHARS);
@@ -886,6 +894,7 @@ begin
       // it is \uXXXX
       SetLength( tmp, 4);
       Transport.ReadAll( tmp, 0, 4);
+      Inc( count, 4);
       wch := (HexVal(tmp[0]) shl 12)
            + (HexVal(tmp[1]) shl 8)
            + (HexVal(tmp[2]) shl 4)
@@ -934,14 +943,18 @@ end;
 function TJSONProtocolImpl.ReadJSONNumericChars : string;
 var strbld : TThriftStringBuilder;
     ch : Byte;
+    maxSize : Int64;
 begin
   strbld := TThriftStringBuilder.Create;
   try
+    maxSize := Transport.Configuration.MaxMessageSize;
     while TRUE do begin
       ch := FReader.Peek;
       if IsJSONNumeric(ch)
       then strbld.Append( Char(FReader.Read))
       else Break;
+      if strbld.Length > maxSize
+      then raise TTransportExceptionMessageSizeLimit.Create('Message size exceeds limit: '+IntToStr(maxSize));
     end;
     result := strbld.ToString;
 
@@ -1257,8 +1270,8 @@ function TJSONProtocolImpl.GetMinSerializedSize( const aType : TType) : Integer;
 // Return the minimum number of bytes a type will consume on the wire
 begin
   case aType of
-    TType.Stop:    result := 0;
-    TType.Void:    result := 0;
+    TType.Stop:    result := 1;  // T_STOP needs to count itself
+    TType.Void:    result := 1;  // T_VOID needs to count itself
     TType.Bool_:   result := 1;
     TType.Byte_:   result := 1;
     TType.Double_: result := 1;

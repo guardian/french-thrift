@@ -298,20 +298,20 @@ func ReadWriteByte(t testing.TB, p TProtocol, trans TTransport) {
 	for k, v := range BYTE_VALUES {
 		err = p.WriteByte(context.Background(), v)
 		if err != nil {
-			t.Errorf("%s: %T %T %q Error writing byte in list at index %d: %q", "ReadWriteByte", p, trans, err, k, v)
+			t.Errorf("%s: %T %T %q Error writing byte in list at index %d: %v", "ReadWriteByte", p, trans, err, k, v)
 		}
 	}
 	err = p.WriteListEnd(context.Background())
 	if err != nil {
-		t.Errorf("%s: %T %T %q Error writing list end: %q", "ReadWriteByte", p, trans, err, BYTE_VALUES)
+		t.Errorf("%s: %T %T %q Error writing list end: %v", "ReadWriteByte", p, trans, err, BYTE_VALUES)
 	}
 	err = p.Flush(context.Background())
 	if err != nil {
-		t.Errorf("%s: %T %T %q Error flushing list of bytes: %q", "ReadWriteByte", p, trans, err, BYTE_VALUES)
+		t.Errorf("%s: %T %T %q Error flushing list of bytes: %v", "ReadWriteByte", p, trans, err, BYTE_VALUES)
 	}
 	thetype2, thelen2, err := p.ReadListBegin(context.Background())
 	if err != nil {
-		t.Errorf("%s: %T %T %q Error reading list: %q", "ReadWriteByte", p, trans, err, BYTE_VALUES)
+		t.Errorf("%s: %T %T %q Error reading list: %v", "ReadWriteByte", p, trans, err, BYTE_VALUES)
 	}
 	_, ok := p.(*TSimpleJSONProtocol)
 	if !ok {
@@ -325,7 +325,7 @@ func ReadWriteByte(t testing.TB, p TProtocol, trans TTransport) {
 	for k, v := range BYTE_VALUES {
 		value, err := p.ReadByte(context.Background())
 		if err != nil {
-			t.Errorf("%s: %T %T %q Error reading byte at index %d: %q", "ReadWriteByte", p, trans, err, k, v)
+			t.Errorf("%s: %T %T %q Error reading byte at index %d: %v", "ReadWriteByte", p, trans, err, k, v)
 		}
 		if v != value {
 			t.Errorf("%s: %T %T %d != %d", "ReadWriteByte", p, trans, v, value)
@@ -348,7 +348,7 @@ func ReadWriteI16(t testing.TB, p TProtocol, trans TTransport) {
 	p.Flush(context.Background())
 	thetype2, thelen2, err := p.ReadListBegin(context.Background())
 	if err != nil {
-		t.Errorf("%s: %T %T %q Error reading list: %q", "ReadWriteI16", p, trans, err, INT16_VALUES)
+		t.Errorf("%s: %T %T %q Error reading list: %v", "ReadWriteI16", p, trans, err, INT16_VALUES)
 	}
 	_, ok := p.(*TSimpleJSONProtocol)
 	if !ok {
@@ -362,7 +362,7 @@ func ReadWriteI16(t testing.TB, p TProtocol, trans TTransport) {
 	for k, v := range INT16_VALUES {
 		value, err := p.ReadI16(context.Background())
 		if err != nil {
-			t.Errorf("%s: %T %T %q Error reading int16 at index %d: %q", "ReadWriteI16", p, trans, err, k, v)
+			t.Errorf("%s: %T %T %q Error reading int16 at index %d: %v", "ReadWriteI16", p, trans, err, k, v)
 		}
 		if v != value {
 			t.Errorf("%s: %T %T %d != %d", "ReadWriteI16", p, trans, v, value)
@@ -421,7 +421,7 @@ func ReadWriteI64(t testing.TB, p TProtocol, trans TTransport) {
 	p.Flush(context.Background())
 	thetype2, thelen2, err := p.ReadListBegin(context.Background())
 	if err != nil {
-		t.Errorf("%s: %T %T %q Error reading list: %q", "ReadWriteI64", p, trans, err, INT64_VALUES)
+		t.Errorf("%s: %T %T %q Error reading list: %v", "ReadWriteI64", p, trans, err, INT64_VALUES)
 	}
 	_, ok := p.(*TSimpleJSONProtocol)
 	if !ok {
@@ -435,10 +435,10 @@ func ReadWriteI64(t testing.TB, p TProtocol, trans TTransport) {
 	for k, v := range INT64_VALUES {
 		value, err := p.ReadI64(context.Background())
 		if err != nil {
-			t.Errorf("%s: %T %T %q Error reading int64 at index %d: %q", "ReadWriteI64", p, trans, err, k, v)
+			t.Errorf("%s: %T %T %q Error reading int64 at index %d: %v", "ReadWriteI64", p, trans, err, k, v)
 		}
 		if v != value {
-			t.Errorf("%s: %T %T %q != %q", "ReadWriteI64", p, trans, v, value)
+			t.Errorf("%s: %T %T %v != %v", "ReadWriteI64", p, trans, v, value)
 		}
 	}
 	if err != nil {
@@ -659,4 +659,127 @@ func UnmatchedBeginEndProtocolTest(t *testing.T, protocolFactory TProtocolFactor
 		})
 	})
 	trans.Close()
+}
+
+// A wire-supplied container element count is multiplied by the per-element
+// minimum serialised size and the result is checked against the configured
+// message size. These tests drive the readers with counts whose minimum-size
+// product, computed in 64 bits, is outside int32 range, and verify the readers
+// reject the header rather than returning it.
+func TestReadContainerSizeOverflow(t *testing.T) {
+	ctx := context.Background()
+	// 0x20000000 * 8 (min size of a DOUBLE element) == 1<<32, i.e. 0 taken as a
+	// signed 32-bit product; the doubled product used for maps is likewise.
+	const overflowSize = 0x20000000
+
+	for _, proto := range []struct {
+		name string
+		make func(TTransport) TProtocol
+	}{
+		{"binary", func(trans TTransport) TProtocol { return NewTBinaryProtocolConf(trans, &TConfiguration{}) }},
+		{"compact", func(trans TTransport) TProtocol { return NewTCompactProtocolConf(trans, &TConfiguration{}) }},
+	} {
+		t.Run(proto.name, func(t *testing.T) {
+			t.Run("map", func(t *testing.T) {
+				p := proto.make(NewTMemoryBuffer())
+				if err := p.WriteMapBegin(ctx, DOUBLE, DOUBLE, overflowSize); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, _, err := p.ReadMapBegin(ctx); err == nil {
+					t.Error("expected error reading oversized map header, got nil")
+				}
+			})
+			t.Run("list", func(t *testing.T) {
+				p := proto.make(NewTMemoryBuffer())
+				if err := p.WriteListBegin(ctx, DOUBLE, overflowSize); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := p.ReadListBegin(ctx); err == nil {
+					t.Error("expected error reading oversized list header, got nil")
+				}
+			})
+			t.Run("set", func(t *testing.T) {
+				p := proto.make(NewTMemoryBuffer())
+				if err := p.WriteSetBegin(ctx, DOUBLE, overflowSize); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := p.ReadSetBegin(ctx); err == nil {
+					t.Error("expected error reading oversized set header, got nil")
+				}
+			})
+		})
+	}
+
+	// TJSONProtocol reads the element count as a 64-bit value, so the count can
+	// exceed int32 on the wire. WriteMapBegin takes a platform int (too narrow on
+	// 32-bit builds) to carry such a count, so place it on the wire with the
+	// lower-level writers, mirroring WriteMapBegin.
+	t.Run("json/map", func(t *testing.T) {
+		// 0x4000000000000000 * 2 (min size of a map<bool,bool> entry) stays
+		// outside int32 range when kept in 64 bits.
+		const jsonOverflowSize int64 = 0x4000000000000000
+		trans := NewTMemoryBuffer()
+		w := NewTJSONProtocol(trans)
+		if err := w.OutputListBegin(); err != nil {
+			t.Fatal(err)
+		}
+		ks, _ := w.TypeIdToString(BOOL)
+		if err := w.WriteString(ctx, ks); err != nil {
+			t.Fatal(err)
+		}
+		vs, _ := w.TypeIdToString(BOOL)
+		if err := w.WriteString(ctx, vs); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteI64(ctx, jsonOverflowSize); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.OutputObjectBegin(); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+		r := NewTJSONProtocol(trans)
+		r.SetTConfiguration(&TConfiguration{})
+		if _, _, _, err := r.ReadMapBegin(ctx); err == nil {
+			t.Error("expected error reading oversized map header, got nil")
+		}
+	})
+}
+
+func TestCheckContainerSizeForProtocol(t *testing.T) {
+	for _, c := range []struct {
+		label     string
+		size      int64
+		minElem   int32
+		remaining uint64
+		wantError bool
+	}{
+		{"small", 10, 8, UnknownRemainingBytes, false},
+		{"negative", -1, 8, UnknownRemainingBytes, true},
+		// 0x20000000 * 8 == 1<<32, i.e. 0 taken as a signed 32-bit product.
+		{"int32-product", 0x20000000, 8, UnknownRemainingBytes, true},
+		// JSON reads the count as int64; a count past int32 must be rejected
+		// rather than reduced to a small product.
+		{"int64-count", 0x100000000, 2, UnknownRemainingBytes, true},
+		// A count near math.MaxInt64/minElem keeps the 64-bit product itself
+		// outside int32 range; it must be rejected by the count range check.
+		{"int64-product", 0x4000000000000000, 2, UnknownRemainingBytes, true},
+		// A known remaining size bounds the count on top of the above.
+		{"fits-remaining", 10, 8, 80, false},
+		{"exceeds-remaining", 11, 8, 80, true},
+		{"nothing-remaining", 1, 1, 0, true},
+		{"empty-container", 0, 1, 0, false},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			err := checkContainerSizeForProtocol(c.size, c.minElem, c.remaining, &TConfiguration{})
+			if c.wantError && err == nil {
+				t.Errorf("size=%d minElem=%d: expected error, got nil", c.size, c.minElem)
+			}
+			if !c.wantError && err != nil {
+				t.Errorf("size=%d minElem=%d: unexpected error: %v", c.size, c.minElem, err)
+			}
+		})
+	}
 }

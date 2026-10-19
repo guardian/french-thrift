@@ -247,9 +247,7 @@ func TestSerializerPoolAsync(t *testing.T) {
 	s := NewTSerializerPool(NewTSerializer)
 	d := NewTDeserializerPool(NewTDeserializer)
 	f := func(i int64) bool {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			t.Run(
 				fmt.Sprintf("#%d-%d", counter.Add(1), i),
 				func(t *testing.T) {
@@ -273,7 +271,7 @@ func TestSerializerPoolAsync(t *testing.T) {
 					}
 				},
 			)
-		}()
+		})
 		return true
 	}
 	quick.Check(f, nil)
@@ -328,7 +326,7 @@ func BenchmarkSerializer(b *testing.B) {
 		b.Run(
 			c.Label,
 			func(b *testing.B) {
-				for range b.N {
+				for b.Loop() {
 					s := c.Serializer()
 					m := MyTestStruct{}
 					str, _ := s.WriteString(context.Background(), &m)

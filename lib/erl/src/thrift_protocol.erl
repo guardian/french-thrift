@@ -25,6 +25,7 @@
     read/2,
     read/3,
     skip/2,
+    skip/3,
     flush_transport/1,
     close_transport/1,
     typeid_to_atom/1
@@ -116,6 +117,107 @@ term_to_typeid({list, _}) -> ?tType_LIST.
 read(IProto0, {struct, Structure}, Tag) when
     is_list(Structure), is_atom(Tag)
 ->
+    read_struct(IProto0, {struct, Structure}, Tag, ?DEFAULT_RECURSION_DEPTH).
+
+%% NOTE: Keep this in sync with read callback
+-spec read
+    (#protocol{}, {struct, _Info}) -> {#protocol{}, {ok, tuple()} | {error, _Reason}};
+    (#protocol{}, tprot_cont_tag()) -> {#protocol{}, {ok, any()} | {error, _Reason}};
+    (#protocol{}, tprot_empty_tag()) -> {#protocol{}, ok | {error, _Reason}};
+    (#protocol{}, tprot_header_tag()) -> {#protocol{}, tprot_header_val() | {error, _Reason}};
+    (#protocol{}, tprot_data_tag()) -> {#protocol{}, {ok, any()} | {error, _Reason}}.
+
+read(IProto, {struct, {Module, StructureName}}) when
+    is_atom(Module),
+    is_atom(StructureName)
+->
+    read_type(IProto, {struct, {Module, StructureName}}, ?DEFAULT_RECURSION_DEPTH);
+read(IProto, S = {struct, Structure}) when is_list(Structure) ->
+    read_type(IProto, S, ?DEFAULT_RECURSION_DEPTH);
+read(IProto0, T = {list, _Type}) ->
+    read_type(IProto0, T, ?DEFAULT_RECURSION_DEPTH);
+read(IProto0, T = {map, _KeyType, _ValType}) ->
+    read_type(IProto0, T, ?DEFAULT_RECURSION_DEPTH);
+read(IProto0, T = {set, _Type}) ->
+    read_type(IProto0, T, ?DEFAULT_RECURSION_DEPTH);
+read(Protocol, ProtocolType) ->
+    read_specific(Protocol, ProtocolType).
+
+%% Read a value whose type comes from the generated struct_info rather than
+%% from the wire. A {struct, {Module, Name}} reference is lazy, so a schema
+%% whose types refer back to themselves recurses one level per wire nesting
+%% level. Each level of composite nesting spends one unit of the same
+%% allowance skip/3 uses, seeded at ?DEFAULT_RECURSION_DEPTH, and exceeding it
+%% raises the same error. Leaf types carry no allowance because they cannot
+%% nest. Kept in step with the struct, list, map and set clauses of read/2.
+read_type(_IProto, _Type, Depth) when Depth =< 0 ->
+    error({protocol_error, max_skip_depth_exceeded});
+read_type(IProto, {struct, {Module, StructureName}}, Depth) when
+    is_atom(Module),
+    is_atom(StructureName)
+->
+    read_struct(IProto, Module:struct_info(StructureName), StructureName, Depth);
+read_type(IProto, S = {struct, Structure}, Depth) when is_list(Structure) ->
+    read_struct(IProto, S, undefined, Depth);
+read_type(IProto0, {list, Type}, Depth) ->
+    {IProto1, #protocol_list_begin{etype = EType, size = Size}} =
+        read(IProto0, list_begin),
+    {EType, EType} = {term_to_typeid(Type), EType},
+    {List, IProto2} = read_container_loop(
+        IProto1,
+        fun(ProtoS0) ->
+            {ProtoS1, {ok, Item}} = read_type(ProtoS0, Type, Depth - 1),
+            {Item, ProtoS1}
+        end,
+        Size,
+        []
+    ),
+    {IProto3, ok} = read(IProto2, list_end),
+    {IProto3, {ok, List}};
+read_type(IProto0, {map, KeyType, ValType}, Depth) ->
+    {IProto1, #protocol_map_begin{size = Size, ktype = KType, vtype = VType}} =
+        read(IProto0, map_begin),
+    _ =
+        case Size of
+            0 ->
+                0;
+            _ ->
+                {KType, KType} = {term_to_typeid(KeyType), KType},
+                {VType, VType} = {term_to_typeid(ValType), VType}
+        end,
+    {List, IProto2} = read_container_loop(
+        IProto1,
+        fun(ProtoS0) ->
+            {ProtoS1, {ok, Key}} = read_type(ProtoS0, KeyType, Depth - 1),
+            {ProtoS2, {ok, Val}} = read_type(ProtoS1, ValType, Depth - 1),
+            {{Key, Val}, ProtoS2}
+        end,
+        Size,
+        []
+    ),
+    {IProto3, ok} = read(IProto2, map_end),
+    {IProto3, {ok, dict:from_list(List)}};
+read_type(IProto0, {set, Type}, Depth) ->
+    {IProto1, #protocol_set_begin{etype = EType, size = Size}} =
+        read(IProto0, set_begin),
+    {EType, EType} = {term_to_typeid(Type), EType},
+    {List, IProto2} = read_container_loop(
+        IProto1,
+        fun(ProtoS0) ->
+            {ProtoS1, {ok, Item}} = read_type(ProtoS0, Type, Depth - 1),
+            {Item, ProtoS1}
+        end,
+        Size,
+        []
+    ),
+    {IProto3, ok} = read(IProto2, set_end),
+    {IProto3, {ok, sets:from_list(List)}};
+read_type(Protocol, ProtocolType, _Depth) ->
+    read_specific(Protocol, ProtocolType).
+
+read_struct(IProto0, {struct, Structure}, Tag, Depth) when
+    is_list(Structure)
+->
     % If we want a tagged tuple, we need to offset all the tuple indices
     % by 1 to avoid overwriting the tag.
     Offset =
@@ -145,76 +247,21 @@ read(IProto0, {struct, Structure}, Tag) when
             true -> RTuple0
         end,
 
-    {IProto2, RTuple2} = read_struct_loop(IProto1, SDict, RTuple1),
+    {IProto2, RTuple2} = read_struct_loop(IProto1, SDict, RTuple1, Depth),
     {IProto2, {ok, RTuple2}}.
 
-%% NOTE: Keep this in sync with read callback
--spec read
-    (#protocol{}, {struct, _Info}) -> {#protocol{}, {ok, tuple()} | {error, _Reason}};
-    (#protocol{}, tprot_cont_tag()) -> {#protocol{}, {ok, any()} | {error, _Reason}};
-    (#protocol{}, tprot_empty_tag()) -> {#protocol{}, ok | {error, _Reason}};
-    (#protocol{}, tprot_header_tag()) -> {#protocol{}, tprot_header_val() | {error, _Reason}};
-    (#protocol{}, tprot_data_tag()) -> {#protocol{}, {ok, any()} | {error, _Reason}}.
-
-read(IProto, {struct, {Module, StructureName}}) when
-    is_atom(Module),
-    is_atom(StructureName)
-->
-    read(IProto, Module:struct_info(StructureName), StructureName);
-read(IProto, S = {struct, Structure}) when is_list(Structure) ->
-    read(IProto, S, undefined);
-read(IProto0, {list, Type}) ->
-    {IProto1, #protocol_list_begin{etype = EType, size = Size}} =
-        read(IProto0, list_begin),
-    {EType, EType} = {term_to_typeid(Type), EType},
-    {List, IProto2} = lists:mapfoldl(
-        fun(_, ProtoS0) ->
-            {ProtoS1, {ok, Item}} = read(ProtoS0, Type),
-            {Item, ProtoS1}
-        end,
-        IProto1,
-        lists:duplicate(Size, 0)
-    ),
-    {IProto3, ok} = read(IProto2, list_end),
-    {IProto3, {ok, List}};
-read(IProto0, {map, KeyType, ValType}) ->
-    {IProto1, #protocol_map_begin{size = Size, ktype = KType, vtype = VType}} =
-        read(IProto0, map_begin),
-    _ =
-        case Size of
-            0 ->
-                0;
-            _ ->
-                {KType, KType} = {term_to_typeid(KeyType), KType},
-                {VType, VType} = {term_to_typeid(ValType), VType}
-        end,
-    {List, IProto2} = lists:mapfoldl(
-        fun(_, ProtoS0) ->
-            {ProtoS1, {ok, Key}} = read(ProtoS0, KeyType),
-            {ProtoS2, {ok, Val}} = read(ProtoS1, ValType),
-            {{Key, Val}, ProtoS2}
-        end,
-        IProto1,
-        lists:duplicate(Size, 0)
-    ),
-    {IProto3, ok} = read(IProto2, map_end),
-    {IProto3, {ok, dict:from_list(List)}};
-read(IProto0, {set, Type}) ->
-    {IProto1, #protocol_set_begin{etype = EType, size = Size}} =
-        read(IProto0, set_begin),
-    {EType, EType} = {term_to_typeid(Type), EType},
-    {List, IProto2} = lists:mapfoldl(
-        fun(_, ProtoS0) ->
-            {ProtoS1, {ok, Item}} = read(ProtoS0, Type),
-            {Item, ProtoS1}
-        end,
-        IProto1,
-        lists:duplicate(Size, 0)
-    ),
-    {IProto3, ok} = read(IProto2, set_end),
-    {IProto3, {ok, sets:from_list(List)}};
-read(Protocol, ProtocolType) ->
-    read_specific(Protocol, ProtocolType).
+%% Reads N container items one at a time, threading the protocol state and
+%% accumulating the results. A container header carries its element count, which
+%% is read before any element, so a peer can name a count it never backs with
+%% data. Reading incrementally keeps the cost proportional to the elements
+%% actually present, rather than materialising an N-element driver list
+%% (lists:duplicate/2) from the wire count up front. ReadItemFun(Proto) returns
+%% {Item, Proto1}.
+read_container_loop(Proto, _ReadItemFun, 0, Acc) ->
+    {lists:reverse(Acc), Proto};
+read_container_loop(Proto, ReadItemFun, N, Acc) when N > 0 ->
+    {Item, Proto1} = ReadItemFun(Proto),
+    read_container_loop(Proto1, ReadItemFun, N - 1, [Item | Acc]).
 
 %% NOTE: Keep this in sync with read/2 spec
 -spec read_specific
@@ -233,7 +280,7 @@ read_specific(
     {NewData, Result} = Module:read(ModuleData, ProtocolType),
     {Proto#protocol{data = NewData}, Result}.
 
-read_struct_loop(IProto0, SDict, RTuple) ->
+read_struct_loop(IProto0, SDict, RTuple, Depth) ->
     {IProto1, #protocol_field_begin{type = FType, id = Fid}} =
         thrift_protocol:read(IProto0, field_begin),
     case {FType, Fid} of
@@ -245,62 +292,78 @@ read_struct_loop(IProto0, SDict, RTuple) ->
                 {ok, {Type, Index}} ->
                     case term_to_typeid(Type) of
                         FType ->
-                            {IProto2, {ok, Val}} = read(IProto1, Type),
+                            {IProto2, {ok, Val}} = read_type(IProto1, Type, Depth - 1),
                             {IProto3, ok} = thrift_protocol:read(IProto2, field_end),
                             NewRTuple = setelement(Index, RTuple, Val),
-                            read_struct_loop(IProto3, SDict, NewRTuple);
+                            read_struct_loop(IProto3, SDict, NewRTuple, Depth);
                         Expected ->
                             error_logger:info_msg(
                                 "Skipping field ~p with wrong type (~p != ~p)~n",
                                 [Fid, FType, Expected]
                             ),
-                            skip_field(FType, IProto1, SDict, RTuple)
+                            skip_field(FType, IProto1, SDict, RTuple, Depth)
                     end;
                 _Else2 ->
-                    skip_field(FType, IProto1, SDict, RTuple)
+                    skip_field(FType, IProto1, SDict, RTuple, Depth)
             end
     end.
 
-skip_field(FType, IProto0, SDict, RTuple) ->
+skip_field(FType, IProto0, SDict, RTuple, Depth) ->
     {IProto1, ok} = skip(IProto0, typeid_to_atom(FType)),
     {IProto2, ok} = read(IProto1, field_end),
-    read_struct_loop(IProto2, SDict, RTuple).
+    read_struct_loop(IProto2, SDict, RTuple, Depth).
 
 -spec skip(#protocol{}, atom()) -> {#protocol{}, ok}.
 
-skip(Proto0, struct) ->
+%% What this walks is decided by type ids taken off the wire rather than by
+%% the IDL, so the peer picks the nesting and pays three bytes a level for it.
+%% The allowance starts fresh here: this is a separate walk from the one
+%% read_type/3 charges, and the two do not nest into a single unbounded chain
+%% because a field is either read by its declared type or skipped, never both.
+skip(Proto, Type) ->
+    skip(Proto, Type, ?DEFAULT_RECURSION_DEPTH).
+
+-spec skip(#protocol{}, atom(), integer()) -> {#protocol{}, ok}.
+
+skip(_Proto, _Type, Depth) when Depth =< 0 ->
+    error({protocol_error, max_skip_depth_exceeded});
+skip(Proto0, struct, Depth) ->
     {Proto1, ok} = read(Proto0, struct_begin),
-    {Proto2, ok} = skip_struct_loop(Proto1),
+    {Proto2, ok} = skip_struct_loop(Proto1, Depth),
     {Proto3, ok} = read(Proto2, struct_end),
     {Proto3, ok};
-skip(Proto0, map) ->
+skip(Proto0, map, Depth) ->
     {Proto1, Map} = read(Proto0, map_begin),
-    {Proto2, ok} = skip_map_loop(Proto1, Map),
+    {Proto2, ok} = skip_map_loop(Proto1, Map, Depth),
     {Proto3, ok} = read(Proto2, map_end),
     {Proto3, ok};
-skip(Proto0, set) ->
+skip(Proto0, set, Depth) ->
     {Proto1, Set} = read(Proto0, set_begin),
-    {Proto2, ok} = skip_set_loop(Proto1, Set),
+    {Proto2, ok} = skip_set_loop(Proto1, Set, Depth),
     {Proto3, ok} = read(Proto2, set_end),
     {Proto3, ok};
-skip(Proto0, list) ->
+skip(Proto0, list, Depth) ->
     {Proto1, List} = read(Proto0, list_begin),
-    {Proto2, ok} = skip_list_loop(Proto1, List),
+    {Proto2, ok} = skip_list_loop(Proto1, List, Depth),
     {Proto3, ok} = read(Proto2, list_end),
     {Proto3, ok};
-skip(Proto0, Type) when is_atom(Type) ->
+skip(Proto0, Type, _Depth) when is_atom(Type) ->
     {Proto1, _Ignore} = read(Proto0, Type),
     {Proto1, ok}.
 
-skip_struct_loop(Proto0) ->
+%% The loops below recurse once per element, which is a tail call and costs no
+%% stack, and once per level of nesting, which does. Only the second dimension
+%% spends the allowance.
+
+skip_struct_loop(Proto0, Depth) ->
     {Proto1, #protocol_field_begin{type = Type}} = read(Proto0, field_begin),
     case Type of
         ?tType_STOP ->
             {Proto1, ok};
         _Else ->
-            {Proto2, ok} = skip(Proto1, typeid_to_atom(Type)),
+            {Proto2, ok} = skip(Proto1, typeid_to_atom(Type), Depth - 1),
             {Proto3, ok} = read(Proto2, field_end),
-            skip_struct_loop(Proto3)
+            skip_struct_loop(Proto3, Depth)
     end.
 
 skip_map_loop(
@@ -309,15 +372,17 @@ skip_map_loop(
         ktype = Ktype,
         vtype = Vtype,
         size = Size
-    }
+    },
+    Depth
 ) ->
     case Size of
         N when N > 0 ->
-            {Proto1, ok} = skip(Proto0, typeid_to_atom(Ktype)),
-            {Proto2, ok} = skip(Proto1, typeid_to_atom(Vtype)),
+            {Proto1, ok} = skip(Proto0, typeid_to_atom(Ktype), Depth - 1),
+            {Proto2, ok} = skip(Proto1, typeid_to_atom(Vtype), Depth - 1),
             skip_map_loop(
                 Proto2,
-                Map#protocol_map_begin{size = Size - 1}
+                Map#protocol_map_begin{size = Size - 1},
+                Depth
             );
         0 ->
             {Proto0, ok}
@@ -328,14 +393,16 @@ skip_set_loop(
     Map = #protocol_set_begin{
         etype = Etype,
         size = Size
-    }
+    },
+    Depth
 ) ->
     case Size of
         N when N > 0 ->
-            {Proto1, ok} = skip(Proto0, typeid_to_atom(Etype)),
+            {Proto1, ok} = skip(Proto0, typeid_to_atom(Etype), Depth - 1),
             skip_set_loop(
                 Proto1,
-                Map#protocol_set_begin{size = Size - 1}
+                Map#protocol_set_begin{size = Size - 1},
+                Depth
             );
         0 ->
             {Proto0, ok}
@@ -346,14 +413,16 @@ skip_list_loop(
     Map = #protocol_list_begin{
         etype = Etype,
         size = Size
-    }
+    },
+    Depth
 ) ->
     case Size of
         N when N > 0 ->
-            {Proto1, ok} = skip(Proto0, typeid_to_atom(Etype)),
+            {Proto1, ok} = skip(Proto0, typeid_to_atom(Etype), Depth - 1),
             skip_list_loop(
                 Proto1,
-                Map#protocol_list_begin{size = Size - 1}
+                Map#protocol_list_begin{size = Size - 1},
+                Depth
             );
         0 ->
             {Proto0, ok}

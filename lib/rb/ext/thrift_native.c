@@ -43,6 +43,7 @@ int TTYPE_MAP;
 int TTYPE_SET;
 int TTYPE_LIST;
 int TTYPE_STRUCT;
+int TTYPE_UUID;
 
 // method ids
 ID validate_method_id;
@@ -57,6 +58,7 @@ ID write_i32_method_id;
 ID write_i64_method_id;
 ID write_double_method_id;
 ID write_string_method_id;
+ID write_uuid_method_id;
 ID write_binary_method_id;
 ID write_map_begin_method_id;
 ID write_map_end_method_id;
@@ -70,6 +72,7 @@ ID read_i16_method_id;
 ID read_i32_method_id;
 ID read_i64_method_id;
 ID read_string_method_id;
+ID read_uuid_method_id;
 ID read_binary_method_id;
 ID read_double_method_id;
 ID read_map_begin_method_id;
@@ -89,6 +92,7 @@ ID skip_method_id;
 ID write_method_id;
 ID read_all_method_id;
 ID read_into_buffer_method_id;
+ID reset_message_size_method_id;
 ID force_binary_encoding_id;
 ID convert_to_utf8_byte_buffer_id;
 ID convert_to_string_id;
@@ -96,8 +100,10 @@ ID convert_to_string_id;
 // constant ids
 ID fields_const_id;
 ID transport_ivar_id;
+ID reset_message_size_ivar_id;
 ID strict_read_ivar_id;
 ID strict_write_ivar_id;
+ID max_string_size_ivar_id;
 
 // cached symbols
 VALUE type_sym;
@@ -109,7 +115,17 @@ VALUE class_sym;
 VALUE binary_sym;
 VALUE protocol_exception_class;
 
-void Init_thrift_native() {
+// protocol errors
+int PROTOERR_UNKNOWN;
+int PROTOERR_INVALID_DATA;
+int PROTOERR_NEGATIVE_SIZE;
+int PROTOERR_SIZE_LIMIT;
+int PROTOERR_BAD_VERSION;
+int PROTOERR_NOT_IMPLEMENTED;
+int PROTOERR_DEPTH_LIMIT;
+
+// cppcheck-suppress unusedFunction
+RUBY_FUNC_EXPORTED void Init_thrift_native(void) {
   // cached classes
   thrift_module = rb_const_get(rb_cObject, rb_intern("Thrift"));
   rb_global_variable(&thrift_module);
@@ -138,6 +154,7 @@ void Init_thrift_native() {
   TTYPE_SET = FIX2INT(rb_const_get(thrift_types_module, rb_intern("SET")));
   TTYPE_LIST = FIX2INT(rb_const_get(thrift_types_module, rb_intern("LIST")));
   TTYPE_STRUCT = FIX2INT(rb_const_get(thrift_types_module, rb_intern("STRUCT")));
+  TTYPE_UUID = FIX2INT(rb_const_get(thrift_types_module, rb_intern("UUID")));
 
   // method ids
   validate_method_id = rb_intern("validate");
@@ -152,6 +169,7 @@ void Init_thrift_native() {
   write_i64_method_id = rb_intern("write_i64");
   write_double_method_id = rb_intern("write_double");
   write_string_method_id = rb_intern("write_string");
+  write_uuid_method_id = rb_intern("write_uuid");
   write_binary_method_id = rb_intern("write_binary");
   write_map_begin_method_id = rb_intern("write_map_begin");
   write_map_end_method_id = rb_intern("write_map_end");
@@ -165,10 +183,11 @@ void Init_thrift_native() {
   read_i32_method_id = rb_intern("read_i32");
   read_i64_method_id = rb_intern("read_i64");
   read_string_method_id = rb_intern("read_string");
+  read_uuid_method_id = rb_intern("read_uuid");
   read_binary_method_id = rb_intern("read_binary");
   read_double_method_id = rb_intern("read_double");
   read_map_begin_method_id = rb_intern("read_map_begin");
-  read_map_end_method_id = rb_intern("read_map_end");  
+  read_map_end_method_id = rb_intern("read_map_end");
   read_list_begin_method_id = rb_intern("read_list_begin");
   read_list_end_method_id = rb_intern("read_list_end");
   read_set_begin_method_id = rb_intern("read_set_begin");
@@ -184,6 +203,7 @@ void Init_thrift_native() {
   write_method_id = rb_intern("write");
   read_all_method_id = rb_intern("read_all");
   read_into_buffer_method_id = rb_intern("read_into_buffer");
+  reset_message_size_method_id = rb_intern("reset_message_size");
   force_binary_encoding_id = rb_intern("force_binary_encoding");
   convert_to_utf8_byte_buffer_id = rb_intern("convert_to_utf8_byte_buffer");
   convert_to_string_id = rb_intern("convert_to_string");
@@ -191,8 +211,10 @@ void Init_thrift_native() {
   // constant ids
   fields_const_id = rb_intern("FIELDS");
   transport_ivar_id = rb_intern("@trans");
+  reset_message_size_ivar_id = rb_intern("@reset_message_size");
   strict_read_ivar_id = rb_intern("@strict_read");
-  strict_write_ivar_id = rb_intern("@strict_write");  
+  strict_write_ivar_id = rb_intern("@strict_write");
+  max_string_size_ivar_id = rb_intern("@max_string_size");
 
   // cached symbols
   type_sym = ID2SYM(rb_intern("type"));
@@ -202,6 +224,15 @@ void Init_thrift_native() {
   element_sym = ID2SYM(rb_intern("element"));
   class_sym = ID2SYM(rb_intern("class"));
   binary_sym = ID2SYM(rb_intern("binary"));
+
+  // protocol errors
+  PROTOERR_UNKNOWN = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("UNKNOWN")));
+  PROTOERR_INVALID_DATA = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("INVALID_DATA")));
+  PROTOERR_NEGATIVE_SIZE = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("NEGATIVE_SIZE")));
+  PROTOERR_SIZE_LIMIT = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("SIZE_LIMIT")));
+  PROTOERR_BAD_VERSION = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("BAD_VERSION")));
+  PROTOERR_NOT_IMPLEMENTED = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("NOT_IMPLEMENTED")));
+  PROTOERR_DEPTH_LIMIT = FIX2INT(rb_const_get(protocol_exception_class, rb_intern("DEPTH_LIMIT")));
 
   rb_global_variable(&type_sym);
   rb_global_variable(&name_sym);

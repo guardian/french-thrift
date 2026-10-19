@@ -19,9 +19,12 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Factory;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionProperty;
 use Thrift\Factory\TCompactProtocolFactory;
 use Thrift\Protocol\TCompactProtocol;
 use Thrift\Transport\TTransport;
@@ -33,16 +36,38 @@ class TCompactProtocolFactoryTest extends TestCase
      */
     public function testGetProtocol()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $factory = new TCompactProtocolFactory();
         $protocol = $factory->getProtocol($transport);
 
         $this->assertInstanceOf(TCompactProtocol::class, $protocol);
 
-        $ref = new \ReflectionClass($protocol);
-        $refTrans = $ref->getProperty('trans_');
-        $refTrans->setAccessible(true);
+        $this->assertSame($transport, (new ReflectionProperty($protocol, 'trans'))->getValue($protocol));
+    }
 
-        $this->assertSame($transport, $refTrans->getValue($protocol));
+    /**
+     * @return void
+     */
+    public function testGetTransport()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TCompactProtocolFactory();
+        $protocol = $factory->getProtocol($transport);
+
+        $this->assertSame($transport, $protocol->getTransport());
+    }
+
+    /**
+     * @return void
+     */
+    public function testGetProtocolCreatesNewInstancePerCall()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TCompactProtocolFactory();
+
+        $protocol1 = $factory->getProtocol($transport);
+        $protocol2 = $factory->getProtocol($transport);
+
+        $this->assertNotSame($protocol1, $protocol2);
     }
 }

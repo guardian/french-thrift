@@ -19,10 +19,15 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Transport;
 
 use phpmock\phpunit\PHPMock;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Log\LoggerInterface;
+use Psr\Log\LogLevel;
 use Thrift\Exception\TException;
 use Thrift\Exception\TTransportException;
 use Thrift\Transport\TSSLSocket;
@@ -31,14 +36,12 @@ class TSSLSocketTest extends TestCase
 {
     use PHPMock;
 
-    /**
-     * @dataProvider openExceptionDataProvider
-     */
+    #[DataProvider('openExceptionDataProvider')]
     public function testOpenException(
         $host,
         $port,
         $context,
-        $debugHandler,
+        $logger,
         $streamSocketClientCallCount,
         $expectedException,
         $expectedMessage,
@@ -64,18 +67,18 @@ class TSSLSocketTest extends TestCase
             $host,
             $port,
             $context,
-            $debugHandler
+            $logger
         );
         $socket->open();
     }
 
-    public function openExceptionDataProvider()
+    public static function openExceptionDataProvider()
     {
         yield 'host is empty' => [
             'host' => '',
             'port' => 9090,
             'context' => null,
-            'debugHandler' => null,
+            'logger' => null,
             'streamSocketClientCallCount' => 0,
             'expectedException' => TTransportException::class,
             'expectedMessage' => 'Cannot open null host',
@@ -85,7 +88,7 @@ class TSSLSocketTest extends TestCase
             'host' => 'localhost',
             'port' => 0,
             'context' => null,
-            'debugHandler' => null,
+            'logger' => null,
             'streamSocketClientCallCount' => 0,
             'expectedException' => TTransportException::class,
             'expectedMessage' => 'Cannot open without port',
@@ -95,7 +98,7 @@ class TSSLSocketTest extends TestCase
             'host' => 'nonexistent-host',
             'port' => 9090,
             'context' => null,
-            'debugHandler' => null,
+            'logger' => null,
             'streamSocketClientCallCount' => 1,
             'expectedException' => TException::class,
             'expectedMessage' => 'TSocket: Could not connect to',
@@ -108,7 +111,7 @@ class TSSLSocketTest extends TestCase
         $host = 'localhost';
         $port = 9090;
         $context = null;
-        $debugHandler = null;
+        $logger = null;
 
         $this->getFunctionMock('Thrift\Transport', 'stream_socket_client')
              ->expects($this->once())
@@ -126,7 +129,7 @@ class TSSLSocketTest extends TestCase
             $host,
             $port,
             $context,
-            $debugHandler
+            $logger
         );
 
         $transport->open();
@@ -136,49 +139,38 @@ class TSSLSocketTest extends TestCase
         $transport->open();
     }
 
-    public function testDebugHandler()
+    public function testPsr3LoggerReceivesErrorLog(): void
     {
         $host = 'nonexistent-host';
         $port = 9090;
-        $context = null;
+        $expectedMessage = 'TSocket: Could not connect to ssl://nonexistent-host:9090 (Connection refused [999])';
 
-        $debugHandler = function ($error) {
-            $this->assertEquals(
-                'TSocket: Could not connect to ssl://nonexistent-host:9090 (Connection refused [999])',
-                $error
-            );
-        };
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())
+               ->method('log')
+               ->with(LogLevel::ERROR, $expectedMessage);
 
         $this->getFunctionMock('Thrift\Transport', 'stream_socket_client')
-             ->expects($this->once())
-             ->with(
-                 'ssl://' . $host . ':' . $port,
-                 $this->anything(), #$errno,
-                 $this->anything(), #$errstr,
-                 $this->anything(), #$this->sendTimeoutSec_ + ($this->sendTimeoutUsec_ / 1000000),
-                 STREAM_CLIENT_CONNECT,
-                 $this->anything() #$context
-             )
-             ->willReturnCallback(
-                 function ($host, &$error_code, &$error_message, $timeout, $flags, $context) {
-                     $error_code = 999;
-                     $error_message = 'Connection refused';
+            ->expects($this->once())
+            ->willReturnCallback(
+                function (
+                    string $address,
+                    &$error_code,
+                    &$error_message,
+                    ?float $timeout,
+                    int $flags,
+                    $context
+                ) {
+                    $error_code = 999;
+                    $error_message = 'Connection refused';
 
-                     return false;
-                 }
-             );
+                    return false;
+                }
+            );
 
-        $this->expectException(\Exception::class);
-        $this->expectExceptionMessage('TSocket: Could not connect to');
-        $this->expectExceptionCode(0);
+        $transport = new TSSLSocket($host, $port, null, $logger);
 
-        $transport = new TSSLSocket(
-            $host,
-            $port,
-            $context,
-            $debugHandler
-        );
-        $transport->setDebug(true);
+        $this->expectException(TException::class);
         $transport->open();
     }
 
@@ -195,7 +187,7 @@ class TSSLSocketTest extends TestCase
                 ],
             ]
         );
-        $debugHandler = null;
+        $logger = null;
 
         $this->getFunctionMock('Thrift\Transport', 'stream_socket_client')
              ->expects($this->once())
@@ -213,7 +205,7 @@ class TSSLSocketTest extends TestCase
             $host,
             $port,
             $context,
-            $debugHandler
+            $logger
         );
 
 
@@ -221,24 +213,22 @@ class TSSLSocketTest extends TestCase
         $this->assertTrue($transport->isOpen());
     }
 
-    /**
-     * @dataProvider hostDataProvider
-     */
+    #[DataProvider('hostDataProvider')]
     public function testGetHost($host, $expected)
     {
         $port = 9090;
         $context = null;
-        $debugHandler = null;
+        $logger = null;
         $transport = new TSSLSocket(
             $host,
             $port,
             $context,
-            $debugHandler
+            $logger
         );
         $this->assertEquals($expected, $transport->getHost());
     }
 
-    public function hostDataProvider()
+    public static function hostDataProvider()
     {
         yield 'localhost' => ['localhost', 'ssl://localhost'];
         yield 'ssl_localhost' => ['ssl://localhost', 'ssl://localhost'];

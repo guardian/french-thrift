@@ -17,10 +17,10 @@
 # under the License.
 #
 
-from .TProtocol import TType, TProtocolBase, TProtocolException, TProtocolFactory, checkIntegerLimits
+from .TProtocol import (TType, TProtocolBase, TProtocolException, TProtocolFactory,
+                        checkIntegerLimits, DEFAULT_STRING_LENGTH_LIMIT)
 from struct import pack, unpack
-
-from ..compat import binary_to_str, str_to_binary
+import uuid
 
 __all__ = ['TCompactProtocol', 'TCompactProtocolFactory']
 
@@ -70,18 +70,24 @@ def writeVarint(trans, n):
     trans.write(bytes(out))
 
 
+_MAX_VARINT_BYTES = 10  # ceil(64/7); matches protobuf wire format
+
+
 def readVarint(trans):
     result = 0
     shift = 0
-    while True:
+    for _ in range(_MAX_VARINT_BYTES):
         x = trans.readAll(1)
         byte = ord(x)
         result |= (byte & 0x7f) << shift
         if byte >> 7 == 0:
             return result
         shift += 7
+    raise TProtocolException(TProtocolException.INVALID_DATA,
+                             "Variable-length int over 10 bytes.")
 
 
+# As per TCompactProtocol.tcc
 class CompactType(object):
     STOP = 0x00
     TRUE = 0x01
@@ -96,6 +102,7 @@ class CompactType(object):
     SET = 0x0A
     MAP = 0x0B
     STRUCT = 0x0C
+    UUID = 0x0D
 
 
 CTYPES = {
@@ -111,6 +118,7 @@ CTYPES = {
     TType.LIST: CompactType.LIST,
     TType.SET: CompactType.SET,
     TType.MAP: CompactType.MAP,
+    TType.UUID: CompactType.UUID,
 }
 
 TTYPES = {}
@@ -132,7 +140,7 @@ class TCompactProtocol(TProtocolBase):
     TYPE_SHIFT_AMOUNT = 5
 
     def __init__(self, trans,
-                 string_length_limit=None,
+                 string_length_limit=DEFAULT_STRING_LENGTH_LIMIT,
                  container_length_limit=None):
         TProtocolBase.__init__(self, trans)
         self.state = CLEAR
@@ -165,7 +173,7 @@ class TCompactProtocol(TProtocolBase):
         if tseqid < 0:
             tseqid = 2147483648 + (2147483648 + tseqid)
         self.__writeVarint(tseqid)
-        self.__writeBinary(str_to_binary(name))
+        self.__writeBinary(bytes(name, 'utf-8'))
         self.state = VALUE_WRITE
 
     def writeMessageEnd(self):
@@ -278,6 +286,10 @@ class TCompactProtocol(TProtocolBase):
     def writeDouble(self, dub):
         self.trans.write(pack('<d', dub))
 
+    @writer
+    def writeUuid(self, uuid):
+        self.trans.write(uuid.bytes)
+
     def __writeBinary(self, s):
         self.__writeSize(len(s))
         self.trans.write(s)
@@ -346,7 +358,7 @@ class TCompactProtocol(TProtocolBase):
         # however the sequence is actually signed...
         if seqid > 2147483647:
             seqid = -2147483648 - (2147483648 - seqid)
-        name = binary_to_str(self.__readBinary())
+        name = self.__readBinary().decode('utf-8')
         return (name, type, seqid)
 
     def readMessageEnd(self):
@@ -418,6 +430,12 @@ class TCompactProtocol(TProtocolBase):
         val, = unpack('<d', buff)
         return val
 
+    @reader
+    def readUuid(self):
+        buff = self.trans.readAll(16)
+        val = uuid.UUID(bytes=buff)
+        return val
+
     def __readBinary(self):
         size = self.__readSize()
         self._check_string_length(size)
@@ -430,7 +448,7 @@ class TCompactProtocol(TProtocolBase):
 
 class TCompactProtocolFactory(TProtocolFactory):
     def __init__(self,
-                 string_length_limit=None,
+                 string_length_limit=DEFAULT_STRING_LENGTH_LIMIT,
                  container_length_limit=None):
         self.string_length_limit = string_length_limit
         self.container_length_limit = container_length_limit
@@ -472,7 +490,7 @@ class TCompactProtocolAccelerated(TCompactProtocol):
 
 class TCompactProtocolAcceleratedFactory(TProtocolFactory):
     def __init__(self,
-                 string_length_limit=None,
+                 string_length_limit=DEFAULT_STRING_LENGTH_LIMIT,
                  container_length_limit=None,
                  fallback=True):
         self.string_length_limit = string_length_limit

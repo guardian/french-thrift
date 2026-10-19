@@ -17,9 +17,11 @@
 # under the License.
 #
 
-from .TProtocol import TType, TProtocolBase, TProtocolException, TProtocolFactory
-from ..compat import binary_to_str
 from struct import pack, unpack
+import uuid
+
+from .TProtocol import (TType, TProtocolBase, TProtocolException, TProtocolFactory,
+                        DEFAULT_STRING_LENGTH_LIMIT)
 
 
 class TBinaryProtocol(TProtocolBase):
@@ -41,7 +43,7 @@ class TBinaryProtocol(TProtocolBase):
         TProtocolBase.__init__(self, trans)
         self.strictRead = strictRead
         self.strictWrite = strictWrite
-        self.string_length_limit = kwargs.get('string_length_limit', None)
+        self.string_length_limit = kwargs.get('string_length_limit', DEFAULT_STRING_LENGTH_LIMIT)
         self.container_length_limit = kwargs.get('container_length_limit', None)
 
     def _check_string_length(self, length):
@@ -131,6 +133,9 @@ class TBinaryProtocol(TProtocolBase):
         self.writeI32(len(str))
         self.trans.write(str)
 
+    def writeUuid(self, uuid):
+        self.trans.write(uuid.bytes)
+
     def readMessageBegin(self):
         sz = self.readI32()
         if sz < 0:
@@ -146,7 +151,8 @@ class TBinaryProtocol(TProtocolBase):
             if self.strictRead:
                 raise TProtocolException(type=TProtocolException.BAD_VERSION,
                                          message='No protocol version header')
-            name = binary_to_str(self.trans.readAll(sz))
+            self._check_string_length(sz)
+            name = self.trans.readAll(sz).decode('utf-8')
             type = self.readByte()
             seqid = self.readI32()
         return (name, type, seqid)
@@ -235,12 +241,17 @@ class TBinaryProtocol(TProtocolBase):
         s = self.trans.readAll(size)
         return s
 
+    def readUuid(self):
+        buff = self.trans.readAll(16)
+        val = uuid.UUID(bytes=buff)
+        return val
+
 
 class TBinaryProtocolFactory(TProtocolFactory):
     def __init__(self, strictRead=False, strictWrite=True, **kwargs):
         self.strictRead = strictRead
         self.strictWrite = strictWrite
-        self.string_length_limit = kwargs.get('string_length_limit', None)
+        self.string_length_limit = kwargs.get('string_length_limit', DEFAULT_STRING_LENGTH_LIMIT)
         self.container_length_limit = kwargs.get('container_length_limit', None)
 
     def getProtocol(self, trans):
@@ -287,7 +298,7 @@ class TBinaryProtocolAccelerated(TBinaryProtocol):
 
 class TBinaryProtocolAcceleratedFactory(TProtocolFactory):
     def __init__(self,
-                 string_length_limit=None,
+                 string_length_limit=DEFAULT_STRING_LENGTH_LIMIT,
                  container_length_limit=None,
                  fallback=True):
         self.string_length_limit = string_length_limit

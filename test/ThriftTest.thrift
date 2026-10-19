@@ -109,7 +109,6 @@ struct Insanity
 struct CrazyNesting {
   1: string string_field,
   2: optional set<Insanity> set_field,
-  // Do not insert line break as test/go/Makefile.am is removing this line with pattern match
   3: required list<map<set<i32> (python.immutable = ""), map<i32,set<list<map<Insanity,string>(python.immutable = "")> (python.immutable = "")>>>> list_field,
   4: binary binary_field
   5: uuid uuid_field
@@ -314,7 +313,11 @@ service ThriftTest
    * else do not throw anything
    * @return Xtruct - an Xtruct with string_thing = arg1
    */
-  Xtruct testMultiException(1: string arg0, 2: string arg1) throws(1: Xception err1, 2: Xception2 err2)
+  Xtruct testMultiException(1: string arg0, 2: string arg1) throws(
+    /** Thrown when a bad thing happens */
+    1: Xception err1,
+    /** Thrown when the input is in incorrect format, for example */
+    2: Xception2 err2)
 
   /**
    * Print 'testOneway(%d): Sleeping...' with secondsToSleep as '%d'

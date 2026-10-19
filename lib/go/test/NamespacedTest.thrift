@@ -18,6 +18,7 @@
 #
 
 include "ThriftTest.thrift"
+include "NamespacedBaseTest.thrift"
 
 namespace go lib.go.test.namespacedtest
 
@@ -34,7 +35,14 @@ struct StuffStruct {
   2: Stuff stuff,
 }
 
-service NamespacedService {
+exception StuffException {
+  1: string message,
+}
+
+service NamespacedService extends NamespacedBaseTest.NamespacedBaseService {
   ThriftTest.UserId getUserID(),
+  void takeList(1: list<i32> xs),
+  void takeMap(1: map<string, StuffStruct> m),
+  void takeException(1: StuffException e),
 }
 

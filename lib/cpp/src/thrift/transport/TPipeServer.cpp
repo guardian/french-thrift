@@ -19,6 +19,7 @@
 
 #include <thrift/thrift-config.h>
 #include <cstring>
+#include <stdexcept>
 
 #include <thrift/transport/TPipe.h>
 #include <thrift/transport/TPipeServer.h>
@@ -27,8 +28,8 @@
 #ifdef _WIN32
 #include <thrift/windows/OverlappedSubmissionThread.h>
 #include <thrift/windows/Sync.h>
-#include <AccCtrl.h>
-#include <Aclapi.h>
+#include <accctrl.h>
+#include <aclapi.h>
 #include <sddl.h>
 #endif //_WIN32
 
@@ -45,6 +46,7 @@ public:
   TPipeServerImpl() {}
   virtual ~TPipeServerImpl() {}
   virtual void interrupt() = 0;
+  virtual void interruptChildren() {}
   virtual std::shared_ptr<TTransport> acceptImpl() = 0;
 
   virtual HANDLE getPipeHandle() = 0;
@@ -61,7 +63,7 @@ public:
     // pass the handles on to the client before the serve (acceptImpl)
     // blocking call.
     if (!createAnonPipe()) {
-      GlobalOutput.perror("TPipeServer Create(Anon)Pipe failed, GLE=", GetLastError());
+      TOutput::instance().perror("TPipeServer Create(Anon)Pipe failed, GLE=", GetLastError());
       throw TTransportException(TTransportException::NOT_OPEN,
                                 " TPipeServer Create(Anon)Pipe failed");
     }
@@ -100,18 +102,24 @@ public:
   TNamedPipeServer(const std::string& pipename,
                    uint32_t bufsize,
                    uint32_t maxconnections,
-                   const std::string& securityDescriptor)
+                   const std::string& securityDescriptor,
+                   bool interruptableChildren)
     : stopping_(false),
       pipename_(pipename),
       bufsize_(bufsize),
       maxconns_(maxconnections),
-      securityDescriptor_(securityDescriptor) {
+      securityDescriptor_(securityDescriptor),
+      childInterrupt_(interruptableChildren ? std::make_shared<TManualResetEvent>() : nullptr) {
     connectOverlap_.action = TOverlappedWorkItem::CONNECT;
     cancelOverlap_.action = TOverlappedWorkItem::CANCELIO;
     TAutoCrit lock(pipe_protect_);
     initiateNamedConnect(lock);
   }
-  virtual ~TNamedPipeServer() {}
+  virtual ~TNamedPipeServer() {
+    // closing the server interrupts its children, as with TServerSocket
+    if (childInterrupt_)
+      SetEvent(childInterrupt_->h);
+  }
 
   virtual void interrupt() {
     TAutoCrit lock(pipe_protect_);
@@ -122,6 +130,11 @@ public:
       // This should wake up GetOverlappedResult
       thread_->addWorkItem(&cancelOverlap_);
     }
+  }
+
+  virtual void interruptChildren() {
+    if (childInterrupt_)
+      SetEvent(childInterrupt_->h);
   }
 
   virtual std::shared_ptr<TTransport> acceptImpl();
@@ -146,6 +159,9 @@ private:
   uint32_t bufsize_;
   uint32_t maxconns_;
   TManualResetEvent listen_event_;
+  // handed to every pipe this accepts, and signalled by interruptChildren();
+  // null if the children are not interruptable
+  std::shared_ptr<TManualResetEvent> childInterrupt_;
 
   TCriticalSection pipe_protect_;
   // only read or write these variables underneath a locked pipe_protect_
@@ -213,7 +229,8 @@ bool TPipeServer::isOpen() const {
 void TPipeServer::listen() {
   if (isAnonymous_)
     return;
-  impl_.reset(new TNamedPipeServer(pipename_, bufsize_, maxconns_, securityDescriptor_));
+  impl_.reset(new TNamedPipeServer(pipename_, bufsize_, maxconns_, securityDescriptor_,
+                                   interruptableChildren_));
 }
 
 shared_ptr<TTransport> TPipeServer::acceptImpl() {
@@ -231,7 +248,7 @@ shared_ptr<TTransport> TAnonPipeServer::acceptImpl() {
                           nullptr);    // not overlapped
 
   if (!fSuccess && GetLastError() != ERROR_MORE_DATA) {
-    GlobalOutput.perror("TPipeServer unable to initiate pipe comms, GLE=", GetLastError());
+    TOutput::instance().perror("TPipeServer unable to initiate pipe comms, GLE=", GetLastError());
     throw TTransportException(TTransportException::NOT_OPEN,
                               " TPipeServer unable to initiate pipe comms");
   }
@@ -243,7 +260,7 @@ void TNamedPipeServer::initiateNamedConnect(const TAutoCrit &lockProof) {
   if (stopping_)
     return;
   if (!createNamedPipe(lockProof)) {
-    GlobalOutput.perror("TPipeServer CreateNamedPipe failed, GLE=", GetLastError());
+    TOutput::instance().perror("TPipeServer CreateNamedPipe failed, GLE=", GetLastError());
     throw TTransportException(TTransportException::NOT_OPEN, " TPipeServer CreateNamedPipe failed");
   }
 
@@ -257,8 +274,8 @@ void TNamedPipeServer::initiateNamedConnect(const TAutoCrit &lockProof) {
   // function returns a nonzero value. If the function returns
   // zero, GetLastError should return ERROR_PIPE_CONNECTED.
   if (connectOverlap_.success) {
-    GlobalOutput.printf("Client connected.");
-    cached_client_.reset(new TPipe(Pipe_));
+    TOutput::instance().printf("Client connected.");
+    cached_client_.reset(new TPipe(Pipe_, childInterrupt_));
     // make sure people know that a connection is ready
     SetEvent(listen_event_.h);
     return;
@@ -267,15 +284,15 @@ void TNamedPipeServer::initiateNamedConnect(const TAutoCrit &lockProof) {
   DWORD dwErr = connectOverlap_.last_error;
   switch (dwErr) {
   case ERROR_PIPE_CONNECTED:
-    GlobalOutput.printf("Client connected.");
-    cached_client_.reset(new TPipe(Pipe_));
+    TOutput::instance().printf("Client connected.");
+    cached_client_.reset(new TPipe(Pipe_, childInterrupt_));
     // make sure people know that a connection is ready
     SetEvent(listen_event_.h);
     return;
   case ERROR_IO_PENDING:
     return; // acceptImpl will do the appropriate WaitForMultipleObjects
   default:
-    GlobalOutput.perror("TPipeServer ConnectNamedPipe failed, GLE=", dwErr);
+    TOutput::instance().perror("TPipeServer ConnectNamedPipe failed, GLE=", dwErr);
     throw TTransportException(TTransportException::NOT_OPEN,
                               " TPipeServer ConnectNamedPipe failed");
   }
@@ -314,25 +331,25 @@ shared_ptr<TTransport> TNamedPipeServer::acceptImpl() {
     TAutoCrit lock(pipe_protect_);
     shared_ptr<TPipe> client;
     try {
-      client.reset(new TPipe(Pipe_));
+      client.reset(new TPipe(Pipe_, childInterrupt_));
     } catch (TTransportException& ttx) {
       if (ttx.getType() == TTransportException::INTERRUPTED) {
         throw;
       }
 
-      GlobalOutput.perror("Client connection failed. TTransportExceptionType=", ttx.getType());
+      TOutput::instance().perror("Client connection failed. TTransportExceptionType=", ttx.getType());
       // kick off the next connection before throwing
       initiateNamedConnect(lock);
       throw TTransportException(TTransportException::CLIENT_DISCONNECT, ttx.what());
     }
-    GlobalOutput.printf("Client connected.");
+    TOutput::instance().printf("Client connected.");
     // kick off the next connection before returning
     initiateNamedConnect(lock);
     return client; // success!
   }
   // if we got here, then we are in an error / shutdown case
   DWORD gle = GetLastError(); // save error before doing cleanup
-  GlobalOutput.perror("TPipeServer ConnectNamedPipe GLE=", gle);
+  TOutput::instance().perror("TPipeServer ConnectNamedPipe GLE=", gle);
   if(gle == ERROR_OPERATION_ABORTED) {
     TAutoCrit lock(pipe_protect_);    	// Needed to insure concurrent thread to be out of interrupt.
     throw TTransportException(TTransportException::INTERRUPTED, "TPipeServer: server interupted");
@@ -343,6 +360,19 @@ shared_ptr<TTransport> TNamedPipeServer::acceptImpl() {
 void TPipeServer::interrupt() {
   if (impl_)
     impl_->interrupt();
+}
+
+void TPipeServer::interruptChildren() {
+  if (impl_)
+    impl_->interruptChildren();
+}
+
+void TPipeServer::setInterruptableChildren(bool enable) {
+  // listen() has run once there is a named pipe server
+  if (std::dynamic_pointer_cast<TNamedPipeServer>(impl_)) {
+    throw std::logic_error("setInterruptableChildren cannot be called after listen()");
+  }
+  interruptableChildren_ = enable;
 }
 
 void TPipeServer::close() {
@@ -357,7 +387,7 @@ bool TNamedPipeServer::createNamedPipe(const TAutoCrit& /*lockProof*/) {
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(securityDescriptor_.c_str(),
                                                             SDDL_REVISION_1, &psd, &size)) {
     DWORD lastError = GetLastError();
-    GlobalOutput.perror("TPipeServer::ConvertStringSecurityDescriptorToSecurityDescriptorA() GLE=",
+    TOutput::instance().perror("TPipeServer::ConvertStringSecurityDescriptorToSecurityDescriptorA() GLE=",
                         lastError);
     throw TTransportException(
         TTransportException::NOT_OPEN,
@@ -387,7 +417,7 @@ bool TNamedPipeServer::createNamedPipe(const TAutoCrit& /*lockProof*/) {
 
   if (hPipe.h == INVALID_HANDLE_VALUE) {
     Pipe_.reset();
-    GlobalOutput.perror("TPipeServer::TCreateNamedPipe() GLE=", lastError);
+    TOutput::instance().perror("TPipeServer::TCreateNamedPipe() GLE=", lastError);
     throw TTransportException(TTransportException::NOT_OPEN, "TCreateNamedPipe() failed",
                               lastError);
   }
@@ -401,12 +431,12 @@ bool TAnonPipeServer::createAnonPipe() {
   SECURITY_DESCRIPTOR sd; // security information for pipes
 
   if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)) {
-    GlobalOutput.perror("TPipeServer InitializeSecurityDescriptor (anon) failed, GLE=",
+    TOutput::instance().perror("TPipeServer InitializeSecurityDescriptor (anon) failed, GLE=",
                         GetLastError());
     return false;
   }
   if (!SetSecurityDescriptorDacl(&sd, true, nullptr, false)) {
-    GlobalOutput.perror("TPipeServer SetSecurityDescriptorDacl (anon) failed, GLE=",
+    TOutput::instance().perror("TPipeServer SetSecurityDescriptorDacl (anon) failed, GLE=",
                         GetLastError());
     return false;
   }
@@ -417,12 +447,12 @@ bool TAnonPipeServer::createAnonPipe() {
   HANDLE ClientAnonReadH, PipeW_H, ClientAnonWriteH, Pipe_H;
   if (!CreatePipe(&ClientAnonReadH, &PipeW_H, &sa, 0)) // create stdin pipe
   {
-    GlobalOutput.perror("TPipeServer CreatePipe (anon) failed, GLE=", GetLastError());
+    TOutput::instance().perror("TPipeServer CreatePipe (anon) failed, GLE=", GetLastError());
     return false;
   }
   if (!CreatePipe(&Pipe_H, &ClientAnonWriteH, &sa, 0)) // create stdout pipe
   {
-    GlobalOutput.perror("TPipeServer CreatePipe (anon) failed, GLE=", GetLastError());
+    TOutput::instance().perror("TPipeServer CreatePipe (anon) failed, GLE=", GetLastError());
     CloseHandle(ClientAnonReadH);
     CloseHandle(PipeW_H);
     return false;

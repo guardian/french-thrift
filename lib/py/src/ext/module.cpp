@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "types.h"
 #include "binary.h"
@@ -37,6 +38,8 @@
 PyObject* INTERN_STRING(TFrozenDict);
 PyObject* INTERN_STRING(cstringio_buf);
 PyObject* INTERN_STRING(cstringio_refill);
+PyObject* INTERN_STRING(UUID);
+PyObject* INTERN_STRING(bytes);
 static PyObject* INTERN_STRING(string_length_limit);
 static PyObject* INTERN_STRING(container_length_limit);
 static PyObject* INTERN_STRING(trans);
@@ -185,6 +188,8 @@ void initfastbinary() {
   INIT_INTERN_STRING(string_length_limit);
   INIT_INTERN_STRING(container_length_limit);
   INIT_INTERN_STRING(trans);
+  INIT_INTERN_STRING(UUID);
+  INIT_INTERN_STRING(bytes);
 #undef INIT_INTERN_STRING
 
   PyObject* module =
@@ -195,6 +200,10 @@ void initfastbinary() {
 #endif
   if (module == nullptr)
     INITERROR;
+
+#ifdef Py_GIL_DISABLED
+  PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
+#endif
 
 #if PY_MAJOR_VERSION >= 3
   return module;

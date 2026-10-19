@@ -175,7 +175,7 @@ private:
   bool wcf_;
   bool use_pascal_case_properties;
   bool suppress_deepcopy;
-  int  target_net_version;  // 0 = any, 6 = net6, 8 = net8
+  int  target_net_version;  // 0 = any, 6 = net6, 8 = net8, etc.
   bool add_async_postfix;
 
   const std::string CSHARP_KEYWORDS[101] = {
@@ -197,6 +197,8 @@ private:
   vector<member_mapping_scope> member_mapping_scopes;
   map<string, t_type*> collected_extension_types;
   map<string, t_type*> checked_extension_types;
+  map<string, t_program*> inherited_extension_owners;   // containers left to an included program
+  t_program* extensions_owner_;   // the program collect_extensions_types() recurses for
 
   string normalize_name(string name, bool is_arg_name = false);
   string make_valid_csharp_identifier(string const& fromName);
@@ -209,8 +211,17 @@ private:
   string get_mapped_member_name(string oldname);
   string get_isset_name(const string& str);
   string get_deep_copy_method_call(t_type* ttype, bool is_not_null, bool& needs_typecast, string& suffix);
+  string deep_copy_expression(const string& source, t_type* ttype, bool is_not_null, bool& needs_typecast, bool null_conditional = false);
+  string extensions_class_name(t_program* program);
+  string extensions_class_of(t_type* ttype);
   void collect_extensions_types(t_struct* tstruct);
   void collect_extensions_types(t_type* ttype);
+  void collect_extensions_types_of_program(t_program* program, map<string, t_type*>& result);
+  void collect_inherited_extensions_types(t_program* program, set<t_program*>& visited, map<string, t_program*>& result);
+  void remove_inherited_extensions_types(map<string, t_type*>& types);
+  bool uses_type_of_program(t_type* ttype, t_program* program);
+  bool uses_type_of_program(t_struct* tstruct, t_program* program);
+  bool program_depends_on(t_program* from, t_program* program);
   void generate_extensions(ostream& out, map<string, t_type*> types);
   void reset_indent();
   void generate_null_check_begin(ostream& out, t_field* tfield);

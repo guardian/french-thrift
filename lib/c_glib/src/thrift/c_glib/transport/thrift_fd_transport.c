@@ -106,6 +106,16 @@ thrift_fd_transport_read (ThriftTransport *transport, gpointer buf,
                  strerror (errno));
     return -1;
   }
+  /* read(2) answers 0 at end of file.  Report it the way thrift_socket_read()
+     reports a closed peer, rather than as a read that delivered nothing. */
+  if (n == 0 && len > 0) {
+    g_set_error (error,
+                 THRIFT_TRANSPORT_ERROR,
+                 THRIFT_TRANSPORT_ERROR_RECEIVE,
+                 "Failed to read %u bytes from fd: end of file",
+                 len);
+    return -1;
+  }
   return n;
 }
 
@@ -142,6 +152,15 @@ thrift_fd_transport_write (ThriftTransport *transport,
                    THRIFT_TRANSPORT_ERROR_SEND,
                    "Failed to write from fd: %s",
                    strerror (errno));
+      return FALSE;
+    } else if (n == 0) {
+      /* write(2) wrote nothing.  Asking again cannot make progress, so report
+         it rather than retry without end. */
+      g_set_error (error,
+                   THRIFT_TRANSPORT_ERROR,
+                   THRIFT_TRANSPORT_ERROR_SEND,
+                   "Failed to write %u bytes to fd: write() returned 0",
+                   len);
       return FALSE;
     } else {
       _buf += n;
@@ -196,7 +215,7 @@ thrift_fd_transport_init (ThriftFDTransport *transport)
 static void
 thrift_fd_transport_finalize (GObject *object)
 {
-  THRIFT_UNUSED_VAR (object);
+  G_OBJECT_CLASS (thrift_fd_transport_parent_class)->finalize (object);
 }
 
 /* property accessor */

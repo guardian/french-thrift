@@ -1,0 +1,50 @@
+name: "make dist"
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
+
+env:
+  BUILD_DEPS: automake bison flex git libboost-all-dev libevent-dev libssl-dev libtool make pkg-config
+
+permissions:
+  contents: read
+
+jobs:
+  make-dist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure apt retries and timeouts
+        run: sudo cp .github/apt/99-ci-network /etc/apt/apt.conf.d/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -y --no-install-recommends g++ $BUILD_DEPS
+
+      - name: Run bootstrap
+        run: ./bootstrap.sh
+
+      # Assemble the source distribution tarball only.  --disable-libs keeps the
+      # job fast and toolchain-independent; make dist still recurses every
+      # language directory via DIST_SUBDIRS, so all EXTRA_DIST lists are
+      # validated regardless of which bindings are enabled.
+      - name: Run configure
+        run: ./configure --disable-debug --disable-tests --disable-libs
+
+      - name: Run make dist
+        run: make dist
+
+      - name: Verify distribution tarball
+        run: |
+          set -e
+          ls -l thrift-*.tar.gz
+          entries=$(tar tzf thrift-*.tar.gz | wc -l)
+          echo "Distribution tarball contains $entries entries."
+          test "$entries" -gt 1000

@@ -1,5 +1,6 @@
 # encoding: ascii-8bit
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -7,9 +8,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -20,20 +21,19 @@
 
 module Thrift
   class MemoryBufferTransport < BaseTransport
-    GARBAGE_BUFFER_SIZE = 4*(2**10) # 4kB
+    GARBAGE_BUFFER_SIZE = 4 * (2**10) # 4kB
+    HEX_BYTES = Array.new(256) { |byte| byte.to_s(16).freeze }.freeze
+    private_constant :HEX_BYTES
 
-    # If you pass a string to this, you should #dup that string
-    # unless you want it to be modified by #read and #write
-    #--
-    # this behavior is no longer required. If you wish to change it
-    # go ahead, just make sure the specs pass
+    # The transport copies the input buffer and keeps its own mutable storage.
     def initialize(buffer = nil)
-      @buf = buffer ? Bytes.force_binary_encoding(buffer) : Bytes.empty_byte_buffer
+      @buf = buffer ? Bytes.force_binary_encoding(buffer.dup) : Bytes.empty_byte_buffer
       @index = 0
+      @compact_at = 0
     end
 
     def open?
-      return true
+      true
     end
 
     def open
@@ -47,9 +47,10 @@ module Thrift
     end
 
     # this method does not use the passed object directly but copies it
-    def reset_buffer(new_buf = '')
+    def reset_buffer(new_buf = "")
       @buf.replace Bytes.force_binary_encoding(new_buf)
       @index = 0
+      @compact_at = 0
     end
 
     def available
@@ -57,27 +58,29 @@ module Thrift
     end
 
     def read(len)
+      raise TransportException.new(TransportException::NEGATIVE_SIZE, "Negative size") unless len >= 0
+
       data = @buf.slice(@index, len)
       @index += len
       @index = @buf.size if @index > @buf.size
-      if @index >= GARBAGE_BUFFER_SIZE
-        @buf = @buf.slice(@index..-1)
-        @index = 0
-      end
+      compact_buffer if @index >= @compact_at
       if data.size < len
         raise EOFError, "Not enough bytes remain in buffer"
       end
       data
     end
 
+    def read_all(size)
+      raise TransportException.new(TransportException::NEGATIVE_SIZE, "Negative size") unless size >= 0
+
+      read(size)
+    end
+
     def read_byte
       raise EOFError.new("Not enough bytes remain in buffer") if @index >= @buf.size
       val = Bytes.get_string_byte(@buf, @index)
       @index += 1
-      if @index >= GARBAGE_BUFFER_SIZE
-        @buf = @buf.slice(@index..-1)
-        @index = 0
-      end
+      compact_buffer if @index >= @compact_at
       val
     end
 
@@ -92,11 +95,9 @@ module Thrift
         @index += 1
         i += 1
       end
-      if @index >= GARBAGE_BUFFER_SIZE
-        @buf = @buf.slice(@index..-1)
-        @index = 0
-      end
       i
+    ensure
+      compact_buffer if @index >= @compact_at
     end
 
     def write(wbuf)
@@ -107,23 +108,43 @@ module Thrift
     end
 
     def inspect_buffer
-      out = []
-      for idx in 0...(@buf.size)
-        # if idx != 0
-        #   out << " "
-        # end
-      
-        if idx == @index
-          out << ">"
-        end
-      
-        out << @buf[idx].ord.to_s(16)
+      out = +""
+      idx = 0
+      size = @buf.size
+      while idx < size
+        out << " " unless idx.zero?
+        out << "> " if idx == @index
+        out << HEX_BYTES[@buf.getbyte(idx)]
+        idx += 1
       end
-      out.join(" ")
+      # Array#join used the first token's encoding: binary only for a leading cursor.
+      out.force_encoding(Encoding::US_ASCII) unless @index == 0 && !out.empty?
+      out
     end
-    
+
     def to_s
       "memory"
+    end
+
+    private
+
+    def compact_buffer
+      remaining = @buf.bytesize - @index
+      if remaining == 0
+        # Replace rather than clear: even a small suffix can share a large input.
+        @buf = Bytes.empty_byte_buffer
+        @index = 0
+      elsif @index >= GARBAGE_BUFFER_SIZE && @index >= remaining
+        # Copy at most as many bytes as have been consumed since the last copy.
+        # Appending to fresh storage also detaches a shared suffix immediately.
+        @buf = Bytes.empty_byte_buffer << @buf.slice(@index, remaining)
+        @index = 0
+      end
+      # Cache the next boundary for pure Ruby reads. Appends can only move it
+      # forward, so an earlier cached boundary stays safe until rechecked.
+      size = @buf.bytesize
+      half = (size + 1) / 2
+      @compact_at = size < GARBAGE_BUFFER_SIZE ? size : (half < GARBAGE_BUFFER_SIZE ? GARBAGE_BUFFER_SIZE : half)
     end
   end
 end

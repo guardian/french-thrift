@@ -631,15 +631,28 @@ public class TJSONProtocol extends TProtocol {
       context_.read();
     }
     readJSONSyntaxChar(QUOTE);
+    // A JSON string is quote-delimited, so unlike a length-prefixed binary
+    // string there is no declared size to reject up front. Bound the running
+    // byte count against the configured max message size so a single string
+    // cannot grow without bound, independent of any transport-level accounting.
+    long maxSize = trans_.getConfiguration().getMaxMessageSize();
+    long count = 0;
     while (true) {
       byte ch = reader_.read();
+      count++;
+      if (count > maxSize) {
+        throw new TTransportException(
+            TTransportException.MESSAGE_SIZE_LIMIT, "Message size exceeds limit: " + maxSize);
+      }
       if (ch == QUOTE[0]) {
         break;
       }
       if (ch == ESCSEQ[0]) {
         ch = reader_.read();
+        count++;
         if (ch == ESCSEQ[1]) {
           trans_.readAll(tmpbuf_, 0, 4);
+          count += 4;
           short cu =
               (short)
                   (((short) hexVal(tmpbuf_[0]) << 12)
@@ -712,12 +725,19 @@ public class TJSONProtocol extends TProtocol {
   // not do a complete regex check to validate that this is actually a number.
   private String readJSONNumericChars() throws TException {
     StringBuilder strbld = new StringBuilder();
+    long maxSize = trans_.getConfiguration().getMaxMessageSize();
     while (true) {
       byte ch = reader_.peek();
       if (!isJSONNumeric(ch)) {
         break;
       }
       strbld.append((char) reader_.read());
+      // Numeric literals carry no declared length either; bound the running
+      // count against the configured max message size as digits accumulate.
+      if (strbld.length() > maxSize) {
+        throw new TTransportException(
+            TTransportException.MESSAGE_SIZE_LIMIT, "Message size exceeds limit: " + maxSize);
+      }
     }
     return strbld.toString();
   }
@@ -972,9 +992,9 @@ public class TJSONProtocol extends TProtocol {
   public int getMinSerializedSize(byte type) throws TTransportException {
     switch (type) {
       case 0:
-        return 0; // Stop
+        return 1; // Stop - T_STOP needs to count itself
       case 1:
-        return 0; // Void
+        return 1; // Void - T_VOID needs to count itself
       case 2:
         return 1; // Bool
       case 3:

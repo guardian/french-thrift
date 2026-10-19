@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -19,45 +20,60 @@
 
 module Thrift
   module Client
-    def initialize(iprot, oprot=nil)
+    MIN_SEQUENCE_ID = -(2**31)
+    MAX_SEQUENCE_ID = (2**31) - 1
+
+    def initialize(iprot, oprot = nil)
       @iprot = iprot
       @oprot = oprot || iprot
       @seqid = 0
+      @pending_seqids = []
     end
 
     def send_message(name, args_class, args = {})
-      @oprot.write_message_begin(name, MessageTypes::CALL, @seqid)
-      send_message_args(args_class, args)
+      write_message(name, MessageTypes::CALL, args_class, args)
     end
 
     def send_oneway_message(name, args_class, args = {})
-      @oprot.write_message_begin(name, MessageTypes::ONEWAY, @seqid)
-      send_message_args(args_class, args)
+      write_message(name, MessageTypes::ONEWAY, args_class, args)
     end
 
     def send_message_args(args_class, args)
-      data = args_class.new
-      args.each do |k, v|
-        data.send("#{k.to_s}=", v)
-      end
-      begin
-        data.write(@oprot)
-      rescue StandardError => e
-        @oprot.trans.close
-        raise e
-      end
-      @oprot.write_message_end
-      @oprot.trans.flush
+      write_message(nil, nil, args_class, args)
     end
 
-    def receive_message_begin()
+    def receive_message_begin
       fname, mtype, rseqid = @iprot.read_message_begin
       [fname, mtype, rseqid]
     end
 
-    def reply_seqid(rseqid)
-     result = (rseqid==@seqid)?true:false
-     result
+    def validate_message_begin(fname, mtype, rseqid, expected_name)
+      expected_seqid = dequeue_pending_seqid
+
+      if mtype == MessageTypes::EXCEPTION
+        raise_application_exception
+      end
+
+      if mtype != MessageTypes::REPLY
+        raise ApplicationException.new(
+          ApplicationException::INVALID_MESSAGE_TYPE,
+          "#{expected_name} failed: invalid message type",
+        )
+      end
+
+      if fname != expected_name
+        raise ApplicationException.new(
+          ApplicationException::WRONG_METHOD_NAME,
+          "#{expected_name} failed: wrong method name",
+        )
+      end
+
+      return if !expected_seqid.nil? && rseqid == expected_seqid
+
+      raise ApplicationException.new(
+        ApplicationException::BAD_SEQUENCE_ID,
+        "#{expected_name} failed: out of sequence response",
+      )
     end
 
     def receive_message(result_klass)
@@ -67,13 +83,47 @@ module Thrift
       result
     end
 
-    def handle_exception(mtype)
-      if mtype == MessageTypes::EXCEPTION
-        x = ApplicationException.new
-        x.read(@iprot)
-        @iprot.read_message_end
-        raise x
+    private
+
+    def write_message(name, type, args_class, args)
+      data = args_class.new
+      args.each do |k, v|
+        data.send("#{k}=", v)
       end
+      seqid = next_seqid! unless name.nil?
+
+      flush_result = begin
+        @oprot.write_message_begin(name, type, seqid) unless name.nil?
+        data.write(@oprot)
+        @oprot.write_message_end
+        @oprot.trans.flush
+      rescue StandardError
+        begin
+          @oprot.trans.close
+        rescue StandardError
+          # Preserve the original send error.
+        end
+        raise
+      end
+
+      type == MessageTypes::CALL ? @pending_seqids << seqid : flush_result
+    end
+
+    def next_seqid!
+      seqid = @seqid
+      @seqid = (seqid == MAX_SEQUENCE_ID) ? MIN_SEQUENCE_ID : seqid + 1
+      seqid
+    end
+
+    def dequeue_pending_seqid
+      @pending_seqids.shift
+    end
+
+    def raise_application_exception
+      x = ApplicationException.new
+      x.read(@iprot)
+      @iprot.read_message_end
+      raise x
     end
   end
 end

@@ -245,6 +245,10 @@ public:
     */
   void checkIdleBufferMemLimit(size_t readLimit, size_t writeLimit);
 
+  /// Grows the read buffer to at least target bytes by doubling; never shrinks.
+  /// Throws std::bad_alloc if the reallocation fails.
+  void growReadBuffer(uint32_t target);
+
   /// Initialize
   void init(TNonblockingIOThread* ioThread);
 
@@ -268,7 +272,22 @@ public:
    */
   static void eventHandler(evutil_socket_t fd, short /* which */, void* v) {
     assert(fd == static_cast<evutil_socket_t>(((TConnection*)v)->getTSocket()->getSocketFD()));
-    ((TConnection*)v)->workSocket();
+    auto* connection = (TConnection*)v;
+    // libevent is C: an exception unwinding out of this callback does not reach
+    // any handler, it reaches std::terminate. workSocket() and the transition()
+    // it drives can throw -- growing the read buffer for a frame the peer sized
+    // throws std::bad_alloc when the allocation fails -- so the boundary is
+    // where that has to stop. One connection cannot be served; the rest can.
+    try {
+      connection->workSocket();
+    } catch (const std::exception& x) {
+      TOutput::instance().printf("TNonblockingServer: %s while working the socket, closing connection.",
+                                 x.what());
+      connection->close();
+    } catch (...) {
+      TOutput::instance()("TNonblockingServer: unknown exception while working the socket, closing connection.");
+      connection->close();
+    }
   }
 
   /**
@@ -339,21 +358,23 @@ public:
         }
       }
     } catch (const TTransportException& ttx) {
-      GlobalOutput.printf("TNonblockingServer: client died: %s", ttx.what());
-    } catch (const std::bad_alloc&) {
-      GlobalOutput("TNonblockingServer: caught bad_alloc exception.");
-      exit(1);
+      TOutput::instance().printf("TNonblockingServer: client died: %s", ttx.what());
     } catch (const std::exception& x) {
-      GlobalOutput.printf("TNonblockingServer: process() exception: %s: %s",
+      // std::bad_alloc lands here too, and is no longer treated apart. It used
+      // to be answered with exit(1), which turned one request that could not be
+      // allocated -- a declared container count is enough to try one -- into
+      // the end of the process for every other client connected to it. The
+      // inline path in this same file has always just closed the connection.
+      TOutput::instance().printf("TNonblockingServer: process() exception: %s: %s",
                           typeid(x).name(),
                           x.what());
     } catch (...) {
-      GlobalOutput.printf("TNonblockingServer: unknown exception while processing.");
+      TOutput::instance().printf("TNonblockingServer: unknown exception while processing.");
     }
 
     // Signal completion back to the libevent thread via a pipe
     if (!connection_->notifyIOThread()) {
-      GlobalOutput.printf("TNonblockingServer: failed to notifyIOThread, closing.");
+      TOutput::instance().printf("TNonblockingServer: failed to notifyIOThread, closing.");
       connection_->server_->decrementActiveProcessors();
       connection_->close();
       throw TException("TNonblockingServer::Task::run: failed write on notify pipe");
@@ -447,7 +468,7 @@ void TNonblockingServer::TConnection::workSocket() {
         //In Nonblocking SSLSocket some operations need to be retried again.
         //Current approach is parsing exception message, but a better solution needs to be investigated.
         if(!strstr(te.what(), "retry")) {
-          GlobalOutput.printf("TConnection::workSocket(): %s", te.what());
+          TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
           close();
 
           return;
@@ -464,7 +485,7 @@ void TNonblockingServer::TConnection::workSocket() {
       if (readWant_ > server_->getMaxFrameSize()) {
         // Don't allow giant frame sizes.  This prevents bad clients from
         // causing us to try and allocate a giant buffer.
-        GlobalOutput.printf(
+        TOutput::instance().printf(
             "TNonblockingServer: frame size too large "
             "(%" PRIu32 " > %" PRIu64
             ") from client %s. "
@@ -472,6 +493,19 @@ void TNonblockingServer::TConnection::workSocket() {
             readWant_,
             (uint64_t)server_->getMaxFrameSize(),
             tSocket_->getSocketInfo().c_str());
+        close();
+        return;
+      }
+      // Refuse a frame the message-size budget cannot admit before the read
+      // buffer is grown for it. The accepted socket carries the server's
+      // configuration, so this bounds the allocation by the configured maximum
+      // message size, which may be tighter than the frame-size ceiling above.
+      // The check is stable across the life of the connection: the C++ socket
+      // budget gates each read and does not accumulate.
+      try {
+        tSocket_->checkReadBytesAvailable(readWant_);
+      } catch (const TTransportException& te) {
+        TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
         close();
         return;
       }
@@ -494,20 +528,31 @@ void TNonblockingServer::TConnection::workSocket() {
     case SOCKET_RECV:
       // It is an error to be in this state if we already have all the data
       if (!(readBufferPos_ < readWant_)) {
-        GlobalOutput.printf("TNonblockingServer: frame size too short");
+        TOutput::instance().printf("TNonblockingServer: frame size too short");
         close();
         return;
       }
 
       try {
-        // Read from the socket
-        fetch = readWant_ - readBufferPos_;
+        // Grow the read buffer toward the frame size only as far as the next
+        // read needs, so the reservation tracks the payload actually received
+        // rather than the size the peer declared. Request double the current
+        // size, capped at the frame size, which also keeps the multiply from
+        // overflowing. growReadBuffer() rounds up by doubling, so the buffer can
+        // still end up larger than the frame.
+        if (readBufferPos_ == readBufferSize_) {
+          growReadBuffer(readBufferSize_ > readWant_ / 2 ? readWant_ : readBufferSize_ * 2);
+        }
+        // Read from the socket, but never past the end of this frame: the buffer
+        // may be larger than the frame (see above, or kept from an earlier
+        // request), and bytes beyond readWant_ belong to the next frame.
+        fetch = (std::min)(readBufferSize_, readWant_) - readBufferPos_;
         got = tSocket_->read(readBuffer_ + readBufferPos_, fetch);
       } catch (TTransportException& te) {
         //In Nonblocking SSLSocket some operations need to be retried again.
         //Current approach is parsing exception message, but a better solution needs to be investigated.
         if(!strstr(te.what(), "retry")) {
-          GlobalOutput.printf("TConnection::workSocket(): %s", te.what());
+          TOutput::instance().printf("TConnection::workSocket(): %s", te.what());
           close();
         }
 
@@ -543,7 +588,7 @@ void TNonblockingServer::TConnection::workSocket() {
 
       // If there is no data to send, then let us move on
       if (writeBufferPos_ == writeBufferSize_) {
-        GlobalOutput("WARNING: Send state with no data to send");
+        TOutput::instance()("WARNING: Send state with no data to send");
         transition();
         return;
       }
@@ -552,7 +597,7 @@ void TNonblockingServer::TConnection::workSocket() {
         left = writeBufferSize_ - writeBufferPos_;
         sent = tSocket_->write_partial(writeBuffer_ + writeBufferPos_, left);
       } catch (TTransportException& te) {
-        GlobalOutput.printf("TConnection::workSocket(): %s ", te.what());
+        TOutput::instance().printf("TConnection::workSocket(): %s ", te.what());
         close();
         return;
       }
@@ -570,7 +615,7 @@ void TNonblockingServer::TConnection::workSocket() {
       return;
 
     default:
-      GlobalOutput.printf("Unexpected Socket State %d", socketState_);
+      TOutput::instance().printf("Unexpected Socket State %d", socketState_);
       assert(0);
       return;
     }
@@ -602,11 +647,15 @@ void TNonblockingServer::TConnection::transition() {
     // and get back some data from the dispatch function
     if (server_->getHeaderTransport()) {
       inputTransport_->resetBuffer(readBuffer_, readBufferPos_);
+      inputTransport_->bindMessageSizeToBuffer();
       outputTransport_->resetBuffer();
     } else {
       // We saved room for the framing size in case header transport needed it,
       // but just skip it for the non-header case
       inputTransport_->resetBuffer(readBuffer_ + 4, readBufferPos_ - 4);
+      // The frame is already off; what is left is exactly one message, and the
+      // protocol should not be allowed to size anything beyond it.
+      inputTransport_->bindMessageSizeToBuffer();
       outputTransport_->resetBuffer();
 
       // Prepend four bytes of blank space to the buffer so we can
@@ -635,11 +684,11 @@ void TNonblockingServer::TConnection::transition() {
         server_->addTask(task);
       } catch (IllegalStateException& ise) {
         // The ThreadManager is not ready to handle any more tasks (it's probably shutting down).
-        GlobalOutput.printf("IllegalStateException: Server::process() %s", ise.what());
+        TOutput::instance().printf("IllegalStateException: Server::process() %s", ise.what());
         server_->decrementActiveProcessors();
         close();
       } catch (TimedOutException& to) {
-        GlobalOutput.printf("[ERROR] TimedOutException: Server::process() %s", to.what());
+        TOutput::instance().printf("[ERROR] TimedOutException: Server::process() %s", to.what());
         server_->decrementActiveProcessors();
         close();
       }
@@ -653,7 +702,7 @@ void TNonblockingServer::TConnection::transition() {
         // Invoke the processor
         processor_->process(inputProtocol_, outputProtocol_, connectionContext_);
       } catch (const TTransportException& ttx) {
-        GlobalOutput.printf(
+        TOutput::instance().printf(
             "TNonblockingServer transport error in "
             "process(): %s",
             ttx.what());
@@ -661,14 +710,14 @@ void TNonblockingServer::TConnection::transition() {
         close();
         return;
       } catch (const std::exception& x) {
-        GlobalOutput.printf("Server::process() uncaught exception: %s: %s",
+        TOutput::instance().printf("Server::process() uncaught exception: %s: %s",
                             typeid(x).name(),
                             x.what());
         server_->decrementActiveProcessors();
         close();
         return;
       } catch (...) {
-        GlobalOutput.printf("Server::process() unknown exception");
+        TOutput::instance().printf("Server::process() unknown exception");
         server_->decrementActiveProcessors();
         close();
         return;
@@ -749,25 +798,19 @@ void TNonblockingServer::TConnection::transition() {
   case APP_READ_FRAME_SIZE:
     readWant_ += 4;
 
-    // We just read the request length
-    // Double the buffer size until it is big enough
-    if (readWant_ > readBufferSize_) {
-      if (readBufferSize_ == 0) {
-        readBufferSize_ = 1;
-      }
-      uint32_t newSize = readBufferSize_;
-      while (readWant_ > newSize) {
-        newSize *= 2;
-      }
-
-      auto* newBuffer = (uint8_t*)std::realloc(readBuffer_, newSize);
-      if (newBuffer == nullptr) {
-        // nothing else to be done...
-        throw std::bad_alloc();
-      }
-      readBuffer_ = newBuffer;
-      readBufferSize_ = newSize;
-    }
+    // We just read the request length. Reserve only enough to hold the 4-byte
+    // length prefix and begin reading; the buffer grows toward readWant_ in
+    // SOCKET_RECV as the payload arrives, so a peer that declares a large frame
+    // and sends no payload does not make the server reserve the whole frame.
+    //
+    // The initial kilobyte deliberately equals IDLE_READ_BUFFER_LIMIT: a
+    // connection that only ever carries small frames settles at exactly the
+    // size an idle connection is permitted to keep, so checkIdleBufferMemLimit()
+    // never frees and regrows it between requests. Keep this a small fixed
+    // constant -- do not derive it from a configurable idle limit, or raising
+    // that limit would push every connection back to reserving large buffers on
+    // the header, which is the amplification this change exists to remove.
+    growReadBuffer((std::min)(readWant_, static_cast<uint32_t>(1024)));
 
     readBufferPos_ = 4;
     *((uint32_t*)readBuffer_) = htonl(readWant_ - 4);
@@ -784,7 +827,7 @@ void TNonblockingServer::TConnection::transition() {
     return;
 
   default:
-    GlobalOutput.printf("Unexpected Application State %d", appState_);
+    TOutput::instance().printf("Unexpected Application State %d", appState_);
     assert(0);
   }
 }
@@ -797,7 +840,7 @@ void TNonblockingServer::TConnection::setFlags(short eventFlags) {
 
   // Delete a previously existing event
   if (eventFlags_ && event_del(&event_) == -1) {
-    GlobalOutput.perror("TConnection::setFlags() event_del", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TConnection::setFlags() event_del", THRIFT_GET_SOCKET_ERROR);
     return;
   }
 
@@ -841,7 +884,7 @@ void TNonblockingServer::TConnection::setFlags(short eventFlags) {
 
   // Add the event
   if (event_add(&event_, nullptr) == -1) {
-    GlobalOutput.perror("TConnection::setFlags(): could not event_add", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TConnection::setFlags(): could not event_add", THRIFT_GET_SOCKET_ERROR);
   }
 }
 
@@ -882,6 +925,31 @@ void TNonblockingServer::TConnection::checkIdleBufferMemLimit(size_t readLimit, 
     outputTransport_->resetBuffer(static_cast<uint32_t>(server_->getWriteBufferDefaultSize()));
     largestWriteBufferSize_ = 0;
   }
+}
+
+void TNonblockingServer::TConnection::growReadBuffer(uint32_t target) {
+  if (target <= readBufferSize_) {
+    return;
+  }
+  uint32_t newSize = readBufferSize_ ? readBufferSize_ : 1;
+  while (newSize < target) {
+    uint32_t doubled = newSize * 2;
+    if (doubled <= newSize) {
+      // The next doubling would overflow uint32_t. target is itself a valid
+      // uint32_t (bounded by the frame size), so stop doubling and allocate
+      // exactly what is needed rather than wrapping to a smaller size.
+      newSize = target;
+      break;
+    }
+    newSize = doubled;
+  }
+  auto* newBuffer = (uint8_t*)std::realloc(readBuffer_, newSize);
+  if (newBuffer == nullptr) {
+    // nothing else to be done...
+    throw std::bad_alloc();
+  }
+  readBuffer_ = newBuffer;
+  readBufferSize_ = newSize;
 }
 
 TNonblockingServer::~TNonblockingServer() {
@@ -988,7 +1056,7 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
 
     // Fail fast if we could not create a TConnection object
     if (clientConnection == nullptr) {
-      GlobalOutput.printf("thriftServerEventHandler: failed TConnection factory");
+      TOutput::instance().printf("thriftServerEventHandler: failed TConnection factory");
       clientSocket->close();
       return;
     }
@@ -1009,7 +1077,7 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
       clientConnection->transition();
     } else {
       if (!clientConnection->notifyIOThread()) {
-        GlobalOutput.perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
+        TOutput::instance().perror("[ERROR] notifyIOThread failed on fresh connection, closing", errno);
         clientConnection->close();
       }
     }
@@ -1020,6 +1088,9 @@ void TNonblockingServer::handleEvent(THRIFT_SOCKET fd, short which) {
  * Creates a socket to listen on and binds it to the local port.
  */
 void TNonblockingServer::createAndListenOnSocket() {
+  // Ensure every socket the server transport accepts is handed the server's
+  // configuration, even when the caller never called setConfiguration().
+  serverTransport_->setConfiguration(config_);
   serverTransport_->listen();
   serverSocket_ = serverTransport_->getSocketFD();
 }
@@ -1042,13 +1113,13 @@ bool TNonblockingServer::serverOverloaded() {
   size_t activeConnections = numTConnections_ - connectionStack_.size();
   if (numActiveProcessors_ > maxActiveProcessors_ || activeConnections > maxConnections_) {
     if (!overloaded_) {
-      GlobalOutput.printf("TNonblockingServer: overload condition begun.");
+      TOutput::instance().printf("TNonblockingServer: overload condition begun.");
       overloaded_ = true;
     }
   } else {
     if (overloaded_ && (numActiveProcessors_ <= overloadHysteresis_ * maxActiveProcessors_)
         && (activeConnections <= overloadHysteresis_ * maxConnections_)) {
-      GlobalOutput.printf(
+      TOutput::instance().printf(
           "TNonblockingServer: overload ended; "
           "%u dropped (%llu total)",
           nConnectionsDropped_,
@@ -1121,7 +1192,7 @@ void TNonblockingServer::registerEvents(event_base* user_event_base) {
   assert(ioThreads_.size() == numIOThreads_);
   assert(ioThreads_.size() > 0);
 
-  GlobalOutput.printf("TNonblockingServer: Serving with %d io threads.",
+  TOutput::instance().printf("TNonblockingServer: Serving with %d io threads.",
                       ioThreads_.size());
 
   // Launch all the secondary IO threads in separate threads
@@ -1160,7 +1231,7 @@ void TNonblockingServer::serve() {
   // Ensure all threads are finished before exiting serve()
   for (uint32_t i = 0; i < ioThreads_.size(); ++i) {
     ioThreads_[i]->join();
-    GlobalOutput.printf("TNonblocking: join done for IO thread #%d", i);
+    TOutput::instance().printf("TNonblocking: join done for IO thread #%d", i);
   }
 }
 
@@ -1192,7 +1263,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
 
   if (listenSocket_ != THRIFT_INVALID_SOCKET) {
     if (0 != ::THRIFT_CLOSESOCKET(listenSocket_)) {
-      GlobalOutput.perror("TNonblockingIOThread listenSocket_ close(): ", THRIFT_GET_SOCKET_ERROR);
+      TOutput::instance().perror("TNonblockingIOThread listenSocket_ close(): ", THRIFT_GET_SOCKET_ERROR);
     }
     listenSocket_ = THRIFT_INVALID_SOCKET;
   }
@@ -1200,7 +1271,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
   for (auto notificationPipeFD : notificationPipeFDs_) {
     if (notificationPipeFD >= 0) {
       if (0 != ::THRIFT_CLOSESOCKET(notificationPipeFD)) {
-        GlobalOutput.perror("TNonblockingIOThread notificationPipe close(): ",
+        TOutput::instance().perror("TNonblockingIOThread notificationPipe close(): ",
                             THRIFT_GET_SOCKET_ERROR);
       }
       notificationPipeFD = THRIFT_INVALID_SOCKET;
@@ -1210,7 +1281,7 @@ TNonblockingIOThread::~TNonblockingIOThread() {
 
 void TNonblockingIOThread::createNotificationPipe() {
   if (evutil_socketpair(AF_LOCAL, SOCK_STREAM, 0, notificationPipeFDs_) == -1) {
-    GlobalOutput.perror("TNonblockingServer::createNotificationPipe ", EVUTIL_SOCKET_ERROR());
+    TOutput::instance().perror("TNonblockingServer::createNotificationPipe ", EVUTIL_SOCKET_ERROR());
     throw TException("can't create notification pipe");
   }
   if (evutil_make_socket_nonblocking(notificationPipeFDs_[0]) < 0
@@ -1251,7 +1322,7 @@ void TNonblockingIOThread::registerEvents() {
 
   // Print some libevent stats
   if (number_ == 0) {
-    GlobalOutput.printf("TNonblockingServer: using libevent %s method %s",
+    TOutput::instance().printf("TNonblockingServer: using libevent %s method %s",
                         event_get_version(),
                         event_base_get_method(eventBase_));
   }
@@ -1271,7 +1342,7 @@ void TNonblockingIOThread::registerEvents() {
           "TNonblockingServer::serve(): "
           "event_add() failed on server listen event");
     }
-    GlobalOutput.printf("TNonblocking: IO thread #%d registered for listen.", number_);
+    TOutput::instance().printf("TNonblocking: IO thread #%d registered for listen.", number_);
   }
 
   createNotificationPipe();
@@ -1292,7 +1363,7 @@ void TNonblockingIOThread::registerEvents() {
         "TNonblockingServer::serve(): "
         "event_add() failed on task-done notification event");
   }
-  GlobalOutput.printf("TNonblocking: IO thread #%d registered for notify.", number_);
+  TOutput::instance().printf("TNonblocking: IO thread #%d registered for notify.", number_);
 }
 
 bool TNonblockingIOThread::notify(TNonblockingServer::TConnection* conn) {
@@ -1393,21 +1464,31 @@ void TNonblockingIOThread::notifyHandler(evutil_socket_t fd, short which, void* 
         ioThread->breakLoop(false);
         return;
       }
-      connection->transition();
+      // Same boundary as eventHandler(): this is a libevent callback too.
+      try {
+        connection->transition();
+      } catch (const std::exception& x) {
+        TOutput::instance().printf("TNonblockingServer: %s in notifyHandler, closing connection.",
+                                   x.what());
+        connection->close();
+      } catch (...) {
+        TOutput::instance()("TNonblockingServer: unknown exception in notifyHandler, closing connection.");
+        connection->close();
+      }
     } else if (nBytes > 0) {
       // throw away these bytes and hope that next time we get a solid read
-      GlobalOutput.printf("notifyHandler: Bad read of %d bytes, wanted %d", nBytes, kSize);
+      TOutput::instance().printf("notifyHandler: Bad read of %d bytes, wanted %d", nBytes, kSize);
       ioThread->breakLoop(true);
       return;
     } else if (nBytes == 0) {
-      GlobalOutput.printf("notifyHandler: Notify socket closed!");
+      TOutput::instance().printf("notifyHandler: Notify socket closed!");
       ioThread->breakLoop(false);
       // exit the loop
       break;
     } else { // nBytes < 0
       if (THRIFT_GET_SOCKET_ERROR != THRIFT_EWOULDBLOCK
           && THRIFT_GET_SOCKET_ERROR != THRIFT_EAGAIN) {
-        GlobalOutput.perror("TNonblocking: notifyHandler read() failed: ", THRIFT_GET_SOCKET_ERROR);
+        TOutput::instance().perror("TNonblocking: notifyHandler read() failed: ", THRIFT_GET_SOCKET_ERROR);
         ioThread->breakLoop(true);
         return;
       }
@@ -1419,10 +1500,10 @@ void TNonblockingIOThread::notifyHandler(evutil_socket_t fd, short which, void* 
 
 void TNonblockingIOThread::breakLoop(bool error) {
   if (error) {
-    GlobalOutput.printf("TNonblockingServer: IO thread #%d exiting with error.", number_);
+    TOutput::instance().printf("TNonblockingServer: IO thread #%d exiting with error.", number_);
     // TODO: figure out something better to do here, but for now kill the
     // whole process.
-    GlobalOutput.printf("TNonblockingServer: aborting process.");
+    TOutput::instance().printf("TNonblockingServer: aborting process.");
     ::abort();
   }
 
@@ -1458,9 +1539,9 @@ void TNonblockingIOThread::setCurrentThreadHighPriority(bool value) {
 
   // Actually set the sched params for the current thread.
   if (0 == pthread_setschedparam(pthread_self(), policy, &sp)) {
-    GlobalOutput.printf("TNonblocking: IO Thread #%d using high-priority scheduler!", number_);
+    TOutput::instance().printf("TNonblocking: IO Thread #%d using high-priority scheduler!", number_);
   } else {
-    GlobalOutput.perror("TNonblocking: pthread_setschedparam(): ", THRIFT_GET_SOCKET_ERROR);
+    TOutput::instance().perror("TNonblocking: pthread_setschedparam(): ", THRIFT_GET_SOCKET_ERROR);
   }
 #else
   THRIFT_UNUSED_VARIABLE(value);
@@ -1477,7 +1558,7 @@ void TNonblockingIOThread::run() {
 
   if (eventBase_ != nullptr)
   {
-    GlobalOutput.printf("TNonblockingServer: IO thread #%d entering loop...", number_);
+    TOutput::instance().printf("TNonblockingServer: IO thread #%d entering loop...", number_);
     // Run libevent engine, never returns, invokes calls to eventHandler
     event_base_loop(eventBase_, 0);
 
@@ -1489,14 +1570,14 @@ void TNonblockingIOThread::run() {
     cleanupEvents();
   }
 
-  GlobalOutput.printf("TNonblockingServer: IO thread #%d run() done!", number_);
+  TOutput::instance().printf("TNonblockingServer: IO thread #%d run() done!", number_);
 }
 
 void TNonblockingIOThread::cleanupEvents() {
   // stop the listen socket, if any
   if (listenSocket_ != THRIFT_INVALID_SOCKET) {
     if (event_del(&serverEvent_) == -1) {
-      GlobalOutput.perror("TNonblockingIOThread::stop() event_del: ", THRIFT_GET_SOCKET_ERROR);
+      TOutput::instance().perror("TNonblockingIOThread::stop() event_del: ", THRIFT_GET_SOCKET_ERROR);
     }
   }
 

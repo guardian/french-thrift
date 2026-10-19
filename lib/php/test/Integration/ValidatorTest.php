@@ -19,13 +19,15 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Integration;
 
 /***
  * This test suite depends on running the compiler against the ./Resources/ThriftTest.thrift file:
  * lib/php/test$ ../../../compiler/cpp/thrift --gen php:validate,nsglobal="Validate" -r  --out ./Resources/packages/phpv ./Resources/ThriftTest.thrift
  */
-class ValidatorTest extends BaseValidatorTest
+class ValidatorTest extends AbstractValidatorTestCase
 {
     public function getNsGlobal()
     {

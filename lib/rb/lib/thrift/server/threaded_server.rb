@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -17,35 +18,38 @@
 # under the License.
 #
 
-require 'thread'
+require "thread"
 
 module Thrift
   class ThreadedServer < BaseServer
     def serve
-      begin
-        @server_transport.listen
-        loop do
+      @server_transport.listen
+      loop do
+        begin
           client = @server_transport.accept
-          trans = @transport_factory.get_transport(client)
-          prot = @protocol_factory.get_protocol(trans)
-          Thread.new(prot, trans) do |p, t|
-            begin
-              loop do
-                @processor.process(p, p)
-              end
-            rescue Thrift::TransportException, Thrift::ProtocolException
-            ensure
-              t.close
-            end
-          end
+        rescue Errno::ECONNRESET, Errno::EPIPE
+          next
+        rescue => e
+          next if defined?(OpenSSL::SSL::SSLError) && e.is_a?(OpenSSL::SSL::SSLError)
+          raise
         end
-      ensure
-        @server_transport.close
+        trans = @transport_factory.get_transport(client)
+        prot = @protocol_factory.get_protocol(trans)
+        Thread.new(prot, trans) do |p, t|
+          loop do
+            @processor.process(p, p)
+          end
+        rescue Thrift::TransportException, Thrift::ProtocolException
+        ensure
+          t.close
+        end
       end
+    ensure
+      @server_transport.close
     end
-    
+
     def to_s
-      "threaded(#{super.to_s})"
+      "threaded(#{super})"
     end
   end
 end

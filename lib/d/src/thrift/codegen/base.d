@@ -109,7 +109,7 @@ struct TFieldMeta {
   /// The (Thrift) id of the field.
   short id;
 
-  /// Whether the field is requried.
+  /// Whether the field is required.
   TReq req;
 
   /// A code string containing a D expression for the default value, if there
@@ -125,7 +125,7 @@ struct TMethodMeta {
   /// method during code generation.
   string name;
 
-  /// Meta information for the parameteres.
+  /// Meta information for the parameters.
   TParamMeta[] params;
 
   /// Specifies which exceptions can be thrown by the method. All other
@@ -508,7 +508,7 @@ mixin template TStructHelpers(alias fieldMetaData = cast(TFieldMeta[])null) if (
 }
 
 // DMD @@BUG@@: Having this inside TStructHelpers leads to weird lookup errors
-// (e.g. for std.arry.empty).
+// (e.g. for std.array.empty).
 string thriftFieldInitCode(alias fieldMeta)(string thisName) {
   string code = "";
   foreach (field; fieldMeta) {
@@ -588,12 +588,14 @@ template TIsSetFlags(T, alias fieldMetaData) {
  * internally (combined with TPResultStruct) and usually should not be used in
  * user code.
  *
- * This is a free function to make it possible to read exisiting structs from
+ * This is a free function to make it possible to read existing structs from
  * the wire without altering their definitions.
  */
 void readStruct(T, Protocol, alias fieldMetaData = cast(TFieldMeta[])null,
   bool pointerStruct = false)(auto ref T s, Protocol p) if (isTProtocol!Protocol)
 {
+  incrementRecursionDepth();
+  scope(exit) decrementRecursionDepth();
   mixin({
     string code;
 
@@ -635,12 +637,19 @@ void readStruct(T, Protocol, alias fieldMetaData = cast(TFieldMeta[])null,
       } else static if (is(F == enum)) {
         return v ~ " = cast(typeof(" ~ v ~ "))p.readI32();";
       } else static if (is(F _ : E[], E)) {
+        // The element count is read before any element, so a peer can name a count it never backs
+        // with data. Reserve an initial capacity capped at 1024 rather than the raw count and
+        // append each element; the array still ends with every element read, and larger lists grow
+        // as elements are added. readListBegin() has already rejected a negative size.
         return "{\n" ~
           "auto " ~ list ~ " = p.readListBegin();\n" ~
           // TODO: Check element type here?
-          v ~ " = new typeof(" ~ v ~ "[0])[" ~ list ~ ".size];\n" ~
+          v ~ " = typeof(" ~ v ~ ").init;\n" ~
+          v ~ ".reserve(" ~ list ~ ".size < 1024 ? " ~ list ~ ".size : 1024);\n" ~
           "foreach (" ~ i ~ "; 0 .. " ~ list ~ ".size) {\n" ~
-            readValueCode!E(v ~ "[" ~ i ~ "]", level + 1) ~ "\n" ~
+            "typeof(" ~ v ~ "[0]) " ~ elem ~ ";\n" ~
+            readValueCode!E(elem, level + 1) ~ "\n" ~
+            v ~ " ~= " ~ elem ~ ";\n" ~
           "}\n" ~
           "p.readListEnd();\n" ~
         "}";
@@ -781,7 +790,7 @@ void readStruct(T, Protocol, alias fieldMetaData = cast(TFieldMeta[])null,
  * internally (combined with TPargsStruct) and usually should not be used in
  * user code.
  *
- * This is a free function to make it possible to read exisiting structs from
+ * This is a free function to make it possible to read existing structs from
  * the wire without altering their definitions.
  */
 void writeStruct(T, Protocol, alias fieldMetaData = cast(TFieldMeta[])null,
@@ -812,6 +821,9 @@ void writeStruct(T, Protocol, alias fieldMetaData = cast(TFieldMeta[])null,
 
     return code;
   }());
+
+  incrementRecursionDepth();
+  scope(exit) decrementRecursionDepth();
 
   p.writeStructBegin(TStruct(T.stringof));
   mixin({
@@ -982,6 +994,238 @@ unittest {
   assert(a.toHash() == b.toHash());
 }
 
+// Recursion depth limiting, exercised through a full struct read/write
+// round-trip rather than by poking the depth counter in isolation.
+//
+// RecTree mirrors test/Recursive.thrift: it nests through a list, which is the
+// only form of struct recursion expressible in D (the CoRec/CoRec2/RecList
+// types in that file recurse by value and cannot be represented as D structs at
+// all). A cyclic *object* graph is likewise unconstructible with value structs;
+// the equivalent threat -- an arbitrarily deep *wire* payload -- is covered by
+// the crafted read below.
+unittest {
+  import std.exception : collectException;
+  import thrift.protocol.binary : tBinaryProtocol;
+  import thrift.transport.memory : TMemoryBuffer;
+
+  static struct RecTree {
+    RecTree[] children;
+    short item;
+    mixin TStructHelpers!([
+      TFieldMeta("children", 1, TReq.OPTIONAL),
+      TFieldMeta("item", 2, TReq.OPTIONAL),
+    ]);
+  }
+
+  // A linear chain exactly `depth` structs deep (each node holds one child).
+  RecTree makeChain(uint depth) {
+    RecTree node;
+    node.item = cast(short)depth;
+    if (depth > 1) node.children = [makeChain(depth - 1)];
+    return node;
+  }
+
+  // Serialize / deserialize through the generated write()/read() path, which
+  // forwards to writeStruct/readStruct.
+  ubyte[] writeTree(ref RecTree tree) {
+    auto buf = new TMemoryBuffer();
+    tree.write(tBinaryProtocol(buf));
+    return buf.getContents().dup;
+  }
+  void readTree(in ubyte[] bytes) {
+    auto buf = new TMemoryBuffer(bytes);
+    RecTree tree;
+    tree.read(tBinaryProtocol(buf));
+  }
+
+  // Keep the test hermetic with respect to the thread-local counter.
+  uint savedDepth = currentRecursionDepth_;
+  scope(exit) currentRecursionDepth_ = savedDepth;
+  currentRecursionDepth_ = 0;
+
+  // A chain exactly at the limit round-trips (off-by-one guard).
+  {
+    auto tree = makeChain(DEFAULT_MAX_RECURSION_DEPTH);
+    readTree(writeTree(tree));
+    assert(currentRecursionDepth_ == 0, "counter must unwind to 0");
+  }
+
+  // Writing a chain one level over the limit is rejected with DEPTH_LIMIT.
+  {
+    auto tree = makeChain(DEFAULT_MAX_RECURSION_DEPTH + 1);
+    auto ex = collectException!TProtocolException(writeTree(tree));
+    assert(ex !is null, "writing past the limit must throw");
+    assert(ex.type == TProtocolException.Type.DEPTH_LIMIT);
+    // The scope(exit) decrements must have unwound the counter on the way out.
+    assert(currentRecursionDepth_ == 0, "counter must unwind after a throw");
+  }
+
+  // Reading a too-deep payload is likewise rejected. A normal write() of an
+  // over-limit chain would itself be rejected, so craft the payload with raw
+  // protocol primitives, bypassing the counter. Field id 1 / TType.LIST matches
+  // RecTree.children, so the reader recurses through readStruct rather than
+  // through skip(); the skip() path is covered on its own below.
+  {
+    auto buf = new TMemoryBuffer();
+    auto p = tBinaryProtocol(buf);
+    void emit(uint d) {
+      p.writeStructBegin(TStruct("RecTree"));
+      if (d > 1) {
+        p.writeFieldBegin(TField("children", TType.LIST, 1));
+        p.writeListBegin(TList(TType.STRUCT, 1));
+        emit(d - 1);
+        p.writeListEnd();
+        p.writeFieldEnd();
+      }
+      p.writeFieldStop();
+      p.writeStructEnd();
+    }
+    emit(DEFAULT_MAX_RECURSION_DEPTH + 1);
+
+    auto ex = collectException!TProtocolException(readTree(buf.getContents().dup));
+    assert(ex !is null, "reading past the limit must throw");
+    assert(ex.type == TProtocolException.Type.DEPTH_LIMIT);
+  }
+
+  // Decrement regression guard: a wide, shallow tree whose total struct count
+  // far exceeds the limit must still round-trip. This only holds if the counter
+  // is decremented after each sibling unwinds back to depth 1.
+  {
+    RecTree wide;
+    foreach (i; 0 .. DEFAULT_MAX_RECURSION_DEPTH * 3) {
+      RecTree child;
+      child.item = cast(short)i;
+      wide.children ~= child;
+    }
+    readTree(writeTree(wide));
+    assert(currentRecursionDepth_ == 0, "counter must unwind to 0");
+  }
+
+  // readStruct and skip() draw on one shared budget, so the depth they reach
+  // adds up. RecTree has no field 99, so the generated reader hands that field
+  // to skip() from inside the already-counted readStruct: a chain of
+  // limit - 1 structs below it still fits, one more does not.
+  {
+    ubyte[] unknownFieldChain(uint chainDepth) {
+      auto buf = new TMemoryBuffer();
+      auto p = tBinaryProtocol(buf);
+      void emitChain(uint d) {
+        p.writeStructBegin(TStruct("Chain"));
+        if (d > 1) {
+          p.writeFieldBegin(TField("next", TType.STRUCT, 1));
+          emitChain(d - 1);
+          p.writeFieldEnd();
+        }
+        p.writeFieldStop();
+        p.writeStructEnd();
+      }
+
+      p.writeStructBegin(TStruct("RecTree"));
+      p.writeFieldBegin(TField("unknown", TType.STRUCT, 99));
+      emitChain(chainDepth);
+      p.writeFieldEnd();
+      p.writeFieldStop();
+      p.writeStructEnd();
+      return buf.getContents().dup;
+    }
+
+    readTree(unknownFieldChain(DEFAULT_MAX_RECURSION_DEPTH - 1));
+    assert(currentRecursionDepth_ == 0, "counter must unwind to 0");
+
+    auto ex = collectException!TProtocolException(
+      readTree(unknownFieldChain(DEFAULT_MAX_RECURSION_DEPTH)));
+    assert(ex !is null, "skipping past the shared limit must throw");
+    assert(ex.type == TProtocolException.Type.DEPTH_LIMIT);
+    assert(currentRecursionDepth_ == 0, "counter must unwind after a throw");
+  }
+}
+
+// The recursion guard applies to exceptions as well: a generated Thrift
+// exception is a `class : TException` carrying the same `mixin TStructHelpers`,
+// so its read()/write() forward to the same guarded readStruct/writeStruct as a
+// struct. (Thrift unions generate as plain structs in D, so the struct case
+// above already covers them.) RecError nests through a list for the same reason
+// RecTree does -- a by-value self-reference is not expressible as a D aggregate.
+unittest {
+  import std.exception : collectException;
+  import thrift.protocol.binary : tBinaryProtocol;
+  import thrift.transport.memory : TMemoryBuffer;
+
+  static class RecError : TException {
+    RecError[] children;
+    short item;
+    mixin TStructHelpers!([
+      TFieldMeta("children", 1, TReq.OPTIONAL),
+      TFieldMeta("item", 2, TReq.OPTIONAL),
+    ]);
+  }
+
+  RecError makeChain(uint depth) {
+    auto node = new RecError();
+    node.item = cast(short)depth;
+    if (depth > 1) node.children = [makeChain(depth - 1)];
+    return node;
+  }
+
+  ubyte[] writeError(RecError err) {
+    auto buf = new TMemoryBuffer();
+    err.write(tBinaryProtocol(buf));
+    return buf.getContents().dup;
+  }
+  void readError(in ubyte[] bytes) {
+    auto buf = new TMemoryBuffer(bytes);
+    auto err = new RecError();
+    err.read(tBinaryProtocol(buf));
+  }
+
+  // Keep the test hermetic with respect to the thread-local counter.
+  uint savedDepth = currentRecursionDepth_;
+  scope(exit) currentRecursionDepth_ = savedDepth;
+  currentRecursionDepth_ = 0;
+
+  // A chain exactly at the limit round-trips (off-by-one / no double-count).
+  {
+    auto err = makeChain(DEFAULT_MAX_RECURSION_DEPTH);
+    readError(writeError(err));
+    assert(currentRecursionDepth_ == 0, "counter must unwind to 0");
+  }
+
+  // Writing a chain one level over the limit is rejected with DEPTH_LIMIT.
+  {
+    auto err = makeChain(DEFAULT_MAX_RECURSION_DEPTH + 1);
+    auto ex = collectException!TProtocolException(writeError(err));
+    assert(ex !is null, "writing past the limit must throw");
+    assert(ex.type == TProtocolException.Type.DEPTH_LIMIT);
+    assert(currentRecursionDepth_ == 0, "counter must unwind after a throw");
+  }
+
+  // Reading a too-deep payload is likewise rejected. A normal write() of an
+  // over-limit chain would itself be rejected, so craft the payload with raw
+  // protocol primitives. Field id 1 / TType.LIST matches RecError.children, so
+  // the reader recurses through readStruct rather than through skip().
+  {
+    auto buf = new TMemoryBuffer();
+    auto p = tBinaryProtocol(buf);
+    void emit(uint d) {
+      p.writeStructBegin(TStruct("RecError"));
+      if (d > 1) {
+        p.writeFieldBegin(TField("children", TType.LIST, 1));
+        p.writeListBegin(TList(TType.STRUCT, 1));
+        emit(d - 1);
+        p.writeListEnd();
+        p.writeFieldEnd();
+      }
+      p.writeFieldStop();
+      p.writeStructEnd();
+    }
+    emit(DEFAULT_MAX_RECURSION_DEPTH + 1);
+
+    auto ex = collectException!TProtocolException(readError(buf.getContents().dup));
+    assert(ex !is null, "reading past the limit must throw");
+    assert(ex.type == TProtocolException.Type.DEPTH_LIMIT);
+  }
+}
+
 private {
   /*
    * Returns a D code string containing the matching TType value for a passed
@@ -1018,4 +1262,38 @@ private {
       static assert(false, "Cannot represent type in Thrift: " ~ T.stringof);
     }
   }
+}
+
+version (unittest) {
+  private struct ContainerPreallocTestStruct {
+    int[] items;
+    string[] names;
+    mixin TStructHelpers!([TFieldMeta("items", 1), TFieldMeta("names", 2)]);
+  }
+}
+
+// A container declares its element count before any of its elements, so a peer can name a count it
+// never backs with data. The generated read code caps the initial reservation at 1024 rather than
+// trusting the count; a container larger than the cap must still round-trip in full, since the cap
+// bounds only the up-front reservation and not the number of elements read.
+unittest {
+  import thrift.protocol.binary;
+  import thrift.transport.memory;
+  import thrift.transport.range;
+
+  auto buf = new TMemoryBuffer;
+  auto a = ContainerPreallocTestStruct();
+  foreach (i; 0 .. 3000) {
+    a.items ~= i;
+    a.names ~= "n";
+  }
+  a.write(tBinaryProtocol(buf));
+
+  auto readBuf = tInputRangeTransport(buf.getContents().dup);
+  auto b = ContainerPreallocTestStruct();
+  b.read(tBinaryProtocol(readBuf));
+
+  assert(b.items.length == 3000, "list larger than the prealloc cap was truncated");
+  assert(b.names.length == 3000, "list larger than the prealloc cap was truncated");
+  foreach (i; 0 .. 3000) assert(b.items[i] == i);
 }

@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,23 +7,23 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 # this require is to make generated struct definitions happy
-require 'set'
+require "set"
+require "thrift/exceptions"
 
 module Thrift
   class ProtocolException < Exception
-
     UNKNOWN = 0
     INVALID_DATA = 1
     NEGATIVE_SIZE = 2
@@ -33,13 +34,21 @@ module Thrift
 
     attr_reader :type
 
-    def initialize(type=UNKNOWN, message=nil)
+    def initialize(type = UNKNOWN, message = nil)
       super(message)
       @type = type
     end
   end
 
   class BaseProtocol
+    MAX_CONTAINER_SIZE = (1 << 31) - 1
+
+    # The longest string or binary field BinaryProtocol and CompactProtocol read
+    # by default: the frame size limit the framed transports apply. A string's
+    # length is the read size handed to the transport, and an unframed transport
+    # has no frame to bound it. Pass max_string_size: nil to read strings of any
+    # length.
+    DEFAULT_MAX_STRING_SIZE = 16_384_000
 
     attr_reader :trans
 
@@ -48,8 +57,22 @@ module Thrift
     end
 
     def native?
-      puts "wrong method is being called!"
       false
+    end
+
+    # Raises a SIZE_LIMIT ProtocolException when a declared string length is over
+    # the protocol's max_string_size.
+    def check_string_size(size)
+      max = @max_string_size
+      return if max.nil? || size <= max
+
+      raise ProtocolException.new(ProtocolException::SIZE_LIMIT, "String size #{size} larger than the maximum #{max}")
+    end
+
+    def self.validate_max_string_size(max_string_size)
+      return if max_string_size.nil? || (max_string_size.is_a?(Integer) && max_string_size > 0)
+
+      raise ArgumentError, "max_string_size must be nil or a positive Integer"
     end
 
     def write_message_begin(name, type, seqid)
@@ -116,7 +139,7 @@ module Thrift
       raise NotImplementedError
     end
 
-    # Writes a Thrift String. In Ruby 1.9+, the String passed will be transcoded to UTF-8.
+    # Writes a Thrift String. The String passed will be transcoded to UTF-8.
     #
     # str - The String to write.
     #
@@ -127,13 +150,22 @@ module Thrift
       raise NotImplementedError
     end
 
-    # Writes a Thrift Binary (Thrift String with no encoding). In Ruby 1.9+, the String passed
+    # Writes a Thrift Binary (Thrift String with no encoding). The String passed
     # will forced into BINARY encoding.
     #
     # buf - The String to write.
     #
     # Returns nothing.
     def write_binary(buf)
+      raise NotImplementedError
+    end
+
+    # Writes a UUID as 16 bytes.
+    #
+    # uuid - The UUID string to write (e.g. "550e8400-e29b-41d4-a716-446655440000").
+    #
+    # Returns nothing.
+    def write_uuid(uuid)
       raise NotImplementedError
     end
 
@@ -197,19 +229,30 @@ module Thrift
       raise NotImplementedError
     end
 
-    # Reads a Thrift String. In Ruby 1.9+, all Strings will be returned with an Encoding of UTF-8.
+    # Reads a Thrift String. All Strings will be returned with an Encoding of UTF-8.
     #
     # Returns a String.
     def read_string
       raise NotImplementedError
     end
 
-    # Reads a Thrift Binary (Thrift String without encoding). In Ruby 1.9+, all Strings will be returned
+    # Reads a Thrift Binary (Thrift String without encoding). All Strings will be returned
     # with an Encoding of BINARY.
     #
     # Returns a String.
     def read_binary
       raise NotImplementedError
+    end
+
+    # Reads a UUID as 16 bytes and returns it as a string.
+    #
+    # Returns a String (e.g. "550e8400-e29b-41d4-a716-446655440000").
+    def read_uuid
+      raise NotImplementedError
+    end
+
+    def skip_string
+      read_string
     end
 
     # Writes a field based on the field information, field ID and value.
@@ -220,25 +263,19 @@ module Thrift
     #              :binary - A Boolean flag that indicates if Thrift::Types::STRING is a binary string (string without encoding).
     # fid        - The ID of the field.
     # value      - The field's value to write; object type varies based on :type.
+    # remaining_depth - The optional recursion budget of the enclosing struct.
     #
     # Returns nothing.
-    def write_field(*args)
-      if args.size == 3
-        # handles the documented method signature - write_field(field_info, fid, value)
-        field_info = args[0]
-        fid = args[1]
-        value = args[2]
-      elsif args.size == 4
-        # handles the deprecated method signature - write_field(name, type, fid, value)
-        field_info = {:name => args[0], :type => args[1]}
-        fid = args[2]
-        value = args[3]
-      else
-        raise ArgumentError, "wrong number of arguments (#{args.size} for 3)"
+    def write_field(field_info, fid, value, remaining_depth = nil)
+      unless field_info.is_a?(Hash)
+        field_info = {name: field_info, type: fid}
+        fid = value
+        value = remaining_depth
+        remaining_depth = nil
       end
 
       write_field_begin(field_info[:name], field_info[:type], fid)
-      write_type(field_info, value)
+      write_type(field_info, value, remaining_depth)
       write_field_end
     end
 
@@ -248,13 +285,14 @@ module Thrift
     #              :type   - The Thrift::Types constant that determines how the value is written.
     #              :binary - A Boolean flag that indicates if Thrift::Types::STRING is a binary string (string without encoding).
     # value      - The field's value to write; object type varies based on field_info[:type].
+    # remaining_depth - The optional recursion budget of the enclosing struct.
     #
     # Returns nothing.
-    def write_type(field_info, value)
-      # if field_info is a Fixnum, assume it is a Thrift::Types constant
+    def write_type(field_info, value, remaining_depth = nil)
+      # if field_info is a Integer, assume it is a Thrift::Types constant
       # convert it into a field_info Hash for backwards compatibility
-      if field_info.is_a? Fixnum
-        field_info = {:type => field_info}
+      if field_info.is_a? Integer
+        field_info = {type: field_info}
       end
 
       case field_info[:type]
@@ -276,8 +314,14 @@ module Thrift
         else
           write_string(value)
         end
+      when Types::UUID
+        write_uuid(value)
       when Types::STRUCT
-        value.write(self)
+        if remaining_depth
+          value.write(self, remaining_depth - 1)
+        else
+          value.write(self)
+        end
       else
         raise NotImplementedError
       end
@@ -291,10 +335,10 @@ module Thrift
     #
     # Returns the value read; object type varies based on field_info[:type].
     def read_type(field_info)
-      # if field_info is a Fixnum, assume it is a Thrift::Types constant
+      # if field_info is a Integer, assume it is a Thrift::Types constant
       # convert it into a field_info Hash for backwards compatibility
-      if field_info.is_a? Fixnum
-        field_info = {:type => field_info}
+      if field_info.is_a? Integer
+        field_info = {type: field_info}
       end
 
       case field_info[:type]
@@ -316,12 +360,15 @@ module Thrift
         else
           read_string
         end
+      when Types::UUID
+        read_uuid
       else
         raise NotImplementedError
       end
     end
 
-    def skip(type)
+    def skip(type, max_depth = 64)
+      raise ProtocolException.new(ProtocolException::DEPTH_LIMIT, "Maximum skip depth exceeded") if max_depth <= 0
       case type
       when Types::BOOL
         read_bool
@@ -336,42 +383,52 @@ module Thrift
       when Types::DOUBLE
         read_double
       when Types::STRING
-        read_string
+        skip_string
+      when Types::UUID
+        read_uuid
       when Types::STRUCT
         read_struct_begin
         while true
-          name, type, id = read_field_begin
+          _, type, _ = read_field_begin
           break if type == Types::STOP
-          skip(type)
+          skip(type, max_depth - 1)
           read_field_end
         end
         read_struct_end
       when Types::MAP
         ktype, vtype, size = read_map_begin
+        validate_container_size(size)
         size.times do
-          skip(ktype)
-          skip(vtype)
+          skip(ktype, max_depth - 1)
+          skip(vtype, max_depth - 1)
         end
         read_map_end
       when Types::SET
         etype, size = read_set_begin
+        validate_container_size(size)
         size.times do
-          skip(etype)
+          skip(etype, max_depth - 1)
         end
         read_set_end
       when Types::LIST
         etype, size = read_list_begin
+        validate_container_size(size)
         size.times do
-          skip(etype)
+          skip(etype, max_depth - 1)
         end
         read_list_end
       else
-        raise ProtocolException.new(ProtocolException::INVALID_DATA, 'Invalid data')
+        raise ProtocolException.new(ProtocolException::INVALID_DATA, "Invalid data")
       end
     end
-    
+
+    def validate_container_size(size)
+      raise ProtocolException.new(ProtocolException::NEGATIVE_SIZE, "Negative size") unless size >= 0
+      raise ProtocolException.new(ProtocolException::SIZE_LIMIT, "Container size limit exceeded") if size > MAX_CONTAINER_SIZE
+    end
+
     def to_s
-      "#{trans.to_s}"
+      trans.to_s
     end
   end
 
@@ -379,7 +436,7 @@ module Thrift
     def get_protocol(trans)
       raise NotImplementedError
     end
-    
+
     def to_s
       "base"
     end

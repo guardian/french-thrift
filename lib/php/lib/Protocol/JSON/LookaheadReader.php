@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,38 +21,40 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\JSON;
+
+use Thrift\Protocol\TJSONProtocol;
 
 class LookaheadReader
 {
-    private $hasData_ = false;
-    private $data_ = array();
-    private $p_;
+    private bool $hasData = false;
+    private string $data = '';
 
-    public function __construct($p)
+    public function __construct(private TJSONProtocol $protocol)
     {
-        $this->p_ = $p;
     }
 
-    public function read()
+    public function read(): string
     {
-        if ($this->hasData_) {
-            $this->hasData_ = false;
+        if ($this->hasData) {
+            $this->hasData = false;
         } else {
-            $this->data_ = $this->p_->getTransport()->readAll(1);
+            $this->data = $this->protocol->getTransport()->readAll(1);
         }
 
-        return substr($this->data_, 0, 1);
+        return substr($this->data, 0, 1);
     }
 
-    public function peek()
+    public function peek(): string
     {
-        if (!$this->hasData_) {
-            $this->data_ = $this->p_->getTransport()->readAll(1);
+        if (!$this->hasData) {
+            $this->data = $this->protocol->getTransport()->readAll(1);
         }
 
-        $this->hasData_ = true;
+        $this->hasData = true;
 
-        return substr($this->data_, 0, 1);
+        return substr($this->data, 0, 1);
     }
 }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -16,10 +17,11 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-require 'spec_helper'
+require "spec_helper"
+require "openssl"
+require "timeout"
 
-describe 'Server' do
-
+describe "Server" do
   describe Thrift::BaseServer do
     before(:each) do
       @processor = double("Processor")
@@ -36,9 +38,9 @@ describe 'Server' do
     end
 
     it "should not serve" do
-      expect { @server.serve()}.to raise_error(NotImplementedError)
+      expect { @server.serve }.to raise_error(NotImplementedError)
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(@serverTrans).to receive(:to_s).once.and_return("serverTrans")
       expect(@trans).to receive(:to_s).once.and_return("trans")
@@ -48,6 +50,31 @@ describe 'Server' do
   end
 
   describe Thrift::SimpleServer do
+    class EphemeralServerSocket < Thrift::ServerSocket
+      def initialize(ready)
+        super("127.0.0.1", 0)
+        @ready = ready
+      end
+
+      def listen
+        super
+        @ready << handle.addr[1]
+      end
+    end
+
+    class StopAfterVoidHandler
+      attr_reader :calls
+
+      def initialize
+        @calls = 0
+      end
+
+      def voidMethod
+        @calls += 1
+        throw :stop
+      end
+    end
+
     before(:each) do
       @processor = double("Processor")
       @serverTrans = double("ServerTransport")
@@ -56,14 +83,14 @@ describe 'Server' do
       @client = double("Client")
       @server = described_class.new(@processor, @serverTrans, @trans, @prot)
     end
-    
+
     it "should provide a reasonable to_s" do
       expect(@serverTrans).to receive(:to_s).once.and_return("serverTrans")
       expect(@trans).to receive(:to_s).once.and_return("trans")
       expect(@prot).to receive(:to_s).once.and_return("prot")
       expect(@server.to_s).to eq("simple(server(prot(trans(serverTrans))))")
     end
-    
+
     it "should serve in the main thread" do
       expect(@serverTrans).to receive(:listen).ordered
       expect(@serverTrans).to receive(:accept).exactly(3).times.and_return(@client)
@@ -80,6 +107,195 @@ describe 'Server' do
       expect(@trans).to receive(:close).exactly(3).times
       expect(@serverTrans).to receive(:close).ordered
       expect { @server.serve }.to throw_symbol(:stop)
+    end
+
+    it "should continue serving after accept raises Errno::ECONNRESET" do
+      expect(@serverTrans).to receive(:listen).ordered
+      expect(@serverTrans).to receive(:accept).ordered.and_raise(Errno::ECONNRESET)
+      expect(@serverTrans).to receive(:accept).ordered.and_return(@client)
+      expect(@trans).to receive(:get_transport).once.with(@client).and_return(@trans)
+      expect(@prot).to receive(:get_protocol).once.with(@trans).and_return(@prot)
+      expect(@processor).to receive(:process).once.with(@prot, @prot) { throw :stop }
+      expect(@trans).to receive(:close).once
+      expect(@serverTrans).to receive(:close).ordered
+      expect { @server.serve }.to throw_symbol(:stop)
+    end
+
+    it "should continue serving after accept raises OpenSSL::SSL::SSLError" do
+      expect(@serverTrans).to receive(:listen).ordered
+      expect(@serverTrans).to receive(:accept).ordered.and_raise(OpenSSL::SSL::SSLError)
+      expect(@serverTrans).to receive(:accept).ordered.and_return(@client)
+      expect(@trans).to receive(:get_transport).once.with(@client).and_return(@trans)
+      expect(@prot).to receive(:get_protocol).once.with(@trans).and_return(@prot)
+      expect(@processor).to receive(:process).once.with(@prot, @prot) { throw :stop }
+      expect(@trans).to receive(:close).once
+      expect(@serverTrans).to receive(:close).ordered
+      expect { @server.serve }.to throw_symbol(:stop)
+    end
+
+    [
+      [
+        "compact unknown type", Thrift::CompactProtocolFactory.new, proc do
+          trans = Thrift::MemoryBufferTransport.new
+          prot = Thrift::CompactProtocol.new(trans)
+          prot.write_message_begin("unknown", Thrift::MessageTypes::CALL, 1)
+          trans.write([0x1e, 0].pack("C*"))
+          trans.read(trans.available)
+        end,
+      ],
+      ["JSON unknown type", Thrift::JsonProtocolFactory.new, proc { '[1,"unknown",1,1,{"1":{"wat":0}}]' }],
+      ["short JSON UUID", Thrift::JsonProtocolFactory.new, proc { '[1,"unknown",1,1,{"1":{"uid":"x"}}]' }],
+      [
+        "binary invalid UTF-8 method name", Thrift::BinaryProtocolFactory.new, proc do
+          method_name = [0xff, 0xfe].pack("C*")
+          [0x80010000 | Thrift::MessageTypes::CALL].pack("N") +
+            [method_name.bytesize].pack("N") + method_name + [1].pack("N") + [Thrift::Types::STOP].pack("C")
+        end,
+      ],
+      [
+        "compact invalid UTF-8 method name", Thrift::CompactProtocolFactory.new, proc do
+          method_name = [0xff, 0xfe].pack("C*")
+          [0x82, 0x21, 0x01, method_name.bytesize].pack("C*") + method_name + [Thrift::Types::STOP].pack("C")
+        end,
+      ],
+    ].each do |failure_type, protocol_factory, malformed_request|
+      it "closes a malformed #{failure_type} connection and continues accepting clients" do
+        ready = Queue.new
+        errors = Queue.new
+        server_transport = EphemeralServerSocket.new(ready)
+        handler = StopAfterVoidHandler.new
+        processor = Thrift::Test::Srv::Processor.new(handler)
+        server = Thrift::SimpleServer.new(processor, server_transport, nil, protocol_factory)
+        server_thread = Thread.new do
+          catch(:stop) { server.serve }
+        rescue StandardError, ScriptError => error
+          errors << error
+        end
+        server_thread.report_on_exception = false
+
+        port = Timeout.timeout(2) { ready.pop }
+        malformed_client = TCPSocket.new("127.0.0.1", port)
+        malformed_client.write(malformed_request.call)
+        malformed_client.close_write
+
+        expect(IO.select([malformed_client], nil, nil, 2)).not_to be_nil
+        peer_closed = begin
+          malformed_client.readpartial(1)
+          false
+        rescue EOFError, Errno::ECONNRESET
+          true
+        end
+        expect(peer_closed).to be(true)
+        expect(server_thread).to be_alive
+
+        valid_transport = Thrift::Socket.new("127.0.0.1", port)
+        valid_transport.open
+        valid_protocol = protocol_factory.get_protocol(valid_transport)
+        Thrift::Test::Srv::Client.new(valid_protocol).send_voidMethod
+
+        expect(server_thread.join(2)).to eq(server_thread)
+        expect(handler.calls).to eq(1)
+        expect(errors).to be_empty
+      ensure
+        malformed_client&.close
+        valid_transport&.close
+        server_transport&.close
+        server_thread&.kill
+        server_thread&.join
+      end
+    end
+
+    it "closes a zero-length framed connection and continues accepting clients" do
+      ready = Queue.new
+      errors = Queue.new
+      server_transport = EphemeralServerSocket.new(ready)
+      handler = StopAfterVoidHandler.new
+      processor = Thrift::Test::Srv::Processor.new(handler)
+      transport_factory = Thrift::FramedTransportFactory.new
+      protocol_factory = Thrift::CompactProtocolFactory.new
+      server = Thrift::SimpleServer.new(processor, server_transport, transport_factory, protocol_factory)
+      server_thread = Thread.new do
+        catch(:stop) { server.serve }
+      rescue StandardError, ScriptError => error
+        errors << error
+      end
+      server_thread.report_on_exception = false
+
+      port = Timeout.timeout(2) { ready.pop }
+      malformed_client = TCPSocket.new("127.0.0.1", port)
+      malformed_client.write([0].pack("N"))
+      malformed_client.close_write
+
+      expect(IO.select([malformed_client], nil, nil, 2)).not_to be_nil
+      expect(malformed_client.read).to eq("")
+      expect(server_thread).to be_alive
+
+      socket = Thrift::Socket.new("127.0.0.1", port)
+      valid_transport = Thrift::FramedTransport.new(socket)
+      valid_transport.open
+      valid_protocol = Thrift::CompactProtocol.new(valid_transport)
+      Thrift::Test::Srv::Client.new(valid_protocol).send_voidMethod
+
+      expect(server_thread.join(2)).to eq(server_thread)
+      expect(handler.calls).to eq(1)
+      expect(errors).to be_empty
+    ensure
+      malformed_client&.close
+      valid_transport&.close
+      server_transport&.close
+      server_thread&.kill
+      server_thread&.join
+    end
+
+    it "closes a connection whose multiplexed dispatch fails and continues accepting clients" do
+      ready = Queue.new
+      errors = Queue.new
+      server_transport = EphemeralServerSocket.new(ready)
+      handler = StopAfterVoidHandler.new
+      protocol_factory = Thrift::BinaryProtocolFactory.new
+      processor = Thrift::MultiplexedProcessor.new
+      processor.register_processor("Srv", Thrift::Test::Srv::Processor.new(handler))
+      server = Thrift::SimpleServer.new(processor, server_transport, nil, protocol_factory)
+      server_thread = Thread.new do
+        catch(:stop) { server.serve }
+      rescue StandardError, ScriptError => error
+        errors << error
+      end
+      server_thread.report_on_exception = false
+
+      # A call without a "service:" prefix matches no registered processor.
+      unprefixed_request = Thrift::MemoryBufferTransport.new
+      Thrift::Test::Srv::Client.new(protocol_factory.get_protocol(unprefixed_request)).send_voidMethod
+
+      port = Timeout.timeout(2) { ready.pop }
+      malformed_client = TCPSocket.new("127.0.0.1", port)
+      malformed_client.write(unprefixed_request.read(unprefixed_request.available))
+      malformed_client.close_write
+
+      expect(IO.select([malformed_client], nil, nil, 2)).not_to be_nil
+      peer_closed = begin
+        malformed_client.readpartial(1)
+        false
+      rescue EOFError, Errno::ECONNRESET
+        true
+      end
+      expect(peer_closed).to be(true)
+      expect(server_thread).to be_alive
+
+      valid_transport = Thrift::Socket.new("127.0.0.1", port)
+      valid_transport.open
+      valid_protocol = Thrift::MultiplexedProtocol.new(protocol_factory.get_protocol(valid_transport), "Srv")
+      Thrift::Test::Srv::Client.new(valid_protocol).send_voidMethod
+
+      expect(server_thread.join(2)).to eq(server_thread)
+      expect(handler.calls).to eq(1)
+      expect(errors).to be_empty
+    ensure
+      malformed_client&.close
+      valid_transport&.close
+      server_transport&.close
+      server_thread&.kill
+      server_thread&.join
     end
   end
 
@@ -99,7 +315,7 @@ describe 'Server' do
       expect(@prot).to receive(:to_s).once.and_return("prot")
       expect(@server.to_s).to eq("threaded(server(prot(trans(serverTrans))))")
     end
-    
+
     it "should serve using threads" do
       expect(@serverTrans).to receive(:listen).ordered
       expect(@serverTrans).to receive(:accept).exactly(3).times.and_return(@client)
@@ -115,6 +331,32 @@ describe 'Server' do
         end
       end
       expect(@trans).to receive(:close).exactly(3).times
+      expect(@serverTrans).to receive(:close).ordered
+      expect { @server.serve }.to throw_symbol(:stop)
+    end
+
+    it "should continue serving after accept raises Errno::ECONNRESET" do
+      expect(@serverTrans).to receive(:listen).ordered
+      expect(@serverTrans).to receive(:accept).ordered.and_raise(Errno::ECONNRESET)
+      expect(@serverTrans).to receive(:accept).ordered.and_return(@client)
+      expect(@trans).to receive(:get_transport).once.with(@client).and_return(@trans)
+      expect(@prot).to receive(:get_protocol).once.with(@trans).and_return(@prot)
+      expect(Thread).to receive(:new).with(@prot, @trans).once.and_yield(@prot, @trans)
+      expect(@processor).to receive(:process).once.with(@prot, @prot) { throw :stop }
+      expect(@trans).to receive(:close).once
+      expect(@serverTrans).to receive(:close).ordered
+      expect { @server.serve }.to throw_symbol(:stop)
+    end
+
+    it "should continue serving after accept raises OpenSSL::SSL::SSLError" do
+      expect(@serverTrans).to receive(:listen).ordered
+      expect(@serverTrans).to receive(:accept).ordered.and_raise(OpenSSL::SSL::SSLError)
+      expect(@serverTrans).to receive(:accept).ordered.and_return(@client)
+      expect(@trans).to receive(:get_transport).once.with(@client).and_return(@trans)
+      expect(@prot).to receive(:get_protocol).once.with(@trans).and_return(@prot)
+      expect(Thread).to receive(:new).with(@prot, @trans).once.and_yield(@prot, @trans)
+      expect(@processor).to receive(:process).once.with(@prot, @prot) { throw :stop }
+      expect(@trans).to receive(:close).once
       expect(@serverTrans).to receive(:close).ordered
       expect { @server.serve }.to throw_symbol(:stop)
     end
@@ -137,24 +379,24 @@ describe 'Server' do
       expect(@prot).to receive(:to_s).once.and_return("prot")
       expect(@server.to_s).to eq("threadpool(server(prot(trans(server_trans))))")
     end
-    
+
     it "should serve inside a thread" do
       exception_q = @server.instance_variable_get(:@exception_q)
-      expect_any_instance_of(described_class).to receive(:serve) do 
-        exception_q.push(StandardError.new('ERROR'))
+      expect_any_instance_of(described_class).to receive(:serve) do
+        exception_q.push(StandardError.new("ERROR"))
       end
-      expect { @server.rescuable_serve }.to(raise_error('ERROR'))
+      expect { @server.rescuable_serve }.to(raise_error("ERROR"))
       sleep(0.15)
     end
 
     it "should avoid running the server twice when retrying rescuable_serve" do
       exception_q = @server.instance_variable_get(:@exception_q)
-      expect_any_instance_of(described_class).to receive(:serve) do 
-        exception_q.push(StandardError.new('ERROR1'))
-        exception_q.push(StandardError.new('ERROR2'))
+      expect_any_instance_of(described_class).to receive(:serve) do
+        exception_q.push(StandardError.new("ERROR1"))
+        exception_q.push(StandardError.new("ERROR2"))
       end
-      expect { @server.rescuable_serve }.to(raise_error('ERROR1'))
-      expect { @server.rescuable_serve }.to(raise_error('ERROR2'))
+      expect { @server.rescuable_serve }.to(raise_error("ERROR1"))
+      expect { @server.rescuable_serve }.to(raise_error("ERROR2"))
     end
 
     it "should serve using a thread pool" do
@@ -182,6 +424,23 @@ describe 'Server' do
       expect(exception_q).to receive(:push).with(error).and_throw(:stop)
       expect(@server_trans).to receive(:close)
       expect { @server.serve }.to(throw_symbol(:stop))
+    end
+
+    it "should not enqueue TLS accept errors" do
+      exception_q = @server.instance_variable_get(:@exception_q)
+      expect(@server_trans).to receive(:listen).ordered
+      expect(@server_trans).to receive(:accept).ordered.and_raise(OpenSSL::SSL::SSLError)
+      expect(@server_trans).to receive(:accept).ordered.and_return(@client)
+      expect(@trans).to receive(:get_transport).once.with(@client).and_return(@trans)
+      expect(@prot).to receive(:get_protocol).once.with(@trans).and_return(@prot)
+      allow(Thread).to receive(:new).and_yield
+      expect(@processor).to receive(:process).once.with(@prot, @prot) { throw :stop }
+      expect(@trans).to receive(:close).once
+      expect(@server_trans).to receive(:close)
+
+      catch(:stop) { @server.serve }
+
+      expect(exception_q).to be_empty
     end
   end
 end

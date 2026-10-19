@@ -20,17 +20,20 @@
 package org.apache.thrift.server;
 
 import java.io.IOException;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.spi.SelectorProvider;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.thrift.TAsyncProcessor;
 import org.apache.thrift.TByteArrayOutputStream;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TProtocol;
+import org.apache.thrift.transport.SocketAddressProvider;
 import org.apache.thrift.transport.TIOStreamTransport;
 import org.apache.thrift.transport.TMemoryInputTransport;
 import org.apache.thrift.transport.TNonblockingServerTransport;
@@ -66,6 +69,9 @@ public abstract class AbstractNonblockingServer extends TServer {
   /** How many bytes are currently allocated to read buffers. */
   final AtomicLong readBufferBytesAllocated = new AtomicLong(0);
 
+  /** The frame buffers whose frame does not fit into the read buffer memory at the moment. */
+  private final Set<FrameBuffer> framesAwaitingReadBuffer = ConcurrentHashMap.newKeySet();
+
   public AbstractNonblockingServer(AbstractNonblockingServerArgs<?> args) {
     super(args);
     MAX_READ_BUFFER_BYTES = args.maxReadBufferBytes;
@@ -92,6 +98,18 @@ public abstract class AbstractNonblockingServer extends TServer {
 
     // do a little cleanup
     stopListening();
+  }
+
+  /**
+   * Let the frame buffers that wait for read buffer memory read their frame again. To be called
+   * whenever read buffer memory is released.
+   */
+  private void retryFramesAwaitingReadBuffer() {
+    for (FrameBuffer frameBuffer : framesAwaitingReadBuffer) {
+      if (framesAwaitingReadBuffer.remove(frameBuffer)) {
+        frameBuffer.requestSelectInterestChange();
+      }
+    }
   }
 
   /**
@@ -170,11 +188,15 @@ public abstract class AbstractNonblockingServer extends TServer {
      * to write or vice versa.
      */
     protected void processInterestChanges() {
+      FrameBuffer[] changes;
       synchronized (selectInterestChanges) {
-        for (FrameBuffer fb : selectInterestChanges) {
-          fb.changeSelectInterests();
-        }
+        changes = selectInterestChanges.toArray(new FrameBuffer[0]);
         selectInterestChanges.clear();
+      }
+      // Run them without the lock: closing a frame buffer releases read buffer memory, which asks
+      // the frame buffers of the other select threads to change their interests.
+      for (FrameBuffer fb : changes) {
+        fb.changeSelectInterests();
       }
     }
 
@@ -220,6 +242,8 @@ public abstract class AbstractNonblockingServer extends TServer {
   private enum FrameBufferState {
     // in the midst of reading the frame size off the wire
     READING_FRAME_SIZE,
+    // the frame size has been read, but the frame waits for read buffer memory
+    AWAITING_READ_BUFFER,
     // reading the actual frame data now, but not all the way done yet
     READING_FRAME,
     // completely read the frame, so an invocation can now happen
@@ -288,15 +312,22 @@ public abstract class AbstractNonblockingServer extends TServer {
       selectThread_ = selectThread;
       buffer_ = ByteBuffer.allocate(4);
 
-      frameTrans_ = new TMemoryInputTransport();
+      frameTrans_ = new TMemoryInputTransport(trans_.getConfiguration());
       response_ = new TByteArrayOutputStream();
       inTrans_ = inputTransportFactory_.getTransport(frameTrans_);
-      outTrans_ = outputTransportFactory_.getTransport(new TIOStreamTransport(response_));
+      outTrans_ =
+          outputTransportFactory_.getTransport(
+              new TIOStreamTransport(trans_.getConfiguration(), response_));
       inProt_ = inputProtocolFactory_.getProtocol(inTrans_);
       outProt_ = outputProtocolFactory_.getProtocol(outTrans_);
 
       if (eventHandler_ != null) {
         context_ = eventHandler_.createContext(inProt_, outProt_);
+        SocketAddress remoteAddress =
+            trans_ instanceof SocketAddressProvider
+                ? ((SocketAddressProvider) trans_).getRemoteSocketAddress()
+                : null;
+        context_.setRemoteAddress(remoteAddress);
       } else {
         context_ = null;
       }
@@ -309,6 +340,14 @@ public abstract class AbstractNonblockingServer extends TServer {
      */
     public void setSelectionKey(SelectionKey selectionKey) {
       selectionKey_ = selectionKey;
+    }
+
+    /**
+     * @return the amount of memory currently used to read data from clients. This information can
+     *     be useful for debugging, metrics, and configuring the maximum memory limit.
+     */
+    public final long getReadBufferBytesAllocated() {
+      return readBufferBytesAllocated.get();
     }
 
     /**
@@ -349,9 +388,28 @@ public abstract class AbstractNonblockingServer extends TServer {
             return false;
           }
 
-          // if this frame will push us over the memory limit, then return.
-          // with luck, more memory will free up the next time around.
-          if (readBufferBytesAllocated.get() + frameSize > MAX_READ_BUFFER_BYTES) {
+          // if this frame does not fit into the read buffer memory of this server even when
+          // nothing else is buffered, log the error and close the connection.
+          if (frameSize > MAX_READ_BUFFER_BYTES) {
+            LOGGER.error(
+                "Read a frame size of "
+                    + frameSize
+                    + ", which is bigger than the maximum read buffer memory "
+                    + MAX_READ_BUFFER_BYTES
+                    + " for ALL connections.");
+            return false;
+          }
+
+          // if this frame will push us over the memory limit, then wait for memory to be
+          // released instead of reading it now.
+          long currentAllocated = getReadBufferBytesAllocated();
+          if (currentAllocated + frameSize > MAX_READ_BUFFER_BYTES) {
+            LOGGER.trace(
+                "Deferring reading frame of size {} because {} is already buffered and {} is the limit.",
+                frameSize,
+                currentAllocated,
+                MAX_READ_BUFFER_BYTES);
+            awaitReadBuffer(frameSize);
             return true;
           }
 
@@ -400,6 +458,25 @@ public abstract class AbstractNonblockingServer extends TServer {
       return false;
     }
 
+    /**
+     * Stop reading this connection until read buffer memory is released. As this runs in the select
+     * thread, the selection key can be changed directly.
+     */
+    private void awaitReadBuffer(int frameSize) {
+      state_ = FrameBufferState.AWAITING_READ_BUFFER;
+      if (selectionKey_.isValid()) {
+        selectionKey_.interestOps(0);
+      } else {
+        LOGGER.warn("SelectionKey was invalidated during read");
+      }
+      framesAwaitingReadBuffer.add(this);
+      // Memory released before this frame buffer was registered would not have retried it.
+      if (getReadBufferBytesAllocated() + frameSize <= MAX_READ_BUFFER_BYTES
+          && framesAwaitingReadBuffer.remove(this)) {
+        changeSelectInterests();
+      }
+    }
+
     /** Give this FrameBuffer a chance to write its output to the final client. */
     public boolean write() {
       if (state_ == FrameBufferState.WRITING) {
@@ -438,6 +515,15 @@ public abstract class AbstractNonblockingServer extends TServer {
         case AWAITING_REGISTER_READ:
           prepareRead();
           break;
+        case AWAITING_READ_BUFFER:
+          // read buffer memory has been released, so read the frame now
+          if (selectionKey_.isValid()) {
+            selectionKey_.interestOps(SelectionKey.OP_READ);
+          } else {
+            LOGGER.warn("SelectionKey was invalidated before read");
+          }
+          state_ = FrameBufferState.READING_FRAME_SIZE;
+          break;
         case AWAITING_CLOSE:
           close();
           selectionKey_.cancel();
@@ -455,10 +541,16 @@ public abstract class AbstractNonblockingServer extends TServer {
           || state_ == FrameBufferState.READ_FRAME_COMPLETE
           || state_ == FrameBufferState.AWAITING_CLOSE) {
         readBufferBytesAllocated.addAndGet(-buffer_.array().length);
+        retryFramesAwaitingReadBuffer();
+      } else if (state_ == FrameBufferState.AWAITING_READ_BUFFER) {
+        framesAwaitingReadBuffer.remove(this);
       }
-      trans_.close();
-      if (eventHandler_ != null) {
-        eventHandler_.deleteContext(context_, inProt_, outProt_);
+      try {
+        if (eventHandler_ != null) {
+          eventHandler_.deleteContext(context_, inProt_, outProt_);
+        }
+      } finally {
+        trans_.close();
       }
     }
 
@@ -479,6 +571,7 @@ public abstract class AbstractNonblockingServer extends TServer {
       // we'd like to free this read memory up as quickly as possible for other
       // clients.
       readBufferBytesAllocated.addAndGet(-buffer_.array().length);
+      retryFramesAwaitingReadBuffer();
 
       if (response_.len() == 0) {
         // go straight to reading again. this was probably an oneway method

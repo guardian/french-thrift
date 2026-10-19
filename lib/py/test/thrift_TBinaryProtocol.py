@@ -17,10 +17,15 @@
 # under the License.
 #
 
+import struct
 import unittest
+import uuid
 
 import _import_local_thrift  # noqa
+from thrift.Thrift import TApplicationException
 from thrift.protocol.TBinaryProtocol import TBinaryProtocol
+from thrift.protocol.TBinaryProtocol import TBinaryProtocolAcceleratedFactory
+from thrift.protocol.TProtocol import TProtocolException
 from thrift.transport import TTransport
 
 
@@ -52,6 +57,9 @@ def testNaked(type, data):
     if type.capitalize() == 'Bool':
         protocol.writeBool(data)
 
+    if type.capitalize() == 'Uuid':
+        protocol.writeUuid(data)
+
     transport.flush()
     data_r = buf.getvalue()
     buf = TTransport.TMemoryBuffer(data_r)
@@ -81,9 +89,12 @@ def testNaked(type, data):
     if type.capitalize() == 'Bool':
         return protocol.readBool()
 
+    if type.capitalize() == 'Uuid':
+        return protocol.readUuid()
+
 
 def testField(type, data):
-    TType = {"Bool": 2, "Byte": 3, "Binary": 5, "I16": 6, "I32": 8, "I64": 10, "Double": 11, "String": 12}
+    TType = {"Bool": 2, "Byte": 3, "Binary": 5, "I16": 6, "I32": 8, "I64": 10, "Double": 11, "String": 12, "Uuid": 13}
     buf = TTransport.TMemoryBuffer()
     transport = TTransport.TBufferedTransportFactory().getTransport(buf)
     protocol = TBinaryProtocol(transport)
@@ -112,6 +123,9 @@ def testField(type, data):
 
     if type.capitalize() == 'Bool':
         protocol.writeBool(data)
+
+    if type.capitalize() == 'Uuid':
+        protocol.writeUuid(data)
 
     protocol.writeFieldEnd()
     protocol.writeStructEnd()
@@ -148,8 +162,18 @@ def testField(type, data):
     if type.capitalize() == 'Bool':
         return protocol.readBool()
 
+    if type.capitalize() == 'Uuid':
+        return protocol.readUuid()
+
     protocol.readFieldEnd()
     protocol.readStructEnd()
+
+
+APPLICATION_EXCEPTION_THRIFT_SPEC = (
+    None,
+    (1, 11, "message", "UTF8", None),
+    (2, 8, "type", None, None),
+)
 
 
 def testMessage(data, strict=True):
@@ -180,6 +204,13 @@ def testMessage(data, strict=True):
 
 
 class TestTBinaryProtocol(unittest.TestCase):
+
+    def setUp(self):
+        try:
+            from thrift.protocol import fastbinary  # noqa: F401
+            self._has_fastbinary = True
+        except ImportError:
+            self._has_fastbinary = False
 
     def test_TBinaryProtocol_write_read(self):
         try:
@@ -245,6 +276,8 @@ class TestTBinaryProtocol(unittest.TestCase):
             self.assertEqual(True, testField('Bool', True))
             self.assertEqual(3.1415926, testNaked("Double", 3.1415926))
             self.assertEqual("hello thrift", testNaked("String", "hello thrift"))
+            self.assertEqual(uuid.UUID('{00010203-0405-0607-0809-0a0b0c0d0e0f}'), testNaked("Uuid", uuid.UUID('{00010203-0405-0607-0809-0a0b0c0d0e0f}')))
+            self.assertEqual(uuid.UUID('{00010203-0405-0607-0809-0a0b0c0d0e0f}'), testField("Uuid", uuid.UUID('{00010203-0405-0607-0809-0a0b0c0d0e0f}')))
 
             TMessageType = {"T_CALL": 1, "T_REPLY": 2, "T_EXCEPTION": 3, "T_ONEWAY": 4}
             test_data = [("short message name", TMessageType['T_CALL'], 0),
@@ -263,13 +296,35 @@ class TestTBinaryProtocol(unittest.TestCase):
             print("Assertion fail")
             raise e
 
+    def test_accelerated_utf8_roundtrip_on_application_exception(self):
+        if not self._has_fastbinary:
+            self.skipTest("C extension not available")
+
+        original = TApplicationException(
+            type=TApplicationException.PROTOCOL_ERROR,
+            message=(u"snowman-\u2603-rocket-\U0001F680-" * 32),
+        )
+
+        typeargs = [TApplicationException, APPLICATION_EXCEPTION_THRIFT_SPEC]
+
+        otrans = TTransport.TMemoryBuffer()
+        oproto = TBinaryProtocolAcceleratedFactory(fallback=False).getProtocol(otrans)
+        oproto.trans.write(oproto._fast_encode(original, typeargs))
+
+        itrans = TTransport.TMemoryBuffer(otrans.getvalue())
+        iproto = TBinaryProtocolAcceleratedFactory(fallback=False).getProtocol(itrans)
+        decoded = iproto._fast_decode(None, iproto, typeargs)
+
+        self.assertEqual(decoded.message, original.message)
+        self.assertEqual(decoded.type, original.type)
+
     def test_TBinaryProtocol_no_strict_write_read(self):
         TMessageType = {"T_CALL": 1, "T_REPLY": 2, "T_EXCEPTION": 3, "T_ONEWAY": 4}
         test_data = [("short message name", TMessageType['T_CALL'], 0),
-                        ("1", TMessageType['T_REPLY'], 12345),
-                        ("loooooooooooooooooooooooooooooooooong", TMessageType['T_EXCEPTION'], 1 << 16),
-                        ("one way push", TMessageType['T_ONEWAY'], 12),
-                        ("Janky", TMessageType['T_CALL'], 0)]
+                     ("1", TMessageType['T_REPLY'], 12345),
+                     ("loooooooooooooooooooooooooooooooooong", TMessageType['T_EXCEPTION'], 1 << 16),
+                     ("one way push", TMessageType['T_ONEWAY'], 12),
+                     ("Janky", TMessageType['T_CALL'], 0)]
 
         try:
             for dt in test_data:
@@ -280,6 +335,37 @@ class TestTBinaryProtocol(unittest.TestCase):
         except Exception as e:
             print("Assertion fail")
             raise e
+
+
+def _craft_nested_structs(depth):
+    buf = bytearray()
+    for _ in range(depth):
+        buf += bytes([0x0c])           # TType.STRUCT = 12
+        buf += struct.pack('>h', 1)    # field ID 1
+    for _ in range(depth + 1):
+        buf += bytes([0x00])           # STOP per level + innermost
+    return bytes(buf)
+
+
+class TestSkipDepthLimit(unittest.TestCase):
+
+    def _make_proto(self, payload):
+        trans = TTransport.TMemoryBuffer(payload)
+        return TBinaryProtocol(trans)
+
+    def test_skip_rejects_deeply_nested_struct(self):
+        from thrift.Thrift import TType
+        payload = _craft_nested_structs(64)
+        proto = self._make_proto(payload)
+        with self.assertRaises(TProtocolException) as ctx:
+            proto.skip(TType.STRUCT)
+        self.assertEqual(ctx.exception.type, TProtocolException.DEPTH_LIMIT)
+
+    def test_skip_accepts_struct_within_depth_limit(self):
+        from thrift.Thrift import TType
+        payload = _craft_nested_structs(63)
+        proto = self._make_proto(payload)
+        proto.skip(TType.STRUCT)  # must not raise
 
 
 if __name__ == '__main__':

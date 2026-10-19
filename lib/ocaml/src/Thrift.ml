@@ -156,10 +156,30 @@ struct
     | 4 -> ONEWAY
     | _ -> raise Thrift_error
 
+  type exn_type =
+      | UNKNOWN
+      | INVALID_DATA
+      | NEGATIVE_SIZE
+      | SIZE_LIMIT
+      | BAD_VERSION
+      | NOT_IMPLEMENTED
+      | DEPTH_LIMIT
+
+  exception E of exn_type * string;;
+
   class virtual t (trans: Transport.t) =
   object (self)
     val mutable trans_ = trans
+    val mutable recursion_depth_ = 0
     method getTransport = trans_
+    method increment_recursion_depth =
+      recursion_depth_ <- recursion_depth_ + 1;
+      if recursion_depth_ > 64 then begin
+        recursion_depth_ <- recursion_depth_ - 1;
+        raise (E (DEPTH_LIMIT, "Maximum recursion depth exceeded"))
+      end
+    method decrement_recursion_depth =
+      recursion_depth_ <- recursion_depth_ - 1
       (* writing methods *)
     method virtual writeMessageBegin : string * message_type * int -> unit
     method virtual writeMessageEnd : unit
@@ -204,7 +224,14 @@ struct
     method virtual readString : string
     method virtual readBinary : string
         (* skippage *)
+    (* Skipping descends through nested structs and containers the same way
+       reading them does, so it draws on the same depth budget. *)
     method skip typ =
+      self#increment_recursion_depth;
+      Fun.protect ~finally:(fun () -> self#decrement_recursion_depth)
+        (fun () -> self#skip_type typ)
+
+    method private skip_type typ =
       match typ with
         | T_BOOL -> ignore self#readBool
         | T_BYTE
@@ -229,41 +256,30 @@ struct
                                with Break -> ());
                               self#readStructEnd)
         | T_MAP -> ignore (let (k,v,s) = self#readMapBegin in
-                             for i=0 to s do
+                             for i=1 to s do
                                self#skip k;
                                self#skip v;
                              done;
                              self#readMapEnd)
         | T_SET -> ignore (let (t,s) = self#readSetBegin in
-                             for i=0 to s do
+                             for i=1 to s do
                                self#skip t
                              done;
                              self#readSetEnd)
         | T_LIST -> ignore (let (t,s) = self#readListBegin in
-                              for i=0 to s do
+                              for i=1 to s do
                                 self#skip t
                               done;
                               self#readListEnd)
         | T_UTF8 -> ()
         | T_UTF16 -> ()
-        | _ -> raise (Protocol.E (Protocol.INVALID_DATA, "Invalid data"))
+        | _ -> raise (E (INVALID_DATA, "Invalid data"))
   end
 
   class virtual factory =
   object
     method virtual getProtocol : Transport.t -> t
   end
-
-  type exn_type =
-      | UNKNOWN
-      | INVALID_DATA
-      | NEGATIVE_SIZE
-      | SIZE_LIMIT
-      | BAD_VERSION
-      | NOT_IMPLEMENTED
-      | DEPTH_LIMIT
-
-  exception E of exn_type * string;;
 
 end;;
 

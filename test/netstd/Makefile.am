@@ -35,10 +35,16 @@ clean-local:
 distdir:
 	$(MAKE) $(AM_MAKEFLAGS) distdir-am
 
+# Client and Server ship as whole directories; strip the generated code and
+# build output a built tree leaves behind.
+dist-hook:
+	rm -rf $(distdir)/Client/ThriftTest $(distdir)/Server/ThriftTest
+	find $(distdir) -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+
 EXTRA_DIST = \
 	Client \
 	README.md \
 	Server \
-	ThriftTest.sln \
+	ThriftTest.slnx \
 	build.cmd \
 	build.sh

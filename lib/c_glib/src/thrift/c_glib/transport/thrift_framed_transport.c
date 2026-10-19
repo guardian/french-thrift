@@ -111,10 +111,29 @@ thrift_framed_transport_read_frame (ThriftTransport *transport,
 
     if (bytes > 0 && (error == NULL || *error == NULL))
     {
+      ThriftTransportClass *ttc = THRIFT_TRANSPORT_GET_CLASS (transport);
+
       /* add the data to the buffer */
       g_byte_array_append (t->r_buf, tmpdata, bytes);
 
-      result = TRUE;
+      /* Bind the read budget to this frame, so that the protocol cannot be
+       * talked into sizing a field or a container from a number the frame is
+       * too small to carry.  Everything the protocol reads from here on comes
+       * out of r_buf, so what is bound here stands for the whole frame.
+       *
+       * The full reset first is what makes this safe to do on every frame: a
+       * budget may shrink but never grow, so binding alone would leave the
+       * transport unable to read any frame larger than the smallest one it
+       * has already seen.  resetConsumedMessageSize() is used for the bind
+       * rather than updateKnownMessageSize() because nothing has been
+       * consumed against the fresh budget, and because the latter refuses a
+       * zero-length frame.
+       */
+      if (ttc->resetConsumedMessageSize (transport, -1, error)
+          && ttc->resetConsumedMessageSize (transport, t->r_buf->len, error))
+      {
+        result = TRUE;
+      }
     }
     g_free (tmpdata);
   }
@@ -138,7 +157,7 @@ thrift_framed_transport_read_slow (ThriftTransport *transport, gpointer buf,
   /* first copy what we have in our buffer, if there is anything left */
   if (have > 0)
   {
-    memcpy (buf, t->r_buf, t->r_buf->len);
+    memcpy (buf, t->r_buf->data, t->r_buf->len);
     want -= t->r_buf->len;
     t->r_buf = g_byte_array_remove_range (t->r_buf, 0, t->r_buf->len);
   }
@@ -168,8 +187,21 @@ thrift_framed_transport_read (ThriftTransport *transport, gpointer buf,
   ThriftFramedTransport *t = THRIFT_FRAMED_TRANSPORT (transport);
   ThriftTransportClass *ttc = THRIFT_TRANSPORT_GET_CLASS (transport);
 
-  if(!ttc->checkReadBytesAvailable (transport, len, error))
-  { 
+  /* Since read_frame() binds the budget to the frame in hand, check against
+   * what that frame can still deliver rather than against what was asked for:
+   * a request for more than the buffer holds is a short read that carries on
+   * into the next frame, and an empty buffer means the budget belongs to a
+   * frame that is finished with, the next one not yet sized.
+   *
+   * This does not loosen the bound the protocol is held to.  The checks that
+   * gate an allocation -- string bodies, container element counts -- call
+   * checkReadBytesAvailable() directly with the size the wire declared, and
+   * never come through here.
+   */
+  guint32 checked = len < t->r_buf->len ? len : t->r_buf->len;
+
+  if(!ttc->checkReadBytesAvailable (transport, checked, error))
+  {
     return -1;
   }
 
@@ -247,6 +279,7 @@ thrift_framed_transport_flush (ThriftTransport *transport, GError **error)
   ThriftTransportClass *ttc = THRIFT_TRANSPORT_GET_CLASS (transport);
   gint32 sz_hbo, sz_nbo;
   guchar *tmpdata;
+  gboolean result;
 
   if(!ttc->resetConsumedMessageSize (transport, -1, error))
   {
@@ -267,15 +300,15 @@ thrift_framed_transport_flush (ThriftTransport *transport, GError **error)
     t->w_buf = g_byte_array_remove_range (t->w_buf, 0, t->w_buf->len);
   }
     
-  /* write the buffer and then empty it */
-  THRIFT_TRANSPORT_GET_CLASS (t->transport)->write (t->transport,
-                                                    tmpdata, sz_hbo,
-                                                    error);
-
-  THRIFT_TRANSPORT_GET_CLASS (t->transport)->flush (t->transport,
-                                                    error);
+  /* write the buffer and then empty it; a failure of either is the caller's
+   * to know about, and there is nothing to flush after a failed write */
+  result = THRIFT_TRANSPORT_GET_CLASS (t->transport)->write (t->transport,
+                                                             tmpdata, sz_hbo,
+                                                             error)
+           && THRIFT_TRANSPORT_GET_CLASS (t->transport)->flush (t->transport,
+                                                                error);
   g_free (tmpdata);
-  return TRUE;
+  return result;
 }
 
 /* initializes the instance */
@@ -305,6 +338,8 @@ thrift_framed_transport_finalize (GObject *object)
     g_byte_array_free (transport->w_buf, TRUE);
   }
   transport->w_buf = NULL;
+
+  G_OBJECT_CLASS (thrift_framed_transport_parent_class)->finalize (object);
 }
 
 /* property accessor */

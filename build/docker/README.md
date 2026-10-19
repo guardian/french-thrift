@@ -20,12 +20,12 @@ logic to determine their behavior:
 
 | Variable | Default | Usage |
 | -------- | ----- | ------- |
-| `DISTRO` | `ubuntu-focal` | Set by various build jobs in `.travis.yml` to run builds in different containers.  Not intended to be set externally.|
+| `DISTRO` | `ubuntu-jammy` | Set by various build jobs in `.travis.yml` to run builds in different containers.  Not intended to be set externally.|
 | `DOCKER_REPO` | `thrift/thrift-build` | The name of the Docker Hub repository to obtain and store docker images. |
 | `DOCKER_USER` | `<none>` | The Docker Hub account name containing the repository. |
 | `DOCKER_PASS` | `<none>` | The Docker Hub account password to use when pushing new tags. |
 
-For example, the default docker image that is used in builds if no overrides are specified would be: `thrift/thrift-build:ubuntu-focal`
+For example, the default docker image that is used in builds if no overrides are specified would be: `thrift/thrift-build:ubuntu-jammy`
 
 ### Forks ###
 
@@ -46,14 +46,13 @@ Docker Hub and push the resulting tags.
 
 ## Supported Containers ##
 
-The Travis CI (continuous integration) builds use the Ubuntu Jammy
-(22.04 LTS) and Focal (20.04 LTS) images to maximize language level
-coverage.
+The Travis CI (continuous integration) builds use the Ubuntu Noble (24.04 LTS)
+and Jammy (22.04 LTS) images to maximize language level coverage.
 
 ### Ubuntu ###
 
-* focal (stable, current)
-* jammy (next stable, WIP)
+* jammy (stable)
+* noble (next stable)
 
 ## Unsupported Containers ##
 
@@ -104,16 +103,16 @@ Then, to pull down the current image being used to build (the same way
 Travis CI does it) - if it is out of date in any way it will build a
 new one for you:
 
-    thrift$ DOCKER_REPO=thrift/thrift-build DISTRO=ubuntu-focal build/docker/refresh.sh
+    thrift$ DOCKER_REPO=thrift/thrift-build DISTRO=ubuntu-jammy build/docker/refresh.sh
 
 To run all unit tests (just like Travis CI does):
 
-    thrift$ dockerrun thrift/thrift-build:ubuntu-focal
+    thrift$ dockerrun thrift/thrift-build:ubuntu-jammy
     root@8caf56b0ce7b:/thrift/src# build/docker/scripts/autotools.sh
 
 To run the cross tests (just like Travis CI does):
 
-    thrift$ dockerrun thrift/thrift-build:ubuntu-focal
+    thrift$ dockerrun thrift/thrift-build:ubuntu-jammy
     root@8caf56b0ce7b:/thrift/src# build/docker/scripts/cross-test.sh
 
 When you are done, you want to clean up occasionally so that docker isn't using lots of extra disk space:
@@ -135,11 +134,11 @@ If you do not want to use the same scripts Travis CI does, you can do it manuall
 
 Build the image:
 
-Linux/Mac:
+Linux:
 
     thrift$ docker build --build-arg uid=$(id -u) --build-arg gid=$(id -g) -t thrift build/docker/ubuntu-jammy
 
-Windows:
+Windows/Mac:
 
     thrift$ docker build -t thrift build/docker/ubuntu-jammy
 
@@ -150,52 +149,49 @@ Open a command prompt in the image:
 
 ## Core Tool Versions per Dockerfile ##
 
-Last updated: March 5, 2024
+Last updated: May 2, 2026
 
-| Tool      | ubuntu-focal  | ubuntu-jammy  | Notes |
+| Tool      | ubuntu-jammy  | ubuntu-noble  | Notes |
 | :-------- | :------------ | :------------ | :---- |
-| ant       | 1.10.7        | 1.10.12       |       |
-| autoconf  | 2.69          | 2.71          |       |
-| automake  | 1.16.1        | 1.16.5        |       |
-| bison     | 3.5.1         | 3.8.2         |       |
-| boost     | 1.71.0        | 1.74.0        |       |
-| cmake     | 3.16.3        | 3.22.1        |       |
-| cppcheck  | 1.90          | 2.7           |       |
-| flex      | 2.6.4         | 2.6.4         |       |
-| libc6     | 2.31          | 2.35          | glibc |
-| libevent  | 2.0.16        | 2.0.16        |       |
-| libstdc++ | 10.5.0        | 10.5.0        |       |
-| make      | 4.2.1         | 4.3           |       |
-| openssl   | 1.1.1f        | 3.0.2         |       |
-| qt5       | 5.12.8        | 5.15.3        |       |
+| ant       | 1.10.12       |               |       |
+| autoconf  | 2.71          |               |       |
+| automake  | 1.16.5        |               |       |
+| bison     | 3.8.2         |               |       |
+| boost     | 1.74.0        |               |       |
+| cmake     | 3.22.1        |               |       |
+| cppcheck  | 2.7           |               |       |
+| flex      | 2.6.4         |               |       |
+| libc6     | 2.35          |               | glibc |
+| libevent  | 2.0.16        |               |       |
+| libstdc++ | 10.5.0        |               |       |
+| make      | 4.3           |               |       |
+| openssl   | 3.0.2         |               |       |
+| qt5       | 5.15.3        |               |       |
 
 ## Compiler/Language Versions per Dockerfile ##
 
-| Language  | ubuntu-focal  | ubuntu-jammy  | Notes |
+| Tool      | ubuntu-jammy  | ubuntu-noble  | Notes |
 | :-------- | :------------ | :------------ | :---- |
-| as of     | Mar 06, 2018  | Jul 1, 2019   |       |
-| as3       | 4.6.0         | 4.6.0         |       |
-| C++ gcc   | 9.4.0         | 11.4.0        |       |
-| C++ clang | 13.0.0        | 13.0.0        |       |
-| c\_glib   | 3.2.12        | 3.2.12        |       |
-| cl (sbcl) |               | 1.5.3         |       |
-| d         | 2.087.0       | 2.087.0       |       |
-| dart      | 2.7.2-1       | 2.7.2-1       |       |
+| as of     | Jul 1, 2019   |               |       |
+| C++ gcc   | 11.4.0        |               |       |
+| C++ clang | 13.0.0        |               |       |
+| c\_glib   | 3.2.12        |               |       |
+| cl (sbcl) | 1.5.3         |               |       |
+| d         | 2.087.0       |               |       |
+| dart      | 2.7.2-1       |               |       |
 | delphi    |               |               | Not in CI |
-| erlang    | OTP-25.3.2.9  | OTP-25.3.2.9  |       |
-| go        | 1.21.7        | 1.21.7        |       |
-| haxe      | 4.2.1         | 4.2.1         |       |
-| java      | 17            | 17            |       |
-| js        | Node.js 16.20.2, npm 8.19.4 | Node.js 16.20.2, npm 8.19.4 |     |
-| lua       | 5.2.4         | 5.2.4         | Lua 5.3: see THRIFT-4386 |
-| netstd    | 8.0.200       | 8.0.200       |       |
-| nodejs    | 16.20.2       | 16.20.2       |       |
-| ocaml     | 4.08.1        | 4.13.1        |       |
-| perl      | 5.30.0        | 5.34.0        |       |
-| php       | 7.4.3         | 8.1.2         |       |
-| python2   | 2.7.18        |               |       |
-| python3   | 3.8.10        | 3.10.12       |       |
-| ruby      | 2.7.0p0       | 3.0.2p107     |       |
-| rust      | 1.65.0        | 1.65.0        |       |
+| erlang    | OTP-25.3.2.9  |               |       |
+| go        | 1.21.7        |               |       |
+| haxe      | 4.2.1         |               |       |
+| java      | 17            |               |       |
+| js        |               |               | Node.js 16.20.2, npm 8.19.4 |
+| lua       | 5.2.4         |               | Lua 5.3: see THRIFT-4386 |
+| netstd    | 9.0           | 9.0           |       |
+| nodejs    | 16.20.2       |               |       |
+| ocaml     | 4.13.1        |               |       |
+| perl      | 5.34.0        |               |       |
+| php       | 8.2 (ondrej)  | 8.3           | jammy pulls 8.2 from ppa:ondrej/php |
+| python3   | 3.10.12       |               |       |
+| ruby      | 3.0.2p107     |               |       |
+| rust      | 1.99.0        |               |       |
 | smalltalk |               |               | Not in CI |
-| swift     | 5.7           | 5.7           |       |

@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -19,30 +19,30 @@
 # under the License.
 #
 
-$:.push('gen-rb')
-$:.unshift '../../lib/rb/lib'
+$:.push("gen-rb")
+$:.unshift "../../lib/rb/lib"
 
-require 'thrift'
+require "thrift"
 
-require 'calculator'
-require 'shared_types'
+require "calculator"
+require "shared_types"
 
 class CalculatorHandler
-  def initialize()
+  def initialize
     @log = {}
   end
 
-  def ping()
+  def ping
     puts "ping()"
   end
 
   def add(n1, n2)
     print "add(", n1, ",", n2, ")\n"
-    return n1 + n2
+    n1 + n2
   end
 
   def calculate(logid, work)
-    print "calculate(", logid, ", {", work.op, ",", work.num1, ",", work.num2,"})\n"
+    print "calculate(", logid, ", {", work.op, ",", work.num1, ",", work.num2, "})\n"
     if work.op == Operation::ADD
       val = work.num1 + work.num2
     elsif work.op == Operation::SUBTRACT
@@ -51,45 +51,43 @@ class CalculatorHandler
       val = work.num1 * work.num2
     elsif work.op == Operation::DIVIDE
       if work.num2 == 0
-        x = InvalidOperation.new()
+        x = InvalidOperation.new
         x.whatOp = work.op
         x.why = "Cannot divide by 0"
         raise x
       end
       val = work.num1 / work.num2
     else
-      x = InvalidOperation.new()
+      x = InvalidOperation.new
       x.whatOp = work.op
       x.why = "Invalid operation"
       raise x
     end
 
-    entry = SharedStruct.new()
+    entry = SharedStruct.new
     entry.key = logid
-    entry.value = "#{val}"
+    entry.value = val.to_s
     @log[logid] = entry
 
-    return val
-
+    val
   end
 
   def getStruct(key)
     print "getStruct(", key, ")\n"
-    return @log[key]
+    @log[key]
   end
 
-  def zip()
+  def zip
     print "zip\n"
   end
-
 end
 
-handler = CalculatorHandler.new()
+handler = CalculatorHandler.new
 processor = Calculator::Processor.new(handler)
 transport = Thrift::ServerSocket.new(9090)
-transportFactory = Thrift::BufferedTransportFactory.new()
+transportFactory = Thrift::BufferedTransportFactory.new
 server = Thrift::SimpleServer.new(processor, transport, transportFactory)
 
 puts "Starting the server..."
-server.serve()
+server.serve
 puts "done."

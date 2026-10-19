@@ -23,6 +23,8 @@
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TCompactProtocol.h>
 
+#include <boost/numeric/conversion/cast.hpp>
+
 #include <limits>
 #include <utility>
 #include <string>
@@ -39,6 +41,20 @@ namespace thrift {
 using std::shared_ptr;
 
 namespace transport {
+
+/**
+ * Legacy code in transport implementations have overflow issues
+ * that need to be enforced.
+ */
+template <typename To, typename From> To safe_numeric_cast(From i) {
+  try {
+    return boost::numeric_cast<To>(i);
+  }
+  catch (const std::bad_cast& bc) {
+    throw TTransportException(TTransportException::CORRUPTED_DATA,
+                              bc.what());
+  }
+}
 
 using namespace apache::thrift::protocol;
 using apache::thrift::protocol::TBinaryProtocol;
@@ -120,6 +136,24 @@ bool THeaderTransport::readFrame() {
                                 "Header transport frame is too large");
     }
 
+    // Also honour the operator-configured TConfiguration::maxFrameSize here,
+    // matching TFramedTransport::readFrame(); MAX_FRAME_SIZE alone is just the
+    // internal upper ceiling and is independent of the configured limit.
+    if (sz > maxFrameSize_) {
+      throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                "Received an oversized frame");
+    }
+
+    // Every branch below reads a four-byte magic word out of the frame and
+    // then reads the remainder as sz - 4. sz is unsigned, so a frame that
+    // declares fewer bytes than the magic word it carries would wrap that
+    // subtraction into a huge read length. Reject those sizes here, once, for
+    // all three branches.
+    if (sz < sizeof(magic_n)) {
+      throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                "Header transport frame is too small");
+    }
+
     ensureReadBuffer(sz);
 
     // We can use readAll here, because it would be an invalid frame otherwise
@@ -183,13 +217,17 @@ void THeaderTransport::readString(uint8_t*& ptr,
   int32_t strLen;
 
   uint32_t bytes = readVarint32(ptr, &strLen, headerBoundary);
-  if (strLen > headerBoundary - ptr) {
+  // Bound the string against the header bytes that remain once the length varint
+  // itself is accounted for, and reject a negative length so the size_t
+  // conversion in assign() below stays within the buffer. ptr is only advanced
+  // once these checks pass, keeping the "advances on success" contract above.
+  uint8_t* strStart = ptr + bytes;
+  if (strLen < 0 || strLen > headerBoundary - strStart) {
     throw TTransportException(TTransportException::CORRUPTED_DATA,
                               "Info header length exceeds header size");
   }
-  ptr += bytes;
-  str.assign(reinterpret_cast<const char*>(ptr), strLen);
-  ptr += strLen;
+  str.assign(reinterpret_cast<const char*>(strStart), strLen);
+  ptr = strStart + strLen;
 }
 
 void THeaderTransport::readHeaderFormat(uint16_t headerSize, uint32_t sz) {
@@ -206,7 +244,10 @@ void THeaderTransport::readHeaderFormat(uint16_t headerSize, uint32_t sz) {
   }
   headerSize *= 4;
   const uint8_t* const headerBoundary = ptr + headerSize;
-  if (headerSize > sz) {
+  // ptr already skips the 10-byte common header, so the header section has to
+  // fit in the remaining sz - 10 bytes; comparing against sz alone let the
+  // boundary sit up to 10 bytes past the receive buffer.
+  if (headerSize > sz - 10) {
     throw TTransportException(TTransportException::CORRUPTED_DATA,
                               "Header size is larger than frame");
   }
@@ -287,10 +328,23 @@ void THeaderTransport::untransform(uint8_t* ptr, uint32_t sz) {
       stream.avail_out = tBufSize_;
       err = inflate(&stream, Z_FINISH);
       if (err != Z_STREAM_END || stream.avail_out == 0) {
+        // Release the stream before leaving through the error path; inflateInit
+        // has already acquired it, and the throw would otherwise skip cleanup.
+        inflateEnd(&stream);
         throw TApplicationException(TApplicationException::MISSING_RESULT,
                                     "Error while zlib deflate");
       }
       sz = stream.total_out;
+
+      // Apply the configured frame-size limit to the post-transform payload as
+      // well: the decompressed data is what the caller ultimately reads, so it
+      // is bounded the same way an untransformed frame is in readFrame(). Release
+      // the stream before this throw too, keeping the original check order.
+      if (sz > maxFrameSize_) {
+        inflateEnd(&stream);
+        throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                  "Received an oversized frame after transform");
+      }
 
       err = inflateEnd(&stream);
       if (err != Z_OK) {
@@ -298,7 +352,13 @@ void THeaderTransport::untransform(uint8_t* ptr, uint32_t sz) {
                                     "Error while zlib deflateEnd");
       }
 
-      memcpy(ptr, tBuf_.get(), sz);
+      // The result now lives in tBuf_ and is typically larger than the source
+      // section it was read from, so it does not fit back into the receive
+      // buffer at ptr.  Swap the transform buffer in as the receive buffer and
+      // continue from its start instead of copying the result back in place.
+      rBuf_.swap(tBuf_);
+      std::swap(rBufSize_, tBufSize_);
+      ptr = rBuf_.get();
     } else {
       throw TApplicationException(TApplicationException::MISSING_RESULT, "Unknown transform");
     }
@@ -345,14 +405,32 @@ void THeaderTransport::transform(uint8_t* ptr, uint32_t sz) {
         throw TTransportException(TTransportException::CORRUPTED_DATA,
                                   "Error while zlib deflateInit");
       }
-      uint32_t tbuf_size = 0;
-      while (err == Z_OK) {
-        resizeTransformBuffer(tbuf_size);
 
-        stream.next_out = tBuf_.get();
-        stream.avail_out = tBufSize_;
-        err = deflate(&stream, Z_FINISH);
-        tbuf_size += DEFAULT_BUFFER_SIZE;
+      // Size the transform buffer to zlib's worst-case bound, plus the
+      // DEFAULT_BUFFER_SIZE headroom flush() relies on when it lays the header
+      // down in tBuf_, and compress in a single pass.
+      uLong needed = deflateBound(&stream, sz) + DEFAULT_BUFFER_SIZE;
+      if (needed > tBufSize_) {
+        // Sizing this buffer can throw (allocation failure, or the numeric cast
+        // for an unrepresentable size); release the stream first so those paths
+        // do not leak it. reset() is noexcept and the assignment cannot throw,
+        // so both fields are set together once the size and allocation succeed.
+        try {
+          uint32_t newSize = safe_numeric_cast<uint32_t>(needed);
+          tBuf_.reset(new uint8_t[newSize]);
+          tBufSize_ = newSize;
+        } catch (...) {
+          deflateEnd(&stream);
+          throw;
+        }
+      }
+      stream.next_out = tBuf_.get();
+      stream.avail_out = tBufSize_;
+      err = deflate(&stream, Z_FINISH);
+      if (err != Z_STREAM_END) {
+        deflateEnd(&stream);
+        throw TTransportException(TTransportException::CORRUPTED_DATA,
+                                  "Error while zlib deflate");
       }
       sz = stream.total_out;
 
@@ -362,6 +440,14 @@ void THeaderTransport::transform(uint8_t* ptr, uint32_t sz) {
                                   "Error while zlib deflateEnd");
       }
 
+      // The compressed frame replaces the source in the write buffer; grow the
+      // buffer first if the frame is larger.
+      if (sz > wBufSize_) {
+        wBuf_.reset(new uint8_t[sz]);
+        wBufSize_ = sz;
+        setWriteBuffer(wBuf_.get(), wBufSize_);
+        ptr = wBuf_.get();
+      }
       memcpy(ptr, tBuf_.get(), sz);
     } else {
       throw TTransportException(TTransportException::CORRUPTED_DATA, "Unknown transform");
@@ -586,13 +672,18 @@ uint32_t THeaderTransport::writeVarint32(int32_t n, uint8_t* pkt) {
   uint8_t buf[5];
   uint32_t wsize = 0;
 
+  // Encode over an unsigned copy so the shift is logical, not arithmetic: a
+  // negative value would otherwise keep its sign bit set on every >> and the
+  // loop would never satisfy the (val & ~0x7F) == 0 exit condition, writing
+  // past buf. The low 32 bits always fit in the five bytes buf holds.
+  uint32_t val = static_cast<uint32_t>(n);
   while (true) {
-    if ((n & ~0x7F) == 0) {
-      buf[wsize++] = (int8_t)n;
+    if ((val & ~0x7Fu) == 0) {
+      buf[wsize++] = static_cast<uint8_t>(val);
       break;
     } else {
-      buf[wsize++] = (int8_t)((n & 0x7F) | 0x80);
-      n >>= 7;
+      buf[wsize++] = static_cast<uint8_t>((val & 0x7F) | 0x80);
+      val >>= 7;
     }
   }
 
@@ -607,6 +698,11 @@ uint32_t THeaderTransport::writeVarint32(int32_t n, uint8_t* pkt) {
 uint32_t THeaderTransport::writeVarint16(int16_t n, uint8_t* pkt) {
   return writeVarint32(n, pkt);
 }
+
+uint16_t THeaderTransport::getNumTransforms() const {
+  return safe_numeric_cast<uint16_t>(writeTrans_.size());
+}
+
 }
 }
 } // apache::thrift::transport

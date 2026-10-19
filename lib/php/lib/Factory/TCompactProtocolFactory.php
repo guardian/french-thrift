@@ -21,6 +21,8 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Factory;
 
 use Thrift\Protocol\TCompactProtocol;
@@ -31,12 +33,13 @@ use Thrift\Transport\TTransport;
  */
 class TCompactProtocolFactory implements TProtocolFactory
 {
-    /**
-     * @param TTransport $trans
-     * @return TCompactProtocol
-     */
-    public function getProtocol($trans)
+    public function __construct(
+        private int $maxStringSize = TCompactProtocol::DEFAULT_MAX_STRING_SIZE,
+    ) {
+    }
+
+    public function getProtocol(TTransport $trans): TCompactProtocol
     {
-        return new TCompactProtocol($trans);
+        return new TCompactProtocol($trans, $this->maxStringSize);
     }
 }

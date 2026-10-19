@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,13 +21,15 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\SimpleJSON;
 
 use Thrift\Exception\TException;
 
 class CollectionMapKeyException extends TException
 {
-    public function __construct($message)
+    public function __construct(?string $message = null)
     {
         parent::__construct($message);
     }

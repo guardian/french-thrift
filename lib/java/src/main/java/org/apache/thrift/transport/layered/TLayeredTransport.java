@@ -47,7 +47,24 @@ public abstract class TLayeredTransport extends TTransport {
     innerTransport.checkReadBytesAvailable(numBytes);
   }
 
+  @Override
+  public void resetMessageSizeAndConsumedBytes(long newSize) throws TTransportException {
+    innerTransport.resetMessageSizeAndConsumedBytes(newSize);
+  }
+
   public TTransport getInnerTransport() {
     return innerTransport;
+  }
+
+  /**
+   * The maximum frame size a transport is already configured with, or the library default if it
+   * carries no configuration at all. A layered transport that was not asked for a maximum of its
+   * own passes this back, so that wrapping a transport cannot raise a limit its owner lowered.
+   */
+  protected static int configuredMaxFrameSize(TTransport transport) {
+    TConfiguration configuration = transport.getConfiguration();
+    return Objects.isNull(configuration)
+        ? TConfiguration.DEFAULT_MAX_FRAME_SIZE
+        : configuration.getMaxFrameSize();
   }
 }

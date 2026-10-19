@@ -63,7 +63,12 @@ public final class TMemoryInputTransport extends TEndpointTransport {
     pos_ = offset;
     endPos_ = offset + length;
     try {
+      // The buffer holds one whole message and nothing more can arrive, so bind the budget to it,
+      // as the constructor already does. The reset first is what lets a larger message follow a
+      // smaller one. Reads here are clamped to the buffer and short-read rather than checked
+      // against the budget, so this only tightens what the protocol may declare.
       resetConsumedMessageSize(-1);
+      updateKnownMessageSize(length);
     } catch (TTransportException e) {
       // ignore
     }
@@ -96,7 +101,6 @@ public final class TMemoryInputTransport extends TEndpointTransport {
     if (amtToRead > 0) {
       System.arraycopy(buf_, pos_, buf, off, amtToRead);
       consumeBuffer(amtToRead);
-      countConsumedMessageBytes(amtToRead);
     }
     return amtToRead;
   }
@@ -119,7 +123,13 @@ public final class TMemoryInputTransport extends TEndpointTransport {
     return endPos_ - pos_;
   }
 
+  @Override
   public void consumeBuffer(int len) {
     pos_ += len;
+    if (remainingMessageSize >= len) {
+      remainingMessageSize -= len;
+    } else {
+      remainingMessageSize = 0;
+    }
   }
 }

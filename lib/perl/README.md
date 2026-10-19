@@ -121,6 +121,39 @@ you can deal with these changes in a backwards compatible way in your projects u
 `eval  { require Thrift::Exception; require Thrift::MessageType; require Thrift::Type; }
  or do { require Thrift; }`
 
+## 0.25.0
+
+`Thrift::SSLSocket` no longer sets `SSL_verify_mode` on the connections it creates,
+so `IO::Socket::SSL` applies its own defaults instead: it verifies the server's
+certificate chain -- against `ca` when one is given, and against the system trust
+store otherwise -- and checks the host name it derives from the peer address
+against the certificate.
+
+Clients that pass `ca` are unaffected; that combination already verified both the
+chain and the name. Clients that do not pass `ca` now require the server's
+certificate to be trusted by the system store, and will fail a handshake they
+previously completed.
+
+The new `verify` option, default true, restores the previous handshake for callers
+who need it:
+
+`my $socket = Thrift::SSLSocket->new(host => $host, port => $port, verify => 0);`
+
+A false `verify` accepts any certificate, which leaves the connection open to
+interception, and is only appropriate on a network you already trust.
+
+`Thrift::SSLServerSocket` is unchanged. The same branch on a listener means "do not
+demand a client certificate", which is the ordinary posture for a TLS server.
+
+`Thrift::BinaryProtocol` now refuses a string or binary field longer than its maximum
+string size before reading it, with a `Thrift::TProtocolException` of type `SIZE_LIMIT`.
+The maximum defaults to `Thrift::BinaryProtocol::DEFAULT_MAX_STRING_SIZE`, 16384000
+bytes, the frame size limit the framed transports apply. It is the optional second
+argument of `Thrift::BinaryProtocol->new` and the first of
+`Thrift::BinaryProtocolFactory->new`; pass `0` to read strings of any length, as before:
+
+`my $protocol = Thrift::BinaryProtocol->new($transport, 0);`
+
 # Deprecations
 
 ## 0.11.0

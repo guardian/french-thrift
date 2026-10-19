@@ -139,6 +139,99 @@ excessive cpu overhead.
 
 This feature is also only enabled on non-oneway endpoints.
 
+A note about maps with container keys
+=====================================
+
+Go maps cannot be keyed by a slice or a map, so a thrift `map` whose key type
+is a `list`, `set`, `map`, or a typedef of one of those is generated as a
+slice of key/value pairs instead:
+
+    struct S { 1: map<list<string>, i32> m }
+
+    type S struct {
+        M []thrift.MapEntry[[]string, int32]
+    }
+
+Entries are written to the wire in slice order. As with `set` fields, writing
+a slice that contains two equal keys fails with an `INVALID_DATA` protocol
+exception. A map is unordered, so `Equals` compares the entries as a
+collection: two values holding the same entries in a different order are
+equal. Maps keyed by `binary` remain Go maps keyed by `string`.
+
+Maps keyed by a struct, an exception or a union are generated as `map[*K]V` by
+default. Because the key is a pointer, two decoded keys with equal contents are
+distinct map keys, and `Equals` compares them by identity. Pass the
+`struct_key_entries` option to generate those fields as
+`[]thrift.MapEntry[*K, V]` as well:
+
+    thrift --gen go:struct_key_entries file.thrift
+
+The option changes more than the Go type. `Equals` starts comparing key
+contents, which is the point. Writing a slice that holds two keys with equal
+contents fails with `INVALID_DATA`, where the map form silently wrote both.
+
+How that uniqueness check is done depends on the key. When every field of the
+key struct is a non-pointer scalar, the struct value is itself a valid Go map
+key and `==` on it agrees with `Equals`, so the check collects the keys in a
+set and runs in linear time. In a local benchmark, writing a field of 5000 such
+keys came within about 20 percent of the same data in `map[*K]V`, at the cost
+of one temporary set sized to the entry count.
+
+Any other key falls back to comparing every pair, which is quadratic: 5000
+entries cost about 12.5 million calls to `Equals` on every write. A key struct
+takes that path if it has an optional field, a field holding another struct, or
+a `binary`, `list`, `set` or `map` field, because none of those compare by
+content under `==`. Unions always take it, since all of their fields are
+optional. Container keys take it too. Keep those maps small, or keep the key
+struct to plain scalars.
+
+A typedef of a struct used as a key is the struct itself, since the generated
+`type KeyAlias = Key` is an alias, so the entry type is `[]thrift.MapEntry[*Key, V]`
+and the key compares like `Key` does.
+
+A note about typedefs of structs
+================================
+
+A typedef of a struct, union or exception is generated as a Go type alias:
+
+    typedef Inner Alias
+
+    type Alias = Inner
+
+`Alias` is the struct itself, with its `Read`, `Write` and `Equals` methods,
+and a field or argument declared with it is a `*Inner` like any other struct
+field. Earlier releases generated `type Alias *Inner`, a defined type over a
+pointer with no methods, so a package that used such a typedef in a field or a
+service signature did not compile. A typedef of a base type is unchanged and
+stays a defined type, `type TimestampMilliseconds int64`, with its `<Name>Ptr`
+helper.
+
+What changes for hand-written code that used an alias the IDL declared but
+never used, the only shape that compiled before:
+
+- A variable of the alias type held a `*Inner`; it now holds an `Inner`, and
+  the pointer moves outside the alias (`*Alias`).
+- The `<Name>Ptr` helper is no longer generated for such a typedef, because
+  the struct has none either.
+- Two typedefs of one struct are the same type, so a value of one is assignable
+  to the other, and `%T` prints the struct's name rather than the alias.
+
+A note about undefined enum values
+==================================
+
+An enum holding an integer the IDL does not define used to print `<UNSET>`
+from `String()`, which reads as "no value was sent" even though the integer
+arrived intact and is written back to the wire unchanged. `String()` now
+formats such a value as `Color(999)`, the shape `stringer` produces.
+`MarshalText`, and with it `encoding/json`, follow `String()`, so the text and
+JSON encoding of an undefined value changes the same way. Neither form
+round-trips through `UnmarshalText`, which still rejects any string that is not
+a defined name.
+
+Every enum also gains an `IsDefined() bool` method that reports whether the
+value is one of the IDL-defined constants. Code that compared `String()`
+against the literal `"<UNSET>"` should call `IsDefined()` instead.
+
 A note about server stop implementations
 ========================================
 
@@ -162,3 +255,44 @@ zero err time. Otherwise, the stop will wait for all the client
 connections to be closed gracefully util thrift.ServerStopTimeout is 
 reached, and client connections that are not closed after thrift.ServerStopTimeout 
 will be closed abruptly which may cause some client errors.
+
+A note about the minimum TLS version
+====================================
+
+The TLS socket constructors no longer pin a minimum protocol version of their
+own when the caller leaves `tls.Config.MinVersion` unset. Such a config now
+follows the `crypto/tls` default minimum -- TLS 1.2 in current Go releases --
+where the constructors previously set TLS 1.0.
+
+A `MinVersion` the caller sets is left untouched, so a caller that needs an
+older floor can ask for it explicitly:
+
+    conf := &thrift.TConfiguration{
+        TLSConfig: &tls.Config{MinVersion: tls.VersionTLS10},
+    }
+
+A note about the frames THeaderTransport writes
+===============================================
+
+`THeaderTransport.Flush` now holds the frames it writes to the transport's
+configured `MaxFrameSize`, the limit `ReadFrame` already applies to the frames
+it reads. A larger frame is not written; `Flush` returns a
+`TProtocolException` of type `SIZE_LIMIT` instead. The same applies to a
+header block larger than the frame format can describe (65535 words of four
+bytes).
+
+A client that sends frames larger than the default of 16384000 bytes needs a
+larger `MaxFrameSize` in its own configuration, not only in the server's:
+
+    conf := &thrift.TConfiguration{
+        MaxFrameSize: 64 * 1024 * 1024,
+    }
+
+A note about the frames TFramedTransport writes
+===============================================
+
+`TFramedTransport.Flush` holds the frames it writes to the same limit, through
+the same check. A larger frame is not written: `Flush` returns a
+`TProtocolException` of type `SIZE_LIMIT` and drops the frame, where it
+previously returned no error and wrote a frame `readFrame` refuses. The note
+above on raising `MaxFrameSize` applies to it as well.

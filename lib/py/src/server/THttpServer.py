@@ -17,13 +17,17 @@
 # under the License.
 #
 
+import re
 import ssl
 
-from six.moves import BaseHTTPServer
+import http.server as BaseHTTPServer
 
 from thrift.Thrift import TMessageType
 from thrift.server import TServer
 from thrift.transport import TTransport
+
+# Content-Length is 1*DIGIT (RFC 9110 8.6).
+_CONTENT_LENGTH = re.compile('[0-9]+')
 
 
 class ResponseException(Exception):
@@ -56,17 +60,25 @@ class THttpServer(TServer.TServer):
                  inputProtocolFactory,
                  outputProtocolFactory=None,
                  server_class=BaseHTTPServer.HTTPServer,
+                 max_body_size=TTransport.DEFAULT_MAX_FRAME_SIZE,
                  **kwargs):
         """Set up protocol factories and HTTP (or HTTPS) server.
 
         See BaseHTTPServer for server_address.
         See TServer for protocol factories.
 
+        max_body_size is the largest request body the server will read. A
+        request declaring more is answered with 413 before any of its body is
+        read. It defaults to DEFAULT_MAX_FRAME_SIZE, the limit the framed and
+        header transports apply.
+
         To make a secure server, provide the named arguments:
         * cafile    - to validate clients [optional]
         * cert_file - the server cert
         * key_file  - the server's key
         """
+        if not max_body_size > 0:
+            raise ValueError("max_body_size should be > 0")
         if outputProtocolFactory is None:
             outputProtocolFactory = inputProtocolFactory
 
@@ -75,14 +87,36 @@ class THttpServer(TServer.TServer):
 
         thttpserver = self
         self._replied = None
+        self._max_body_size = max_body_size
 
         class RequestHander(BaseHTTPServer.BaseHTTPRequestHandler):
             def do_POST(self):
                 # Don't care about the request path.
+                # Check the declared length before reading anything, then read
+                # the body whole: the length is the peer's number, one read()
+                # asks the connection for all of it at once, and nothing past
+                # the end of the body is ever to be asked for.
+                length = self.headers['Content-Length']
+                if length is None:
+                    self.send_error(411)
+                    return
+                # The whitespace around a field value is not part of it (RFC
+                # 9110 5.5). int() would also take a sign, underscores and
+                # whitespace of other kinds, so the value is checked first.
+                length = length.strip(' \t')
+                try:
+                    length = int(length) if _CONTENT_LENGTH.fullmatch(length) else -1
+                except ValueError:
+                    # More digits than int() converts.
+                    length = -1
+                if length < 0:
+                    self.send_error(400, "Invalid Content-Length")
+                    return
+                if length > thttpserver._max_body_size:
+                    self.send_error(413)
+                    return
                 thttpserver._replied = False
-                iftrans = TTransport.TFileObjectTransport(self.rfile)
-                itrans = TTransport.TBufferedTransport(
-                    iftrans, int(self.headers['Content-Length']))
+                itrans = TTransport.TMemoryBuffer(self.rfile.read(length))
                 otrans = TTransport.TMemoryBuffer()
                 iprot = thttpserver.inputProtocolFactory.getProtocol(itrans)
                 oprot = thttpserver.outputProtocolFactory.getProtocol(otrans)
@@ -117,10 +151,18 @@ class THttpServer(TServer.TServer):
         self.httpd = server_class(server_address, RequestHander)
 
         if (kwargs.get('cafile') or kwargs.get('cert_file') or kwargs.get('key_file')):
-            context = ssl.create_default_context(cafile=kwargs.get('cafile'))
-            context.check_hostname = False
+            if hasattr(ssl, 'PROTOCOL_TLS_SERVER'):
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            else:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+            cafile = kwargs.get('cafile')
+            if cafile:
+                context.load_verify_locations(cafile=cafile)
+                context.verify_mode = ssl.CERT_REQUIRED
+            else:
+                context.verify_mode = ssl.CERT_NONE
             context.load_cert_chain(kwargs.get('cert_file'), kwargs.get('key_file'))
-            context.verify_mode = ssl.CERT_REQUIRED if kwargs.get('cafile') else ssl.CERT_NONE
+            context.check_hostname = False
             self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
 
     def serve(self):

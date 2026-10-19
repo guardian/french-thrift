@@ -18,13 +18,16 @@
 #
 
 from thrift.Thrift import TException, TType, TFrozenDict
-from thrift.transport.TTransport import TTransportException
-from ..compat import binary_to_str, str_to_binary
+from thrift.transport.TTransport import TTransportException, DEFAULT_MAX_FRAME_SIZE
 
-import six
-import sys
 from itertools import islice
-from six.moves import zip
+
+# The longest string or binary field TBinaryProtocol and TCompactProtocol read
+# unless told otherwise. A length read from the wire becomes the read size the
+# protocol asks of its transport, and an unframed transport has no frame limit to
+# bound it, so the protocols apply the frame size limit themselves. Pass
+# string_length_limit=None to read strings of any length.
+DEFAULT_STRING_LENGTH_LIMIT = DEFAULT_MAX_FRAME_SIZE
 
 
 class TProtocolException(TException):
@@ -47,10 +50,23 @@ class TProtocolException(TException):
 class TProtocolBase(object):
     """Base class for Thrift protocol driver."""
 
+    DEFAULT_RECURSION_DEPTH = 64
+
     def __init__(self, trans):
         self.trans = trans
         self._fast_decode = None
         self._fast_encode = None
+        self._recursion_depth = 0
+
+    def increment_recursion_depth(self):
+        self._recursion_depth += 1
+        if self._recursion_depth > self.DEFAULT_RECURSION_DEPTH:
+            self._recursion_depth -= 1
+            raise TProtocolException(TProtocolException.DEPTH_LIMIT,
+                                     "Maximum recursion depth exceeded")
+
+    def decrement_recursion_depth(self):
+        self._recursion_depth -= 1
 
     @staticmethod
     def _check_length(limit, length):
@@ -119,13 +135,13 @@ class TProtocolBase(object):
         pass
 
     def writeString(self, str_val):
-        self.writeBinary(str_to_binary(str_val))
+        self.writeBinary(bytes(str_val, 'utf-8'))
 
-    def writeBinary(self, str_val):
+    def writeBinary(self, uuid):
         pass
 
-    def writeUtf8(self, str_val):
-        self.writeString(str_val.encode('utf8'))
+    def writeUuid(self, str_val):
+        pass
 
     def readMessageBegin(self):
         pass
@@ -182,15 +198,18 @@ class TProtocolBase(object):
         pass
 
     def readString(self):
-        return binary_to_str(self.readBinary())
+        return self.readBinary().decode('utf-8')
 
     def readBinary(self):
         pass
 
-    def readUtf8(self):
-        return self.readString().decode('utf8')
+    def readUuid(self):
+        pass
 
-    def skip(self, ttype):
+    def skip(self, ttype, max_depth=64):
+        if max_depth <= 0:
+            raise TProtocolException(TProtocolException.DEPTH_LIMIT,
+                                     "Maximum skip depth exceeded")
         if ttype == TType.BOOL:
             self.readBool()
         elif ttype == TType.BYTE:
@@ -211,25 +230,27 @@ class TProtocolBase(object):
                 (name, ttype, id) = self.readFieldBegin()
                 if ttype == TType.STOP:
                     break
-                self.skip(ttype)
+                self.skip(ttype, max_depth - 1)
                 self.readFieldEnd()
             self.readStructEnd()
         elif ttype == TType.MAP:
             (ktype, vtype, size) = self.readMapBegin()
             for i in range(size):
-                self.skip(ktype)
-                self.skip(vtype)
+                self.skip(ktype, max_depth - 1)
+                self.skip(vtype, max_depth - 1)
             self.readMapEnd()
         elif ttype == TType.SET:
             (etype, size) = self.readSetBegin()
             for i in range(size):
-                self.skip(etype)
+                self.skip(etype, max_depth - 1)
             self.readSetEnd()
         elif ttype == TType.LIST:
             (etype, size) = self.readListBegin()
             for i in range(size):
-                self.skip(etype)
+                self.skip(etype, max_depth - 1)
             self.readListEnd()
+        elif ttype == TType.UUID:
+            self.readUuid()
         else:
             raise TProtocolException(
                 TProtocolException.INVALID_DATA,
@@ -253,8 +274,7 @@ class TProtocolBase(object):
         ('readContainerMap', 'writeContainerMap', True),  # 13 TType.MAP
         ('readContainerSet', 'writeContainerSet', True),  # 14 TType.SET
         ('readContainerList', 'writeContainerList', True),  # 15 TType.LIST
-        (None, None, False),  # 16 TType.UTF8 # TODO: handle utf8 types?
-        (None, None, False)  # 17 TType.UTF16 # TODO: handle utf16 types?
+        ('readUuid', 'writeUuid', False),  # 16 TType.UUID
     )
 
     def _ttype_handlers(self, ttype, spec):
@@ -263,11 +283,6 @@ class TProtocolBase(object):
                 raise TProtocolException(type=TProtocolException.INVALID_DATA,
                                          message='Invalid binary field type %d' % ttype)
             return ('readBinary', 'writeBinary', False)
-        if sys.version_info[0] == 2 and spec == 'UTF8':
-            if ttype != TType.STRING:
-                raise TProtocolException(type=TProtocolException.INVALID_DATA,
-                                         message='Invalid string field type %d' % ttype)
-            return ('readUtf8', 'writeUtf8', False)
         return self._TTYPE_HANDLERS[ttype] if ttype < len(self._TTYPE_HANDLERS) else (None, None, False)
 
     def _read_by_ttype(self, ttype, spec, espec):
@@ -326,32 +341,38 @@ class TProtocolBase(object):
         return results
 
     def readStruct(self, obj, thrift_spec, is_immutable=False):
-        if is_immutable:
-            fields = {}
-        self.readStructBegin()
-        while True:
-            (fname, ftype, fid) = self.readFieldBegin()
-            if ftype == TType.STOP:
-                break
-            try:
-                field = thrift_spec[fid]
-            except IndexError:
-                self.skip(ftype)
-            else:
-                if field is not None and ftype == field[1]:
-                    fname = field[2]
-                    fspec = field[3]
-                    val = self.readFieldByTType(ftype, fspec)
-                    if is_immutable:
-                        fields[fname] = val
-                    else:
-                        setattr(obj, fname, val)
-                else:
+        # Structs generated with py:dynamic are read here instead of by a
+        # generated read(), so this applies the same depth limit.
+        self.increment_recursion_depth()
+        try:
+            if is_immutable:
+                fields = {}
+            self.readStructBegin()
+            while True:
+                (fname, ftype, fid) = self.readFieldBegin()
+                if ftype == TType.STOP:
+                    break
+                try:
+                    field = thrift_spec[fid]
+                except IndexError:
                     self.skip(ftype)
-            self.readFieldEnd()
-        self.readStructEnd()
-        if is_immutable:
-            return obj(**fields)
+                else:
+                    if field is not None and ftype == field[1]:
+                        fname = field[2]
+                        fspec = field[3]
+                        val = self.readFieldByTType(ftype, fspec)
+                        if is_immutable:
+                            fields[fname] = val
+                        else:
+                            setattr(obj, fname, val)
+                    else:
+                        self.skip(ftype)
+                self.readFieldEnd()
+            self.readStructEnd()
+            if is_immutable:
+                return obj(**fields)
+        finally:
+            self.decrement_recursion_depth()
 
     def writeContainerStruct(self, val, spec):
         val.write(self)
@@ -373,29 +394,33 @@ class TProtocolBase(object):
     def writeContainerMap(self, val, spec):
         ktype, kspec, vtype, vspec, _ = spec
         self.writeMapBegin(ktype, vtype, len(val))
-        for _ in zip(self._write_by_ttype(ktype, six.iterkeys(val), spec, kspec),
-                     self._write_by_ttype(vtype, six.itervalues(val), spec, vspec)):
+        for _ in zip(self._write_by_ttype(ktype, val.keys(), spec, kspec),
+                     self._write_by_ttype(vtype, val.values(), spec, vspec)):
             pass
         self.writeMapEnd()
 
     def writeStruct(self, obj, thrift_spec):
-        self.writeStructBegin(obj.__class__.__name__)
-        for field in thrift_spec:
-            if field is None:
-                continue
-            fname = field[2]
-            val = getattr(obj, fname)
-            if val is None:
-                # skip writing out unset fields
-                continue
-            fid = field[0]
-            ftype = field[1]
-            fspec = field[3]
-            self.writeFieldBegin(fname, ftype, fid)
-            self.writeFieldByTType(ftype, val, fspec)
-            self.writeFieldEnd()
-        self.writeFieldStop()
-        self.writeStructEnd()
+        self.increment_recursion_depth()
+        try:
+            self.writeStructBegin(obj.__class__.__name__)
+            for field in thrift_spec:
+                if field is None:
+                    continue
+                fname = field[2]
+                val = getattr(obj, fname)
+                if val is None:
+                    # skip writing out unset fields
+                    continue
+                fid = field[0]
+                ftype = field[1]
+                fspec = field[3]
+                self.writeFieldBegin(fname, ftype, fid)
+                self.writeFieldByTType(ftype, val, fspec)
+                self.writeFieldEnd()
+            self.writeFieldStop()
+            self.writeStructEnd()
+        finally:
+            self.decrement_recursion_depth()
 
     def _write_by_ttype(self, ttype, vals, spec, espec):
         _, writer_name, is_container = self._ttype_handlers(ttype, espec)

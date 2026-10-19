@@ -19,7 +19,7 @@
   -->
 
   <PropertyGroup>
-    <ThriftVersion>0.21.0</ThriftVersion>
+    <ThriftVersion>0.26.0</ThriftVersion>
     <ThriftVersionOutput>Thrift version $(ThriftVersion)</ThriftVersionOutput>
     <TargetFramework>netstandard2.0</TargetFramework>
     <LangVersion>latestMajor</LangVersion>
@@ -76,6 +76,8 @@
     <Exec Command="$(PathToThrift) -gen netstd:union,serial -r ../Thrift5320.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:union,serial -r ../Thrift5382.thrift" />
     <Exec Command="$(PathToThrift) -gen netstd:union,serial -r ../Thrift5795.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:union,serial -r ../Thrift6198.thrift" />
+    <Exec Command="$(PathToThrift) -gen netstd:union,serial -r ../Thrift6199.thrift" />
     <!-- special options (see ticket) -->
     <Exec Command="$(PathToThrift) -gen netstd                  -r ../Thrift5794.thrift" />
   </Target>

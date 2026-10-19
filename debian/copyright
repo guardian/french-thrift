@@ -15,14 +15,6 @@ code for the these subcomponents is subject to the terms and
 conditions of the following licenses.
 
 --------------------------------------------------
-Portions of the following files are licensed under the MIT License:
-
-  lib/erl/Makefile.am
-
-Please see doc/licenses/otp-base-license.txt for the full terms of this license.
-
-
---------------------------------------------------
 The following files contain some portions of code contributed under
 the Thrift Software License (see doc/licenses/old-thrift-license.txt), and relicensed
 under the Apache 2.0 License:
@@ -65,6 +57,7 @@ under the Apache 2.0 License:
   lib/netstd/Thrift/TApplicationException.cs
   lib/netstd/Thrift/Thrift.csproj
   lib/netstd/Thrift.sln
+  lib/netstd/Thrift.slnx
   lib/netstd/Thrift/Transport/Server/TServerSocketTransport.cs
   lib/netstd/Thrift/Transport/Server/TServerTransport.cs
   lib/netstd/Thrift/Transport/Client/TSocketTransport.cs
@@ -74,11 +67,10 @@ under the Apache 2.0 License:
   lib/netstd/Thrift/Transport/TTransportFactory.cs
   lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/Properties/AssemblyInfo.cs
   lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.netstd2/Thrift.Compile.netstd2.csproj
-  lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net6/Properties/AssemblyInfo.cs
-  lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net6/Thrift.Compile.net6.csproj
   lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net8/Properties/AssemblyInfo.cs
   lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net8/Thrift.Compile.net8.csproj
-  lib/rb/lib/thrift.rb
+  lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net9/Properties/AssemblyInfo.cs
+  lib/netstd/Tests/Thrift.Compile.Tests/Thrift.Compile.net9/Thrift.Compile.net9.csproj
   lib/st/README.md
   lib/st/thrift.st
   lib/cpp/test/OptionalRequiredTest.cpp

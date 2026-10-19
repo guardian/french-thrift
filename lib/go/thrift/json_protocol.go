@@ -314,11 +314,13 @@ func (p *TJSONProtocol) ReadMapBegin(ctx context.Context) (keyType TType, valueT
 	if err != nil {
 		return keyType, valueType, size, err
 	}
-	err = checkSizeForProtocol(int32(iSize), p.cfg)
+	size = int(iSize)
+
+	minElemSize := p.getMinSerializedSize(keyType) + p.getMinSerializedSize(valueType)
+	err = checkContainerSizeForProtocol(iSize, minElemSize, p.RemainingBytes(), p.cfg)
 	if err != nil {
 		return keyType, valueType, 0, err
 	}
-	size = int(iSize)
 
 	_, e = p.ParseObjectStart()
 	return keyType, valueType, size, e
@@ -492,11 +494,13 @@ func (p *TJSONProtocol) ParseElemListBegin() (elemType TType, size int, e error)
 	if err != nil {
 		return elemType, 0, err
 	}
-	err = checkSizeForProtocol(int32(nSize), p.cfg)
+	size = int(nSize)
+
+	minElemSize := p.getMinSerializedSize(elemType)
+	err = checkContainerSizeForProtocol(nSize, minElemSize, p.RemainingBytes(), p.cfg)
 	if err != nil {
 		return elemType, 0, err
 	}
-	size = int(nSize)
 	return elemType, size, nil
 }
 
@@ -563,5 +567,7 @@ func (p *TJSONProtocol) StringToTypeId(fieldType string) (TType, error) {
 	e := fmt.Errorf("Unknown type identifier: %s", fieldType)
 	return TType(STOP), NewTProtocolExceptionWithType(INVALID_DATA, e)
 }
+
+// Return the minimum number of bytes a type will consume on the wire
 
 var _ TConfigurationSetter = (*TJSONProtocol)(nil)

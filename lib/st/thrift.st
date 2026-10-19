@@ -69,6 +69,10 @@ sizeLimit
 unknown
 	^ 0! !
 
+!TProtocolError class methodsFor: 'as yet unclassified'!
+depthLimit
+	^ 6! !
+
 TError subclass: #TTransportError
 	instanceVariableNames: ''
 	classVariableNames: ''
@@ -191,7 +195,7 @@ type: anInteger
 	type := anInteger! !
 
 Object subclass: #TProtocol
-	instanceVariableNames: 'transport'
+	instanceVariableNames: 'transport recursionDepth stringSizeLimit'
 	classVariableNames: ''
 	poolDictionaries: ''
 	category: 'Thrift-Protocol'!
@@ -215,7 +219,7 @@ readBool
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 10/25/2007 00:02'!
 readByte
-	^ (self transport read: 1) first! !
+	^ (self transport readAll: 1) first! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 10/28/2007 16:24'!
 readDouble
@@ -249,7 +253,7 @@ readI64
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 11/1/2007 02:35'!
 readInt: size
 	| buf val |
-	buf := transport read: size.
+	buf := transport readAll: size.
 	val := self intFromByteArray: buf.
 	^ buf first > 16r7F
 		ifTrue: [self unsignedInt: val size: size]
@@ -257,16 +261,25 @@ readInt: size
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 10/24/2007 19:57'!
 readListBegin
+	| etype sz |
+	etype := self readByte.
+	sz := self readI32.
+	sz < 0 ifTrue: [TProtocolError signalWithCode: TProtocolError negativeSize].
 	^ TList new
-		elemType: self readByte;
-		size: self readI32! !
+		elemType: etype;
+		size: sz! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 10/24/2007 19:58'!
 readMapBegin
+	| ktype vtype sz |
+	ktype := self readByte.
+	vtype := self readByte.
+	sz := self readI32.
+	sz < 0 ifTrue: [TProtocolError signalWithCode: TProtocolError negativeSize].
 	^ TMap new
-		keyType: self readByte;
-		valueType: self readByte;
-		size: self readI32! !
+		keyType: ktype;
+		valueType: vtype;
+		size: sz! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 11/1/2007 04:22'!
 readMessageBegin
@@ -283,20 +296,25 @@ readMessageBegin
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 10/28/2007 16:24'!
 readRawInt: size
-	^ self intFromByteArray: (transport read: size)! !
+	^ self intFromByteArray: (transport readAll: size)! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 11/1/2007 00:59'!
 readSetBegin
-	"element type, size"
+	| etype sz |
+	etype := self readByte.
+	sz := self readI32.
+	sz < 0 ifTrue: [TProtocolError signalWithCode: TProtocolError negativeSize].
 	^ TSet new
-		elemType: self readByte;
-		size: self readI32! !
+		elemType: etype;
+		size: sz! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 02/07/2009 19:00'!
 readString
 	| sz |
 	sz := self readI32.
-	^ sz > 0 ifTrue: [(transport read: sz) asString] ifFalse: ['']! !
+	sz < 0 ifTrue: [TProtocolError signalWithCode: TProtocolError negativeSize].
+	self checkStringSize: sz.
+	^ sz > 0 ifTrue: [(transport readAll: sz) asString] ifFalse: ['']! !
 
 !TBinaryProtocol methodsFor: 'reading' stamp: 'pc 11/1/2007 04:22'!
 unsignedInt: val size: size
@@ -452,8 +470,15 @@ readStructBegin
 !TProtocol methodsFor: 'reading' stamp: 'pc 10/24/2007 19:40'!
 readStructEnd! !
 
-!TProtocol methodsFor: 'reading' stamp: 'pc 10/26/2007 21:34'!
+!TProtocol methodsFor: 'reading'!
 skip: aType
+	"Skipping descends through nested structs and containers the same way
+	 reading them does, so it draws on the same depth budget."
+	self incrementRecursionDepth.
+	^ [self skipType: aType] ensure: [self decrementRecursionDepth]! !
+
+!TProtocol methodsFor: 'reading' stamp: 'pc 10/26/2007 21:34'!
+skipType: aType
 	aType = TType stop ifTrue: [^ self].
 	aType = TType bool ifTrue: [^ self readBool].
 	aType = TType byte ifTrue: [^ self readByte].
@@ -493,6 +518,35 @@ transport
 !TProtocol methodsFor: 'as yet unclassified' stamp: 'pc 10/24/2007 17:28'!
 transport: aTransport
 	transport := aTransport! !
+
+!TProtocol methodsFor: 'as yet unclassified'!
+incrementRecursionDepth
+	recursionDepth := (recursionDepth ifNil: [0]) + 1.
+	recursionDepth > 64 ifTrue: [
+		recursionDepth := recursionDepth - 1.
+		TProtocolError signal: 'Maximum recursion depth exceeded']! !
+
+!TProtocol methodsFor: 'as yet unclassified'!
+decrementRecursionDepth
+	recursionDepth := (recursionDepth ifNil: [0]) - 1! !
+
+!TProtocol methodsFor: 'as yet unclassified'!
+stringSizeLimit
+	"Longest string or binary field this protocol will read. The declared
+	 length is a number the peer chose, and the read below is issued for all of
+	 it before any of those bytes have arrived. 16 MB is the value the other
+	 bindings use."
+	^ stringSizeLimit ifNil: [16384000]! !
+
+!TProtocol methodsFor: 'as yet unclassified'!
+stringSizeLimit: anInteger
+	anInteger > 0 ifFalse: [self error: 'stringSizeLimit must be positive'].
+	stringSizeLimit := anInteger! !
+
+!TProtocol methodsFor: 'as yet unclassified'!
+checkStringSize: anInteger
+	anInteger > self stringSizeLimit ifTrue: [
+		TProtocolError signalWithCode: TProtocolError sizeLimit]! !
 
 !TProtocol methodsFor: 'writing' stamp: 'pc 10/24/2007 19:37'!
 writeBool: aBool! !
@@ -733,9 +787,36 @@ read: anInteger
 
 !TTransport methodsFor: 'as yet unclassified' stamp: 'pc 10/24/2007 17:22'!
 readAll: anInteger
-	^ String streamContents: [:str |
-		[str size < anInteger] whileTrue:
-			[str nextPutAll: (self read: anInteger - str size)]]! !
+	"Read exactly anInteger bytes, looping until they have all arrived.
+
+	 A read: that answers nothing has to end the loop: asking the same source
+	 again for the same bytes cannot answer differently, so without this the
+	 loop never terminates.
+
+	 The result has the species of what read: answered. TSocket connects its
+	 stream 'binary', so a real transport answers a ByteArray, and the protocol
+	 decodes it by shifting the elements as integers. Accumulating into a String
+	 instead - as this used to - raises 'Improper store into indexable object'
+	 the first time it meets one."
+	| chunks chunk got out pos take |
+	chunks := OrderedCollection new.
+	got := 0.
+	[got < anInteger] whileTrue:
+		[chunk := self read: anInteger - got.
+		 chunk isEmpty ifTrue:
+			[TTransportError signal: 'Could not read ', anInteger asString, ' bytes'].
+		 chunks add: chunk.
+		 got := got + chunk size].
+	chunks isEmpty ifTrue: [^ String new].
+
+	out := chunks first species new: anInteger.
+	pos := 1.
+	chunks do: [:each |
+		take := each size min: anInteger - pos + 1.
+		take > 0 ifTrue:
+			[out replaceFrom: pos to: pos + take - 1 with: each startingAt: 1.
+			 pos := pos + take]].
+	^ out! !
 
 !TTransport methodsFor: 'as yet unclassified' stamp: 'pc 10/24/2007 17:22'!
 write: aString

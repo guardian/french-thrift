@@ -77,6 +77,8 @@ public:
   void init_generator() override;
   void close_generator() override;
   std::string display_name() const override;
+  std::string get_doc_type_name(t_type* type) override;
+  void generate_java_doc(std::ostream& out, t_function* function) override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -402,6 +404,21 @@ string t_kotlin_generator::type_name(t_type* ttype,
   }
 
   return kotlin_safe_name(ttype->get_name());
+}
+
+std::string t_kotlin_generator::get_doc_type_name(t_type* type) {
+  return type_name(type, false, false, true);
+}
+
+void t_kotlin_generator::generate_java_doc(ostream& out, t_function* function) {
+  stringstream doc;
+  if (function->has_doc()) {
+    doc << function->get_doc();
+  }
+  generate_throws_doc(doc, function);
+  if (!doc.str().empty()) {
+    generate_docstring_comment(out, "/**\n", " * ", doc.str(), " */\n");
+  }
 }
 
 /**
@@ -1352,40 +1369,57 @@ void t_kotlin_generator::generate_serialize_container(ostream& out, t_type* ttyp
  * Deserializes a container by reading its size and then iterating
  */
 void t_kotlin_generator::generate_deserialize_container(ostream& out, t_type* ttype) {
+  // A container header's element count is read before any element, so a peer can name a count it
+  // never backs with data. buildMap/buildSet/buildList reserve an initial capacity capped at 1024
+  // (coerceAtMost) rather than the raw count, then read every element; larger containers grow as
+  // elements are added. coerceAtMost keeps the original reject-on-negative behaviour, since a
+  // negative capacity still throws.
   if (ttype->is_map()) {
     out << "readMap { tmap ->" << '\n';
     indent_up();
-    indent(out) << "kotlin.collections.List(tmap.size) {" << '\n';
+    indent(out) << "buildMap(tmap.size.coerceAtMost(1024)) {" << '\n';
     indent_up();
-    indent(out);
+    indent(out) << "repeat(tmap.size) {" << '\n';
+    indent_up();
+    indent(out) << "put(";
     generate_deserialize_value(out, ((t_map*)ttype)->get_key_type());
-    out << " to ";
+    out << ", ";
     generate_deserialize_value(out, ((t_map*)ttype)->get_val_type());
-    out << '\n';
+    out << ")" << '\n';
     indent_down();
-    indent(out) << "}.associate { it }" << '\n';
+    indent(out) << "}" << '\n';
+    indent_down();
+    indent(out) << "}" << '\n';
     indent_down();
     indent(out) << "}";
   } else if (ttype->is_set()) {
     out << "readSet { tset ->" << '\n';
     indent_up();
-    indent(out) << "kotlin.collections.List(tset.size) {" << '\n';
+    indent(out) << "buildSet(tset.size.coerceAtMost(1024)) {" << '\n';
     indent_up();
-    indent(out);
+    indent(out) << "repeat(tset.size) {" << '\n';
+    indent_up();
+    indent(out) << "add(";
     generate_deserialize_value(out, ((t_set*)ttype)->get_elem_type());
-    out << '\n';
+    out << ")" << '\n';
     indent_down();
-    indent(out) << "}.toSet()" << '\n';
+    indent(out) << "}" << '\n';
+    indent_down();
+    indent(out) << "}" << '\n';
     indent_down();
     indent(out) << "}";
   } else if (ttype->is_list()) {
     out << "readList { tlist ->" << '\n';
     indent_up();
-    indent(out) << "kotlin.collections.List(tlist.size) {" << '\n';
+    indent(out) << "buildList(tlist.size.coerceAtMost(1024)) {" << '\n';
     indent_up();
-    indent(out);
+    indent(out) << "repeat(tlist.size) {" << '\n';
+    indent_up();
+    indent(out) << "add(";
     generate_deserialize_value(out, ((t_list*)ttype)->get_elem_type());
-    out << '\n';
+    out << ")" << '\n';
+    indent_down();
+    indent(out) << "}" << '\n';
     indent_down();
     indent(out) << "}" << '\n';
     indent_down();
@@ -1420,7 +1454,7 @@ void t_kotlin_generator::generate_service_interface(t_service* tservice) {
   out << "interface " << tservice->get_name() << " {" << '\n';
   indent_up();
   for (auto tfunc : tservice->get_functions()) {
-    generate_kdoc_comment(out, tfunc);
+    generate_java_doc(out, tfunc);
     indent(out) << function_signature(tfunc) << '\n';
   }
   scope_down(out);

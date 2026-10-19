@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,22 +7,22 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
-require 'thread'
+require "thread"
 
 module Thrift
   class ThreadPoolServer < BaseServer
-    def initialize(processor, server_transport, transport_factory=nil, protocol_factory=nil, num=20)
+    def initialize(processor, server_transport, transport_factory = nil, protocol_factory = nil, num = 20)
       super(processor, server_transport, transport_factory, protocol_factory)
       @thread_q = SizedQueue.new(num)
       @exception_q = Queue.new
@@ -46,34 +47,37 @@ module Thrift
         loop do
           @thread_q.push(:token)
           Thread.new do
-            begin
-              loop do
+            loop do
+              begin
                 client = @server_transport.accept
-                trans = @transport_factory.get_transport(client)
-                prot = @protocol_factory.get_protocol(trans)
-                begin
-                  loop do
-                    @processor.process(prot, prot)
-                  end
-                rescue Thrift::TransportException, Thrift::ProtocolException => e
-                ensure
-                  trans.close
-                end
+              rescue => e
+                next if defined?(OpenSSL::SSL::SSLError) && e.is_a?(OpenSSL::SSL::SSLError)
+                raise
               end
-            rescue => e
-              @exception_q.push(e)
-            ensure
-              @thread_q.pop # thread died!
+              trans = @transport_factory.get_transport(client)
+              prot = @protocol_factory.get_protocol(trans)
+              begin
+                loop do
+                  @processor.process(prot, prot)
+                end
+              rescue Thrift::TransportException, Thrift::ProtocolException
+              ensure
+                trans.close
+              end
             end
+          rescue => e
+            @exception_q.push(e)
+          ensure
+            @thread_q.pop # thread died!
           end
         end
       ensure
         @server_transport.close
       end
     end
-    
+
     def to_s
-      "threadpool(#{super.to_s})"
+      "threadpool(#{super})"
     end
   end
 end

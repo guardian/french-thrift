@@ -40,10 +40,11 @@ public class TFramedTransport extends TLayeredTransport {
   private final TMemoryInputTransport readBuffer_;
 
   public static class Factory extends TTransportFactory {
-    private final int maxLength_;
+    /** Null when no maximum was asked for, which leaves each transport's own alone. */
+    private final Integer maxLength_;
 
     public Factory() {
-      maxLength_ = TConfiguration.DEFAULT_MAX_FRAME_SIZE;
+      maxLength_ = null;
     }
 
     public Factory(int maxLength) {
@@ -52,7 +53,9 @@ public class TFramedTransport extends TLayeredTransport {
 
     @Override
     public TTransport getTransport(TTransport base) throws TTransportException {
-      return new TFramedTransport(base, maxLength_);
+      return Objects.isNull(maxLength_)
+          ? new TFramedTransport(base)
+          : new TFramedTransport(base, maxLength_);
     }
   }
 
@@ -75,7 +78,11 @@ public class TFramedTransport extends TLayeredTransport {
   }
 
   public TFramedTransport(TTransport transport) throws TTransportException {
-    this(transport, TConfiguration.DEFAULT_MAX_FRAME_SIZE);
+    // No maximum was asked for, so keep the one the transport already carries.
+    // Passing the library default here would silently raise a limit its owner
+    // had lowered -- and, because the configuration object belongs to the
+    // transport underneath, would do so for everything else sharing it.
+    this(transport, configuredMaxFrameSize(transport));
   }
 
   public void open() throws TTransportException {
@@ -129,6 +136,12 @@ public class TFramedTransport extends TLayeredTransport {
   private final byte[] i32buf = new byte[4];
 
   private void readFrame() throws TTransportException {
+    // Hand the framing reads below a full budget. Whatever is left of the previous frame's bound
+    // describes a frame we are done with, and an inner transport that decrements on read -- a
+    // TMemoryBuffer, or the TMemoryInputTransport the nonblocking server uses -- would otherwise
+    // refuse to let us read a frame larger than the last one.
+    resetMessageSizeAndConsumedBytes();
+
     getInnerTransport().readAll(i32buf, 0, 4);
     int size = decodeFrameSize(i32buf);
 
@@ -152,6 +165,16 @@ public class TFramedTransport extends TLayeredTransport {
     byte[] buff = new byte[size];
     getInnerTransport().readAll(buff, 0, size);
     readBuffer_.reset(buff);
+
+    // Bind the read budget to this frame, so that the protocol cannot be talked into sizing a
+    // field or a container from a number the frame is too small to carry.
+    //
+    // This has to discard consumption rather than accumulate it, which is why it is not
+    // updateKnownMessageSize(): getting the frame off the wire was itself charged to the inner
+    // transport whenever that one decrements, and charging it again against the frame's own bound
+    // would leave the frame unreadable. Everything the protocol reads from here on comes out of
+    // readBuffer_, so what is bound here stands for the whole frame.
+    resetMessageSizeAndConsumedBytes(size);
   }
 
   public void write(byte[] buf, int off, int len) throws TTransportException {

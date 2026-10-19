@@ -547,7 +547,7 @@ func TestWriteSimpleJSONProtocolList(t *testing.T) {
 		t.Fatalf("Unable to write %s due to error flushing: %s", thetype, e.Error())
 	}
 	str := trans.String()
-	str1 := new([]interface{})
+	str1 := new([]any)
 	err := json.Unmarshal([]byte(str), str1)
 	if err != nil {
 		t.Fatalf("Unable to decode %s, wrote: %s", thetype, str)
@@ -601,7 +601,7 @@ func TestWriteSimpleJSONProtocolSet(t *testing.T) {
 		t.Fatalf("Unable to write %s due to error flushing: %s", thetype, e.Error())
 	}
 	str := trans.String()
-	str1 := new([]interface{})
+	str1 := new([]any)
 	err := json.Unmarshal([]byte(str), str1)
 	if err != nil {
 		t.Fatalf("Unable to decode %s, wrote: %s", thetype, str)
@@ -790,4 +790,74 @@ func TestJSONContextStack(t *testing.T) {
 
 func TestTSimpleJSONProtocolUnmatchedBeginEnd(t *testing.T) {
 	UnmatchedBeginEndProtocolTest(t, NewTSimpleJSONProtocolFactory())
+}
+
+func TestReadSimpleJSONProtocolMapBeginSizeLimit(t *testing.T) {
+	ctx := context.Background()
+	trans := NewTMemoryBuffer()
+	wp := NewTSimpleJSONProtocol(trans)
+	if err := wp.WriteMapBegin(ctx, STRING, STRING, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if err := wp.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	rp := NewTSimpleJSONProtocolConf(trans, &TConfiguration{MaxMessageSize: 1024})
+	_, _, size, err := rp.ReadMapBegin(ctx)
+	if err == nil {
+		t.Fatalf("expected size-limit error reading oversized map, got nil with size %d", size)
+	}
+	if terr, ok := err.(TProtocolException); !ok || terr.TypeId() != SIZE_LIMIT {
+		t.Errorf("expected SIZE_LIMIT protocol exception, got %v", err)
+	}
+}
+
+func TestReadSimpleJSONProtocolMapBeginSizeOverflow(t *testing.T) {
+	// iSize = 1<<32 + 1; int32 narrowing wraps it to 1, which would pass checkSizeForProtocol.
+	// The map header is written directly as raw JSON to avoid int-width issues on 32-bit platforms.
+	overflowSize := int64(math.MaxInt32)*2 + 3 // = 4294967297 = 1<<32 + 1
+	buf := NewTMemoryBuffer()
+	buf.WriteString(fmt.Sprintf("[%d,%d,%d]", I32, I32, overflowSize))
+	proto := NewTSimpleJSONProtocolConf(buf, &TConfiguration{MaxMessageSize: 1024})
+	_, _, _, err := proto.ReadMapBegin(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	tpe, ok := err.(TProtocolException)
+	if !ok {
+		t.Fatalf("expected TProtocolException, got %T: %v", err, err)
+	}
+	if tpe.TypeId() != SIZE_LIMIT {
+		t.Errorf("expected SIZE_LIMIT, got %d: %v", tpe.TypeId(), err)
+	}
+}
+
+func TestReadSimpleJSONProtocolListBeginSizeOverflow(t *testing.T) {
+	// nSize = 1<<32 + 1; int32 narrowing wraps it to 1, which would pass checkSizeForProtocol.
+	// The list header is written directly as raw JSON to avoid int-width issues on 32-bit platforms.
+	overflowSize := int64(math.MaxInt32)*2 + 3 // = 4294967297 = 1<<32 + 1
+	for _, name := range []string{"list", "set"} {
+		t.Run(name, func(t *testing.T) {
+			buf := NewTMemoryBuffer()
+			buf.WriteString(fmt.Sprintf("[%d,%d]", I32, overflowSize))
+			proto := NewTSimpleJSONProtocolConf(buf, &TConfiguration{MaxMessageSize: 1024})
+			var err error
+			if name == "list" {
+				_, _, err = proto.ReadListBegin(context.Background())
+			} else {
+				_, _, err = proto.ReadSetBegin(context.Background())
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			tpe, ok := err.(TProtocolException)
+			if !ok {
+				t.Fatalf("expected TProtocolException, got %T: %v", err, err)
+			}
+			if tpe.TypeId() != SIZE_LIMIT {
+				t.Errorf("expected SIZE_LIMIT, got %d: %v", tpe.TypeId(), err)
+			}
+		})
+	}
 }

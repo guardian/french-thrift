@@ -1,7 +1,5 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * /*
- * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
  * distributed with this work for additional information
  * regarding copyright ownership. The ASF licenses this file
@@ -19,6 +17,8 @@
  * under the License.
  */
 
+namespace java com.incl
+
 const string foo = "bar"
 
 struct a_struct {
@@ -32,6 +32,10 @@ struct a_struct {
   8: string some_characters,
   9: string zomg_unicode,
   10: bool what_who,
+}
+
+exception IncludedExc {
+  1: string message
 }
 
 service AService {

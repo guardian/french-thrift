@@ -23,6 +23,13 @@
  * Tokenizes a thrift definition file.
  */
 
+/* Flex defines INT8_MIN and the other limit macros itself when it is not
+ * compiled as C99, guarded by #ifndef, and MSVC's stdint.h then redefines
+ * them (C4005). Including the header first makes the guards skip. */
+%top{
+#include <stdint.h>
+}
+
 %{
 
 /* This is redundant with some of the flags in Makefile.am, but it works
@@ -66,6 +73,8 @@
 #include "thrift/globals.h"
 #include "thrift/parse/t_program.h"
 
+static bool yyinput_reached_eof = false;
+
 /**
  * Must be included AFTER parse/t_program.h, but I can't remember why anymore
  * because I wrote this a while ago.
@@ -100,11 +109,6 @@ void error_no_longer_supported(const char* text, const char* replace_with) {
 %option lex-compat
 
 /**
- * Our inputs are all single files, so no need for yywrap
- */
-%option noyywrap
-
-/**
  * We don't use it, and it fires up warnings at -Wall
  */
 %option nounput
@@ -136,12 +140,17 @@ literal_begin (['\"])
   int state = 0;  // 0 = normal, 1 = "*" seen, "*/" seen
   while(state < 2)
   {
+    yyinput_reached_eof = false;
     int ch = yyinput();
     parsed.push_back(ch);
     switch (ch) {
-      case EOF:
-        yyerror("Unexpected end of file in doc-comment at %d\n", yylineno);
-        exit(1);
+      case 0:
+        if (yyinput_reached_eof) {
+          yyerror("Unexpected end of file in doc-comment at %d\n", yylineno);
+          exit(1);
+        }
+        state = 0;
+        break;
       case '*':
         state = 1;
         break;
@@ -179,12 +188,17 @@ literal_begin (['\"])
   int state = 0;  // 0 = normal, 1 = "*" seen, "*/" seen
   while(state < 2)
   {
+    yyinput_reached_eof = false;
     int ch = yyinput();
     parsed.push_back(ch);
     switch (ch) {
-      case EOF:
-        yyerror("Unexpected end of file in multiline comment at %d\n", yylineno);
-        exit(1);
+      case 0:
+        if (yyinput_reached_eof) {
+          yyerror("Unexpected end of file in multiline comment at %d\n", yylineno);
+          exit(1);
+        }
+        state = 0;
+        break;
       case '*':
         state = 1;
         break;
@@ -287,17 +301,33 @@ literal_begin (['\"])
   std::string result;
   for(;;)
   {
+    yyinput_reached_eof = false;
     int ch = yyinput();
     switch (ch) {
-      case EOF:
-        yyerror("End of file while read string at %d\n", yylineno);
-        exit(1);
+      case 0:
+        if (yyinput_reached_eof) {
+          yyerror("End of file while reading string at %d\n", yylineno);
+          exit(1);
+        }
+        result.push_back('\0');
+        continue;
       case '\n':
-        yyerror("End of line while read string at %d\n", yylineno - 1);
+        yyerror("End of line while reading string at %d\n", yylineno - 1);
         exit(1);
       case '\\':
+        yyinput_reached_eof = false;
         ch = yyinput();
         switch (ch) {
+          case 0:
+            if (yyinput_reached_eof) {
+              yyerror("End of file while reading string at %d\n", yylineno);
+              exit(1);
+            }
+            yyerror("Invalid escape byte 0x00. Use \\\\ for a literal backslash.\n");
+            return -1;
+          case '\n':
+            yyerror("End of line while reading string at %d\n", yylineno - 1);
+            exit(1);
           case 'r':
             result.push_back('\r');
             continue;
@@ -317,7 +347,12 @@ literal_begin (['\"])
             result.push_back('\\');
             continue;
           default:
-            yyerror("Bad escape character\n");
+            if (ch >= 0x20 && ch <= 0x7e) {
+              yyerror("Invalid escape sequence '\\%c'. Use \\\\ for a literal backslash.\n", ch);
+            } else {
+              yyerror("Invalid escape byte 0x%02X. Use \\\\ for a literal backslash.\n",
+                      static_cast<unsigned int>(ch));
+            }
             return -1;
         }
         break;
@@ -338,6 +373,12 @@ literal_begin (['\"])
 }
 
 %%
+
+// A zero from yyinput() can also be a literal NUL; yywrap marks actual EOF.
+int yywrap(void) {
+  yyinput_reached_eof = true;
+  return 1;
+}
 
 #ifdef _MSC_VER
 #pragma warning( pop )

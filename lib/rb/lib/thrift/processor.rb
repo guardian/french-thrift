@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,22 +7,27 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
-require 'logger'
+require "logger"
+require "thrift/protocol/base_protocol"
 
 module Thrift
   module Processor
-    def initialize(handler, logger=nil)
+    class ArgumentProtocolException < ProtocolException
+    end
+    private_constant :ArgumentProtocolException
+
+    def initialize(handler, logger = nil)
       @handler = handler
       if logger.nil?
         @logger = Logger.new(STDERR)
@@ -32,12 +38,26 @@ module Thrift
     end
 
     def process(iprot, oprot)
-      name, type, seqid  = iprot.read_message_begin
+      name, type, seqid = iprot.read_message_begin
+      unless type == MessageTypes::CALL || type == MessageTypes::ONEWAY
+        iprot.skip(Types::STRUCT)
+        iprot.read_message_end
+        x = ApplicationException.new(
+          ApplicationException::INVALID_MESSAGE_TYPE,
+          "Invalid message type #{type} for function #{name}",
+        )
+        write_error(x, oprot, name, seqid)
+        return false
+      end
+
       if respond_to?("process_#{name}")
         begin
           send("process_#{name}", seqid, iprot, oprot)
+        rescue ArgumentProtocolException => e
+          x = ApplicationException.new(ApplicationException::PROTOCOL_ERROR, e.message)
+          write_error(x, oprot, name, seqid)
         rescue => e
-          x = ApplicationException.new(ApplicationException::INTERNAL_ERROR, 'Internal error')
+          x = ApplicationException.new(ApplicationException::INTERNAL_ERROR, "Internal error")
           @logger.debug "Internal error : #{e.message}\n#{e.backtrace.join("\n")}"
           write_error(x, oprot, name, seqid)
         end
@@ -45,7 +65,7 @@ module Thrift
       else
         iprot.skip(Types::STRUCT)
         iprot.read_message_end
-        x = ApplicationException.new(ApplicationException::UNKNOWN_METHOD, 'Unknown function '+name)
+        x = ApplicationException.new(ApplicationException::UNKNOWN_METHOD, "Unknown function " + name)
         write_error(x, oprot, name, seqid)
         false
       end
@@ -56,6 +76,8 @@ module Thrift
       args.read(iprot)
       iprot.read_message_end
       args
+    rescue ProtocolException => e
+      raise ArgumentProtocolException.new(e.type, e.message)
     end
 
     def write_result(result, oprot, name, seqid)

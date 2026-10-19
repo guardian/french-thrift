@@ -48,6 +48,18 @@ function TProtocolException:__errorCodeToString()
   end
 end
 
+DEFAULT_RECURSION_DEPTH = 64
+
+-- The longest string or binary field a protocol will read by default. Same
+-- value the frame limit uses; override per protocol instance.
+DEFAULT_MAX_STRING_SIZE = 16384000
+
+-- The most elements a list, set or map may declare by default. Same value
+-- again: every element takes at least one byte on the wire, so no container in
+-- a message that fits into one frame of the default size exceeds it. Override
+-- per protocol instance with maxContainerSize; zero or less switches it off.
+DEFAULT_MAX_CONTAINER_SIZE = 16384000
+
 TProtocolBase = __TObject:new{
   __type = 'TProtocolBase',
   trans
@@ -63,7 +75,45 @@ function TProtocolBase:new(obj)
     error('You must provide ' .. ttype(self) .. ' with a trans')
   end
 
+  obj.recursionDepth = 0
   return __TObject.new(self, obj)
+end
+
+-- Refuses a declared string or binary length before anything is read for it.
+function TProtocolBase:checkStringSize(size)
+  local limit = self.maxStringSize or DEFAULT_MAX_STRING_SIZE
+  if size > limit then
+    terror(TProtocolException:new{
+      message = 'String size ' .. tostring(size) .. ' exceeds maximum ' .. tostring(limit),
+      errorCode = TProtocolException.SIZE_LIMIT
+    })
+  end
+end
+
+-- Refuses a declared list, set or map size before any element is read.
+function TProtocolBase:checkContainerSize(size)
+  local limit = self.maxContainerSize or DEFAULT_MAX_CONTAINER_SIZE
+  if limit > 0 and size > limit then
+    terror(TProtocolException:new{
+      message = 'Container size ' .. tostring(size) .. ' exceeds maximum ' .. tostring(limit),
+      errorCode = TProtocolException.SIZE_LIMIT
+    })
+  end
+end
+
+function TProtocolBase:incrementRecursionDepth()
+  self.recursionDepth = self.recursionDepth + 1
+  if self.recursionDepth > DEFAULT_RECURSION_DEPTH then
+    self.recursionDepth = self.recursionDepth - 1
+    terror(TProtocolException:new{
+      message = 'Maximum recursion depth exceeded',
+      errorCode = TProtocolException.DEPTH_LIMIT
+    })
+  end
+end
+
+function TProtocolBase:decrementRecursionDepth()
+  self.recursionDepth = self.recursionDepth - 1
 end
 
 function TProtocolBase:writeMessageBegin(name, ttype, seqid) end
@@ -86,6 +136,7 @@ function TProtocolBase:writeI32(i32) end
 function TProtocolBase:writeI64(i64) end
 function TProtocolBase:writeDouble(dub) end
 function TProtocolBase:writeString(str) end
+function TProtocolBase:writeUuid(uuid) end
 function TProtocolBase:readMessageBegin() end
 function TProtocolBase:readMessageEnd() end
 function TProtocolBase:readStructBegin() end
@@ -105,8 +156,20 @@ function TProtocolBase:readI32() end
 function TProtocolBase:readI64() end
 function TProtocolBase:readDouble() end
 function TProtocolBase:readString() end
+function TProtocolBase:readUuid() end
 
+-- Skipping descends through nested structs and containers the same way reading
+-- them does, so it draws on the same depth budget.
 function TProtocolBase:skip(ttype)
+  self:incrementRecursionDepth()
+  local ok, err = pcall(self.skipType, self, ttype)
+  self:decrementRecursionDepth()
+  if not ok then
+    error(err, 0)
+  end
+end
+
+function TProtocolBase:skipType(ttype)
   if ttype == TType.BOOL then
     self:readBool()
   elseif ttype == TType.BYTE then
@@ -151,6 +214,8 @@ function TProtocolBase:skip(ttype)
       self:skip(ettype)
     end
     self:readListEnd()
+  elseif ttype == TType.UUID then
+    self:readUuid()
   else
     terror(TProtocolException:new{
       message = 'Invalid data'

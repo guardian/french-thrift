@@ -21,6 +21,9 @@ use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 use threadpool::ThreadPool;
 
+#[cfg(feature = "rustls")]
+use rustls::ServerConfig;
+
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 #[cfg(unix)]
@@ -29,6 +32,8 @@ use std::path::Path;
 use crate::protocol::{
     TInputProtocol, TInputProtocolFactory, TOutputProtocol, TOutputProtocolFactory,
 };
+#[cfg(feature = "rustls")]
+use crate::transport::TTlsServerChannel;
 use crate::transport::{TIoChannel, TReadTransportFactory, TTcpChannel, TWriteTransportFactory};
 use crate::{ApplicationError, ApplicationErrorKind};
 
@@ -185,7 +190,7 @@ where
                 Ok(s) => {
                     s.set_nodelay(true).ok();
                     let channel = TTcpChannel::with_stream(s);
-                    self.handle_stream(channel)?;
+                    self.accept_stream(channel);
                 }
                 Err(e) => {
                     warn!("failed to accept remote connection with error {:?}", e);
@@ -196,6 +201,41 @@ where
         Err(crate::Error::Application(ApplicationError {
             kind: ApplicationErrorKind::Unknown,
             message: "aborted listen loop".into(),
+        }))
+    }
+
+    /// Listen for incoming TLS connections on `listen_address`.
+    ///
+    /// `config` controls certificate selection, client authentication, crypto
+    /// provider, and protocol policy. Accepted connections are handed to a
+    /// worker before the TLS handshake begins, so the accept loop does not
+    /// block on a peer that connects without completing a handshake.
+    #[cfg(feature = "rustls")]
+    pub fn listen_tls<A: ToSocketAddrs>(
+        &mut self,
+        listen_address: A,
+        config: Arc<ServerConfig>,
+    ) -> crate::Result<()> {
+        let listener = TcpListener::bind(listen_address)?;
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    stream.set_nodelay(true).ok();
+                    let channel = TTlsServerChannel::with_stream(stream, Arc::clone(&config))?;
+                    self.accept_stream(channel);
+                }
+                Err(error) => {
+                    warn!(
+                        "failed to accept remote TLS connection with error {:?}",
+                        error
+                    );
+                }
+            }
+        }
+
+        Err(crate::Error::Application(ApplicationError {
+            kind: ApplicationErrorKind::Unknown,
+            message: "aborted TLS listen loop".into(),
         }))
     }
 
@@ -213,7 +253,7 @@ where
         for stream in listener.incoming() {
             match stream {
                 Ok(s) => {
-                    self.handle_stream(s)?;
+                    self.accept_stream(s);
                 }
                 Err(e) => {
                     warn!(
@@ -228,6 +268,16 @@ where
             kind: ApplicationErrorKind::Unknown,
             message: "aborted listen loop".into(),
         }))
+    }
+
+    /// Hands an accepted connection to a worker. A connection that cannot be
+    /// set up, for example because its stream cannot be duplicated while the
+    /// process is out of file descriptors, is logged and dropped, and the
+    /// listen loop goes on accepting.
+    fn accept_stream<S: TIoChannel + Send + 'static>(&mut self, stream: S) {
+        if let Err(e) = self.handle_stream(stream) {
+            warn!("failed to set up remote connection with error {:?}", e);
+        }
     }
 
     fn handle_stream<S: TIoChannel + Send + 'static>(&mut self, stream: S) -> crate::Result<()> {
@@ -282,5 +332,86 @@ fn handle_incoming_connection<PRC>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::{self, Read, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use crate::protocol::{TBinaryInputProtocolFactory, TBinaryOutputProtocolFactory};
+    use crate::transport::{
+        ReadHalf, TBufferChannel, TBufferedReadTransportFactory, TBufferedWriteTransportFactory,
+        WriteHalf,
+    };
+
+    /// A connection whose `split()` fails, as `TTcpChannel::split()` does when
+    /// the stream cannot be duplicated.
+    struct UnsplittableChannel;
+
+    impl Read for UnsplittableChannel {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for UnsplittableChannel {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl TIoChannel for UnsplittableChannel {
+        fn split(self) -> crate::Result<(ReadHalf<Self>, WriteHalf<Self>)> {
+            Err(crate::Error::Transport(crate::TransportError::new(
+                TransportErrorKind::Unknown,
+                "cannot clone underlying stream",
+            )))
+        }
+    }
+
+    /// Reports each connection it is handed, then ends it.
+    struct ReportingProcessor(mpsc::Sender<()>);
+
+    impl TProcessor for ReportingProcessor {
+        fn process(
+            &self,
+            _: &mut dyn TInputProtocol,
+            _: &mut dyn TOutputProtocol,
+        ) -> crate::Result<()> {
+            self.0.send(()).ok();
+            Err(crate::Error::Transport(crate::TransportError::new(
+                TransportErrorKind::EndOfFile,
+                "done",
+            )))
+        }
+    }
+
+    #[test]
+    fn must_serve_the_next_connection_after_one_fails_to_set_up() {
+        let (served, connections) = mpsc::channel();
+        let mut server = TServer::new(
+            TBufferedReadTransportFactory::new(),
+            TBinaryInputProtocolFactory::new(),
+            TBufferedWriteTransportFactory::new(),
+            TBinaryOutputProtocolFactory::new(),
+            ReportingProcessor(served),
+            1,
+        );
+
+        server.accept_stream(UnsplittableChannel);
+        server.accept_stream(TBufferChannel::with_capacity(8, 8));
+
+        connections
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the connection after the failed one was not served");
     }
 }

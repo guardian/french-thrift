@@ -83,7 +83,7 @@ inline void TZlibTransport::checkZlibRvNothrow(int status, const char* message) 
   if (status != Z_OK) {
     string output = "TZlibTransport: zlib failure in destructor: "
                     + TZlibTransportException::errorMessage(status, message);
-    GlobalOutput(output.c_str());
+    TOutput::instance()(output.c_str());
   }
 }
 
@@ -149,6 +149,7 @@ uint32_t TZlibTransport::read(uint8_t* buf, uint32_t len) {
     need -= give;
     buf += give;
     urpos_ += give;
+    countConsumedMessageBytes(give);
 
     // If they were satisfied, we are done.
     if (need == 0) {
@@ -407,9 +408,22 @@ TZlibTransportFactory::TZlibTransportFactory(std::shared_ptr<TTransportFactory> 
 
 std::shared_ptr<TTransport> TZlibTransportFactory::getTransport(std::shared_ptr<TTransport> trans) {
   if (transportFactory_) {
-    return std::shared_ptr<TTransport>(new TZlibTransport(transportFactory_->getTransport(trans)));
+    std::shared_ptr<TTransport> inner = transportFactory_->getTransport(trans);
+    return std::shared_ptr<TTransport>(new TZlibTransport(inner,
+                                                            TZlibTransport::DEFAULT_URBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_CRBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_UWBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_CWBUF_SIZE,
+                                                            Z_DEFAULT_COMPRESSION,
+                                                            inner->getConfiguration()));
   } else {
-    return std::shared_ptr<TTransport>(new TZlibTransport(trans));
+    return std::shared_ptr<TTransport>(new TZlibTransport(trans,
+                                                            TZlibTransport::DEFAULT_URBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_CRBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_UWBUF_SIZE,
+                                                            TZlibTransport::DEFAULT_CWBUF_SIZE,
+                                                            Z_DEFAULT_COMPRESSION,
+                                                            trans->getConfiguration()));
   }
 }
 }

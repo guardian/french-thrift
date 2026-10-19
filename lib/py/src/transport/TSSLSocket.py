@@ -24,9 +24,10 @@ import ssl
 import sys
 import warnings
 
-from .sslcompat import _match_hostname, _match_has_ipaddress
+from .sslcompat import _match_hostname, match_peer_ipaddress
 from thrift.transport import TSocket
 from thrift.transport.TTransport import TTransportException
+
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings(
@@ -45,8 +46,13 @@ class TSSLBase(object):
     # SSL 2.0 and 3.0 are disabled via ssl.OP_NO_SSLv2 and ssl.OP_NO_SSLv3.
     # For python < 2.7.9, use TLS 1.0 since TLSv1_X nor OP_NO_SSLvX is
     # unavailable.
-    _default_protocol = ssl.PROTOCOL_SSLv23 if _has_ssl_context else \
-        ssl.PROTOCOL_TLSv1
+    # For python < 3.6, use SSLv23 since TLS is not available
+    if sys.version_info < (3, 6):
+        _default_protocol = ssl.PROTOCOL_SSLv23 if _has_ssl_context else \
+            ssl.PROTOCOL_TLSv1
+    else:
+        _default_protocol = ssl.PROTOCOL_TLS_CLIENT if _has_ssl_context else \
+            ssl.PROTOCOL_TLSv1
 
     def _init_context(self, ssl_version):
         if self._has_ssl_context:
@@ -168,10 +174,21 @@ class TSSLBase(object):
             raise IOError('No such certfile found: %s' % (certfile))
         self._certfile = certfile
 
+    @property
+    def _context_checks_hostname(self):
+        return self._has_ssl_context and bool(
+            getattr(self._context, 'check_hostname', False))
+
     def _wrap_socket(self, sock):
         if self._has_ssl_context:
             if not self._custom_context:
                 self.ssl_context.verify_mode = self.cert_reqs
+                # Have OpenSSL match the host name during the handshake. The
+                # PROTOCOL_TLS_CLIENT default already does; an explicitly
+                # supplied ssl_version builds a context with it off, and then
+                # nothing else was checking the name.
+                if self._should_verify and not self._server_side:
+                    self.ssl_context.check_hostname = True
                 if self.certfile:
                     self.ssl_context.load_cert_chain(self.certfile,
                                                      self.keyfile)
@@ -301,6 +318,14 @@ class TSSLSocket(TSocket.TSocket, TSSLBase):
         super(TSSLSocket, self).open()
         if self._should_verify:
             self.peercert = self.handle.getpeercert()
+            if self._context_checks_hostname and \
+                    self._validate_callback is _match_hostname:
+                # OpenSSL already matched the name during the handshake, and
+                # did it to RFC 6125 rather than to whatever this Python
+                # version still ships. A caller-supplied callback is still
+                # honoured, since it may be checking something else entirely.
+                self.is_valid = True
+                return
             try:
                 self._validate_callback(self.peercert, self._server_hostname)
                 self.is_valid = True
@@ -333,9 +358,22 @@ class TSSLServerSocket(TSocket.TServerSocket, TSSLBase):
           ``server_hostname``: Passed to SSLContext.wrap_socket
 
         Common keyword argument:
-          ``validate_callback`` (cert, hostname) -> None:
-              Called after SSL handshake. Can raise when hostname does not
-              match the cert.
+          ``validate_callback`` (cert, peer_address) -> None:
+              Called after the SSL handshake whenever ``cert_reqs`` asks for
+              a client certificate. It receives the certificate as
+              ``getpeercert()`` returns it, and the address the connection
+              came from. Raise to refuse the connection. The default,
+              ``thrift.transport.sslcompat.match_peer_ipaddress``, requires
+              the peer address among the IP subjectAltName records of the
+              certificate, on every Python version. It does not match DNS
+              records, because a server has no name for its client. Use this
+              callback to decide which subjects may connect. For example::
+
+                  def only_thrift_clients(cert, peer_address):
+                      subject = dict(x[0] for x in cert.get('subject', ()))
+                      if subject.get('organizationalUnitName') != 'Apache Thrift':
+                          raise TTransportException(
+                              message='client certificate not allowed')
         """
         if args:
             if len(args) > 3:
@@ -349,17 +387,18 @@ class TSSLServerSocket(TSocket.TServerSocket, TSSLBase):
             # Preserve existing behaviors for default values
             if 'cert_reqs' not in kwargs:
                 kwargs['cert_reqs'] = ssl.CERT_NONE
-            if'certfile' not in kwargs:
+            if 'certfile' not in kwargs:
                 kwargs['certfile'] = 'cert.pem'
 
         unix_socket = kwargs.pop('unix_socket', None)
+        # The server only matches the address the connection came from, so
+        # the IP matcher is the default on every Python version, not
+        # ssl.match_hostname where that still exists. The two disagree on an
+        # IPv4-mapped peer and on the commonName fallback.
         self._validate_callback = \
-            kwargs.pop('validate_callback', _match_hostname)
+            kwargs.pop('validate_callback', match_peer_ipaddress)
         TSSLBase.__init__(self, True, None, kwargs)
         TSocket.TServerSocket.__init__(self, host, port, unix_socket)
-        if self._should_verify and not _match_has_ipaddress:
-            raise ValueError('Need ipaddress and backports.ssl_match_hostname '
-                             'module to verify client certificate')
 
     def setCertfile(self, certfile):
         """Set or change the server certificate file used to wrap new

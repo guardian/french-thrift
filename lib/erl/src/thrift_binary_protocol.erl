@@ -37,7 +37,11 @@
 -record(binary_protocol, {
     transport :: term(),
     strict_read = true :: boolean(),
-    strict_write = true :: boolean()
+    strict_write = true :: boolean(),
+    % the most a message may take; new/2 settles it
+    max_message_size :: pos_integer() | undefined,
+    % what the message being read may still take; undefined between messages
+    message_bytes_left :: non_neg_integer() | undefined
 }).
 
 -define(VERSION_MASK, 16#FFFF0000).
@@ -47,13 +51,26 @@
 new(Transport) ->
     new(Transport, _Options = []).
 
+%%--------------------------------------------------------------------
+%% Options include:
+%%   {strict_read, Bool}, {strict_write, Bool}
+%%   {max_message_size, Bytes}  = The longest message to read, in place of the
+%%                                thrift application's max_message_size
+%%--------------------------------------------------------------------
 new(Transport, Options) ->
     State = #binary_protocol{transport = Transport},
     State1 = parse_options(Options, State),
-    thrift_protocol:new(?MODULE, State1).
+    thrift_protocol:new(?MODULE, State1#binary_protocol{max_message_size = max_message_size(State1)}).
+
+max_message_size(#binary_protocol{max_message_size = undefined}) ->
+    application:get_env(thrift, max_message_size, ?DEFAULT_MAX_MESSAGE_SIZE);
+max_message_size(#binary_protocol{max_message_size = Max}) ->
+    Max.
 
 parse_options([], State) ->
     State;
+parse_options([{max_message_size, Max} | Rest], State) when is_integer(Max), Max > 0 ->
+    parse_options(Rest, State#binary_protocol{max_message_size = Max});
 parse_options([{strict_read, Bool} | Rest], State) when is_boolean(Bool) ->
     parse_options(Rest, State#binary_protocol{strict_read = Bool});
 parse_options([{strict_write, Bool} | Rest], State) when is_boolean(Bool) ->
@@ -164,19 +181,22 @@ write(This = #binary_protocol{transport = Trans}, Data) ->
 
 %%
 
-read(This0, message_begin) ->
-    {This1, Initial} = read(This0, ui32),
+read(This0 = #binary_protocol{max_message_size = Max}, message_begin) ->
+    {This1, Initial} = read(This0#binary_protocol{message_bytes_left = Max}, ui32),
     case Initial of
         {ok, Sz} when Sz band ?VERSION_MASK =:= ?VERSION_1 ->
             %% we're at version 1
-            {This2, {ok, Name}} = read(This1, string),
-            {This3, {ok, SeqId}} = read(This2, i32),
-            Type = Sz band ?TYPE_MASK,
-            {This3, #protocol_message_begin{
-                name = binary_to_list(Name),
-                type = Type,
-                seqid = SeqId
-            }};
+            case read(This1, i32) of
+                {This2, {ok, NameSz}} ->
+                    case read_name(This2, NameSz) of
+                        {This3, {ok, Name}} ->
+                            read_message_begin(This3, Name, Sz band ?TYPE_MASK);
+                        {This3, Error} ->
+                            {This3, Error}
+                    end;
+                {This2, Error} ->
+                    {This2, Error}
+            end;
         {ok, Sz} when Sz < 0 ->
             %% there's a version number but it's unexpected
             {This1, {error, {bad_binary_protocol_version, Sz}}};
@@ -185,19 +205,20 @@ read(This0, message_begin) ->
             {This1, {error, no_binary_protocol_version}};
         {ok, Sz} when This1#binary_protocol.strict_read =:= false ->
             %% strict_read is false, so just read the old way
-            {This2, {ok, Name}} = read_data(This1, Sz),
-            {This3, {ok, Type}} = read(This2, byte),
-            {This4, {ok, SeqId}} = read(This3, i32),
-            {This4, #protocol_message_begin{
-                name = binary_to_list(Name),
-                type = Type,
-                seqid = SeqId
-            }};
+            case read_name(This1, Sz) of
+                {This2, {ok, Name}} ->
+                    case read(This2, byte) of
+                        {This3, {ok, Type}} -> read_message_begin(This3, Name, Type);
+                        {This3, Error} -> {This3, Error}
+                    end;
+                {This2, Error} ->
+                    {This2, Error}
+            end;
         Else ->
             {This1, Else}
     end;
 read(This, message_end) ->
-    {This, ok};
+    {This#binary_protocol{message_bytes_left = undefined}, ok};
 read(This, struct_begin) ->
     {This, ok};
 read(This, struct_end) ->
@@ -220,6 +241,7 @@ read(This0, map_begin) ->
     {This1, {ok, Ktype}} = read(This0, byte),
     {This2, {ok, Vtype}} = read(This1, byte),
     {This3, {ok, Size}} = read(This2, i32),
+    if Size < 0 -> error({protocol_error, negative_size}); true -> ok end,
     {This3, #protocol_map_begin{
         ktype = Ktype,
         vtype = Vtype,
@@ -230,6 +252,7 @@ read(This, map_end) ->
 read(This0, list_begin) ->
     {This1, {ok, Etype}} = read(This0, byte),
     {This2, {ok, Size}} = read(This1, i32),
+    if Size < 0 -> error({protocol_error, negative_size}); true -> ok end,
     {This2, #protocol_list_begin{
         etype = Etype,
         size = Size
@@ -239,6 +262,7 @@ read(This, list_end) ->
 read(This0, set_begin) ->
     {This1, {ok, Etype}} = read(This0, byte),
     {This2, {ok, Size}} = read(This1, i32),
+    if Size < 0 -> error({protocol_error, negative_size}); true -> ok end,
     {This2, #protocol_set_begin{
         etype = Etype,
         size = Size
@@ -298,25 +322,67 @@ read(This0, double) ->
 % returns a binary directly, call binary_to_list if necessary
 read(This0, string) ->
     {This1, {ok, Sz}} = read(This0, i32),
+    if Sz < 0 -> error({protocol_error, negative_size}); true -> ok end,
     read_data(This1, Sz).
+
+%% The name of a message, refused before it is read if it is longer than
+%% ?MAX_MESSAGE_NAME_SIZE.
+read_name(_This, Sz) when Sz < 0 ->
+    error({protocol_error, negative_size});
+read_name(This, Sz) when Sz > ?MAX_MESSAGE_NAME_SIZE ->
+    {This, {error, {message_name_exceeds_maximum, ?MAX_MESSAGE_NAME_SIZE}}};
+read_name(This, Sz) ->
+    read_data(This, Sz).
+
+%% The sequence id that ends a message header, once its name and type are read.
+read_message_begin(This0, Name, Type) ->
+    case read(This0, i32) of
+        {This1, {ok, SeqId}} ->
+            {This1, #protocol_message_begin{
+                name = binary_to_list(Name),
+                type = Type,
+                seqid = SeqId
+            }};
+        {This1, Error} ->
+            {This1, Error}
+    end.
 
 -spec read_data(#binary_protocol{}, non_neg_integer()) ->
     {#binary_protocol{}, {ok, binary()} | {error, _Reason}}.
 read_data(This, 0) ->
     {This, {ok, <<>>}};
-read_data(This = #binary_protocol{transport = Trans}, Len) when is_integer(Len) andalso Len > 0 ->
-    {NewTransport, Result} = thrift_transport:read(Trans, Len),
-    {This#binary_protocol{transport = NewTransport}, Result}.
+read_data(This0 = #binary_protocol{transport = Trans}, Len) when is_integer(Len) andalso Len > 0 ->
+    case take(This0, Len) of
+        {ok, This1} ->
+            {NewTransport, Result} = thrift_transport:read(Trans, Len),
+            {This1#binary_protocol{transport = NewTransport}, Result};
+        Error ->
+            {This0, Error}
+    end.
+
+%% Takes Len bytes from what the message being read may still take, before
+%% they are read. Between messages, each read is held to the maximum on its own.
+take(This = #binary_protocol{message_bytes_left = undefined, max_message_size = Max}, Len) when
+    Len =< Max
+->
+    {ok, This};
+take(This = #binary_protocol{message_bytes_left = Left}, Len) when is_integer(Left), Len =< Left ->
+    {ok, This#binary_protocol{message_bytes_left = Left - Len}};
+take(#binary_protocol{max_message_size = Max}, _Len) ->
+    {error, {message_size_exceeds_maximum, Max}}.
 
 %%%% FACTORY GENERATION %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -record(tbp_opts, {
     strict_read = true :: boolean(),
-    strict_write = true :: boolean()
+    strict_write = true :: boolean(),
+    max_message_size :: pos_integer() | undefined
 }).
 
 parse_factory_options([], Opts) ->
     Opts;
+parse_factory_options([{max_message_size, Max} | Rest], Opts) when is_integer(Max), Max > 0 ->
+    parse_factory_options(Rest, Opts#tbp_opts{max_message_size = Max});
 parse_factory_options([{strict_read, Bool} | Rest], Opts) when is_boolean(Bool) ->
     parse_factory_options(Rest, Opts#tbp_opts{strict_read = Bool});
 parse_factory_options([{strict_write, Bool} | Rest], Opts) when is_boolean(Bool) ->
@@ -333,6 +399,10 @@ new_protocol_factory(TransportFactory, Options) ->
                     [
                         {strict_read, ParsedOpts#tbp_opts.strict_read},
                         {strict_write, ParsedOpts#tbp_opts.strict_write}
+                        | [
+                            {max_message_size, Max}
+                         || Max <- [ParsedOpts#tbp_opts.max_message_size], Max =/= undefined
+                        ]
                     ]
                 );
             {error, Error} ->

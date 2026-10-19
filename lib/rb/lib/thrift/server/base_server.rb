@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -17,13 +18,21 @@
 # under the License.
 #
 
+require "logger"
+
 module Thrift
   class BaseServer
-    def initialize(processor, server_transport, transport_factory=nil, protocol_factory=nil)
+    def initialize(processor, server_transport, transport_factory = nil, protocol_factory = nil, logger: nil)
       @processor = processor
       @server_transport = server_transport
       @transport_factory = transport_factory ? transport_factory : Thrift::BaseTransportFactory.new
       @protocol_factory = protocol_factory ? protocol_factory : Thrift::BinaryProtocolFactory.new
+      if logger.nil?
+        @logger = Logger.new(STDERR)
+        @logger.level = Logger::WARN
+      else
+        @logger = logger
+      end
     end
 
     def serve
@@ -31,7 +40,7 @@ module Thrift
     end
 
     def to_s
-      "server(#{@protocol_factory.to_s}(#{@transport_factory.to_s}(#{@server_transport.to_s})))"
+      "server(#{@protocol_factory}(#{@transport_factory}(#{@server_transport})))"
     end
   end
 end

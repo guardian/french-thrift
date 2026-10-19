@@ -1,0 +1,90 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Release Ruby Gem
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    # Never for a pre-release, like pypi.yml and release_rust.yml.
+    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Read only on purpose. Bundler's release task creates and pushes the
+      # version tag if it does not exist yet, and release tags are for the
+      # release manager to create. The version check below makes sure it
+      # always exists.
+      contents: read
+      id-token: write
+
+    environment: release
+
+    steps:
+      # Set up
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          bundler-cache: false
+          ruby-version: "4.0"
+          working-directory: lib/rb
+
+      # Started from a branch, the release task would tag and publish whatever
+      # version the branch has. Only a release tag that matches the gemspec
+      # gets past this step.
+      - name: Verify the gem version matches the release tag
+        working-directory: lib/rb
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          case "$REF" in
+            refs/tags/v*) TAG_VERSION="${REF#refs/tags/v}" ;;
+            *)
+              echo "::error::$REF is not a release tag. Run this workflow from the release tag, for example v1.0.0."
+              exit 1
+              ;;
+          esac
+          GEM_VERSION=$(ruby -e 'print Gem::Specification.load("thrift.gemspec").version')
+          if [ "$GEM_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Version mismatch: thrift.gemspec=$GEM_VERSION, tag=v$TAG_VERSION"
+            exit 1
+          fi
+          echo "Version check passed: $GEM_VERSION"
+
+      # The release task runs through "bundle exec", so the bundle has to be
+      # installed. Not with bundler-cache above: a job that publishes should
+      # not restore a cache that another workflow run could have written.
+      - name: Install the bundle
+        working-directory: lib/rb
+        env:
+          # Exactly what Gemfile.lock records, or fail.
+          BUNDLE_FROZEN: "true"
+        run: bundle install
+
+      # Release
+      - uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
+        with:
+          working-directory: lib/rb

@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,18 +7,20 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
 module Thrift
+  DEFAULT_RECURSION_DEPTH = 64
+
   class Exception < StandardError
     def initialize(message)
       super
@@ -28,7 +31,6 @@ module Thrift
   end
 
   class ApplicationException < Exception
-
     UNKNOWN = 0
     UNKNOWN_METHOD = 1
     INVALID_MESSAGE_TYPE = 2
@@ -43,15 +45,16 @@ module Thrift
 
     attr_reader :type
 
-    def initialize(type=UNKNOWN, message=nil)
+    def initialize(type = UNKNOWN, message = nil)
       super(message)
       @type = type
     end
 
-    def read(iprot)
+    def read(iprot, remaining_depth = DEFAULT_RECURSION_DEPTH)
+      raise ProtocolException.new(ProtocolException::DEPTH_LIMIT, "Maximum recursion depth exceeded") if remaining_depth <= 0
       iprot.read_struct_begin
       while true
-        fname, ftype, fid = iprot.read_field_begin
+        _, ftype, fid = iprot.read_field_begin
         if ftype == Types::STOP
           break
         end
@@ -67,21 +70,21 @@ module Thrift
       iprot.read_struct_end
     end
 
-    def write(oprot)
-      oprot.write_struct_begin('Thrift::ApplicationException')
+    def write(oprot, remaining_depth = DEFAULT_RECURSION_DEPTH)
+      raise ProtocolException.new(ProtocolException::DEPTH_LIMIT, "Maximum recursion depth exceeded") if remaining_depth <= 0
+      oprot.write_struct_begin("Thrift::ApplicationException")
       unless @message.nil?
-        oprot.write_field_begin('message', Types::STRING, 1)
+        oprot.write_field_begin("message", Types::STRING, 1)
         oprot.write_string(@message)
         oprot.write_field_end
       end
       unless @type.nil?
-        oprot.write_field_begin('type', Types::I32, 2)
+        oprot.write_field_begin("type", Types::I32, 2)
         oprot.write_i32(@type)
         oprot.write_field_end
       end
       oprot.write_field_stop
       oprot.write_struct_end
     end
-
   end
 end

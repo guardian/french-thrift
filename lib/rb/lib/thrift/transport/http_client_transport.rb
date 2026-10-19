@@ -1,4 +1,5 @@
 # encoding: ascii-8bit
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -18,24 +19,31 @@
 # under the License.
 #
 
-require 'net/http'
-require 'net/https'
-require 'openssl'
-require 'uri'
-require 'stringio'
+require "net/http"
+require "net/https"
+require "openssl"
+require "uri"
+require "stringio"
 
 module Thrift
   class HTTPClientTransport < BaseTransport
-
     def initialize(url, opts = {})
       @url = URI url
-      @headers = {'Content-Type' => 'application/x-thrift'}
+      @headers = {"Content-Type" => "application/x-thrift"}
       @outbuf = Bytes.empty_byte_buffer
       @ssl_verify_mode = opts.fetch(:ssl_verify_mode, OpenSSL::SSL::VERIFY_PEER)
+      @ssl_ca_file = opts[:ssl_ca_file]
     end
 
     def open?; true end
-    def read(sz); @inbuf.read sz end
+
+    def read(sz)
+      data = @inbuf.read sz
+      return data unless data.nil?
+
+      raise TransportException.new(TransportException::END_OF_FILE, "#{self.class.name} reached EOF reading response from #{self}, HTTP status code #{@response_code}")
+    end
+
     def write(buf); @outbuf << Bytes.force_binary_encoding(buf) end
 
     def add_headers(headers)
@@ -44,20 +52,26 @@ module Thrift
 
     def flush
       http = Net::HTTP.new @url.host, @url.port
-      http.use_ssl = @url.scheme == 'https'
-      http.verify_mode = @ssl_verify_mode if @url.scheme == 'https'
+      http.use_ssl = @url.scheme == "https"
+      if @url.scheme == "https"
+        http.verify_mode = @ssl_verify_mode
+        http.ca_file = @ssl_ca_file if @ssl_ca_file
+      end
       resp = http.post(@url.request_uri, @outbuf, @headers)
-      raise TransportException.new(TransportException::UNKNOWN, "#{self.class.name} Could not connect to #{@url}, HTTP status code #{resp.code.to_i}") unless (200..299).include?(resp.code.to_i)
+      response_code = resp.code.to_i
+      raise TransportException.new(TransportException::UNKNOWN, "#{self.class.name} Could not connect to #{self}, HTTP status code #{response_code}") unless (200..299).cover?(response_code)
 
-      data = resp.body
-      data = Bytes.force_binary_encoding(data)
+      @response_code = response_code
+      data = Bytes.force_binary_encoding(resp.body || Bytes.empty_byte_buffer)
       @inbuf = StringIO.new data
     ensure
       @outbuf = Bytes.empty_byte_buffer
     end
-    
+
     def to_s
-      "@{self.url}"
+      path = @url.path.to_s
+      path = "/" if path.empty?
+      "#{@url.scheme}(#{@url.host}:#{@url.port}#{path})"
     end
   end
 end

@@ -17,10 +17,12 @@
  * under the License.
  */
 
-#include <limits>
-#include <cstdlib>
-#include <sstream>
+#include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <cstdlib>
+#include <limits>
+#include <sstream>
+#include <vector>
 
 #include <thrift/config.h>
 #include <thrift/transport/THttpClient.h>
@@ -37,18 +39,34 @@ THttpClient::THttpClient(std::shared_ptr<TTransport> transport,
                          std::string path,
                          std::shared_ptr<TConfiguration> config)
   : THttpTransport(transport, config),
-    host_(host), 
-    path_(path) {
-}
+    host_(host),
+    path_(path),
+    onewayResponsePending_(false),
+    closeAfterResponse_(false) {}
 
-THttpClient::THttpClient(string host, int port, string path, 
-                         std::shared_ptr<TConfiguration> config)
+THttpClient::THttpClient(string host, int port, string path, std::shared_ptr<TConfiguration> config)
   : THttpTransport(std::shared_ptr<TTransport>(new TSocket(host, port)), config),
     host_(host),
-    path_(path) {
-}
+    path_(path),
+    onewayResponsePending_(false),
+    closeAfterResponse_(false) {}
 
 THttpClient::~THttpClient() = default;
+
+void THttpClient::close() {
+  onewayResponsePending_ = false;
+  closeAfterResponse_ = false;
+  readBuffer_.resetBuffer();
+  readHeaders_ = true;
+  chunked_ = false;
+  chunkedDone_ = false;
+  chunkSize_ = 0;
+  contentLength_ = 0;
+  httpPos_ = 0;
+  httpBufLen_ = 0;
+  httpBuf_[0] = '\0';
+  THttpTransport::close();
+}
 
 void THttpClient::parseHeader(char* header) {
   char* colon = strchr(header, ':');
@@ -57,17 +75,28 @@ void THttpClient::parseHeader(char* header) {
   }
   char* value = colon + 1;
 
-  if (boost::istarts_with(header, "Transfer-Encoding")) {
+  const string name(header, colon);
+  if (boost::iequals(name, "Transfer-Encoding")) {
     if (boost::iends_with(value, "chunked")) {
       chunked_ = true;
     }
-  } else if (boost::istarts_with(header, "Content-Length")) {
+  } else if (boost::iequals(name, "Content-Length")) {
     chunked_ = false;
-    contentLength_ = atoi(value);
+    contentLength_ = parseContentLength(value);
+  } else if (boost::iequals(name, "Connection")) {
+    std::vector<string> options;
+    boost::split(options, value, boost::is_any_of(","));
+    for (const string& option : options) {
+      if (boost::iequals(boost::trim_copy(option), "close")) {
+        closeAfterResponse_ = true;
+        break;
+      }
+    }
   }
 }
 
 bool THttpClient::parseStatusLine(char* status) {
+  closeAfterResponse_ = false;
   char* http = status;
 
   char* code = strchr(http, ' ');
@@ -98,10 +127,29 @@ bool THttpClient::parseStatusLine(char* status) {
 
 void THttpClient::flush() {
   resetConsumedMessageSize();
-  // Fetch the contents of the write buffer
+
   uint8_t* buf;
   uint32_t len;
   writeBuffer_.getBuffer(&buf, &len);
+  if (len == 0) {
+    return;
+  }
+
+  if (onewayResponsePending_) {
+    if (transport_->isOpen()) {
+      drainPendingOnewayResponse();
+    } else {
+      onewayResponsePending_ = false;
+    }
+  }
+
+  if (closeAfterResponse_) {
+    close();
+  }
+
+  if (!transport_->isOpen()) {
+    transport_->open();
+  }
 
   // Construct the HTTP header
   std::ostringstream h;
@@ -121,6 +169,54 @@ void THttpClient::flush() {
   // Reset the buffer and header variables
   writeBuffer_.resetBuffer();
   readHeaders_ = true;
+}
+
+void THttpClient::onewayComplete() {
+  onewayResponsePending_ = true;
+}
+
+void THttpClient::drainPendingOnewayResponse() {
+  readBuffer_.resetBuffer();
+
+  if (readHeaders_) {
+    readHeaders();
+  }
+
+  if (chunked_) {
+    while (!chunkedDone_) {
+      char* line = readLine();
+      uint32_t chunkSize = parseChunkSize(line);
+      if (chunkSize == 0) {
+        readChunkedFooters();
+        break;
+      }
+
+      discardResponseBody(chunkSize);
+      readLine();
+    }
+  } else {
+    discardResponseBody(contentLength_);
+  }
+
+  readHeaders_ = true;
+  onewayResponsePending_ = false;
+}
+
+void THttpClient::discardResponseBody(uint32_t size) {
+  uint32_t remaining = size;
+  while (remaining > 0) {
+    uint32_t avail = httpBufLen_ - httpPos_;
+    if (avail == 0) {
+      httpPos_ = 0;
+      httpBufLen_ = 0;
+      refill();
+      avail = httpBufLen_;
+    }
+
+    uint32_t give = (std::min)(remaining, avail);
+    httpPos_ += give;
+    remaining -= give;
+  }
 }
 
 void THttpClient::setPath(std::string path) {

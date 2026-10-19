@@ -28,7 +28,7 @@ use Thrift::Type;
 #
 # Protocol exceptions
 #
-package Thrift::TProtocolException;
+package Thrift::TProtocolException;  ## no critic (RequireFilenameMatchesPackage)
 use base('Thrift::TException');
 use version 0.77; our $VERSION = version->declare("$Thrift::VERSION");
 
@@ -43,7 +43,7 @@ use constant DEPTH_LIMIT     => 6;
 sub new {
     my $classname = shift;
 
-    my $self = $classname->SUPER::new();
+    my $self = $classname->SUPER::new(@_);
 
     return bless($self,$classname);
 }
@@ -54,14 +54,34 @@ sub new {
 package Thrift::Protocol;
 use version 0.77; our $VERSION = version->declare("$Thrift::VERSION");
 
+use constant DEFAULT_RECURSION_DEPTH => 64;
+
 sub new {
     my $classname = shift;
     my $self      = {};
 
     my $trans     = shift;
-    $self->{trans}= $trans;
+    $self->{trans}        = $trans;
+    $self->{recursionDepth} = 0;
 
     return bless($self,$classname);
+}
+
+sub incrementRecursionDepth {
+    my $self = shift;
+    $self->{recursionDepth}++;
+    if ($self->{recursionDepth} > DEFAULT_RECURSION_DEPTH) {
+        $self->{recursionDepth}--;
+        die Thrift::TProtocolException->new(
+            'Maximum recursion depth exceeded',
+            Thrift::TProtocolException::DEPTH_LIMIT
+        );
+    }
+}
+
+sub decrementRecursionDepth {
+    my $self = shift;
+    $self->{recursionDepth}--;
 }
 
 sub getTransport
@@ -327,6 +347,22 @@ sub readString
 # @param TType $type What type is it
 #
 sub skip
+{
+    my $self = shift;
+    my $type = shift;
+
+    # Skipping descends through nested structs and containers the same way
+    # reading them does, so it draws on the same depth budget.
+    $self->incrementRecursionDepth();
+    my $result = eval { $self->_skipType($type) };
+    my $error  = $@;
+    $self->decrementRecursionDepth();
+    die $error if $error;
+
+    return $result;
+}
+
+sub _skipType
 {
     my $self = shift;
     my $type = shift;

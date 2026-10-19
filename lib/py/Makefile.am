@@ -25,12 +25,26 @@ py3-build:
 py3-test: py3-build
 	$(PYTHON3) test/thrift_json.py
 	$(PYTHON3) test/thrift_transport.py
+	$(PYTHON3) test/test_nonblocking_server_frame_size.py
+	$(PYTHON3) test/test_nonblocking_server_read_buffer.py
+	$(PYTHON3) test/test_nonblocking_server_select_progress.py
 	$(PYTHON3) test/test_sslsocket.py
 	$(PYTHON3) test/thrift_TBinaryProtocol.py
+	$(PYTHON3) test/thrift_THeaderProtocol.py
 	$(PYTHON3) test/thrift_TZlibTransport.py
+	$(PYTHON3) test/test_twisted_frame_size.py
 	$(PYTHON3) test/thrift_TCompactProtocol.py
 	$(PYTHON3) test/thrift_TNonblockingServer.py
+	$(PYTHON3) test/test_http_server_body_size.py
+	$(PYTHON3) test/test_http_server_content_length.py
 	$(PYTHON3) test/thrift_TSerializer.py
+	$(PYTHON3) test/test_recursion_depth.py
+	$(PYTHON3) test/test_container_sizing.py
+	$(PYTHON3) test/test_protocol_string_length_limit.py
+	$(PYTHON3) test/test_framed_frame_size.py
+	$(PYTHON3) test/test_sasl_frame_size.py
+	$(PYTHON3) test/test_sasl_transport.py
+	$(PYTHON3) test/test_tornado_frame_size.py
 else
 py3-build:
 py3-test:
@@ -39,6 +53,9 @@ endif
 all-local: py3-build
 	$(PYTHON) setup.py build
 	${THRIFT} --gen py test/test_thrift_file/TestServer.thrift
+	${THRIFT} --gen py ../../test/v0.16/FuzzTestNoUuid.thrift
+	${THRIFT} --gen py ../../test/Recursive.thrift
+	${THRIFT} --gen py:dynamic test/test_thrift_file/RecursiveDynamic.thrift
 
 # We're ignoring prefix here because site-packages seems to be
 # the equivalent of /usr/local/lib in Python land.
@@ -50,13 +67,28 @@ install-exec-hook:
 check-local: all py3-test
 	$(PYTHON) test/thrift_json.py
 	$(PYTHON) test/thrift_transport.py
+	$(PYTHON) test/test_nonblocking_server_frame_size.py
+	$(PYTHON) test/test_nonblocking_server_read_buffer.py
+	$(PYTHON) test/test_nonblocking_server_select_progress.py
 	$(PYTHON) test/test_sslsocket.py
 	$(PYTHON) test/test_socket.py
 	$(PYTHON) test/thrift_TBinaryProtocol.py
+	$(PYTHON) test/thrift_THeaderProtocol.py
 	$(PYTHON) test/thrift_TZlibTransport.py
+	$(PYTHON) test/test_twisted_frame_size.py
 	$(PYTHON) test/thrift_TCompactProtocol.py
 	$(PYTHON) test/thrift_TNonblockingServer.py
+	$(PYTHON) test/test_http_server_body_size.py
+	$(PYTHON) test/test_http_server_content_length.py
 	$(PYTHON) test/thrift_TSerializer.py
+	THRIFT=${THRIFT} $(PYTHON) test/test_compiler/test_keyword_escape.py
+	$(PYTHON) test/test_recursion_depth.py
+	$(PYTHON) test/test_container_sizing.py
+	$(PYTHON) test/test_protocol_string_length_limit.py
+	$(PYTHON) test/test_framed_frame_size.py
+	$(PYTHON) test/test_sasl_frame_size.py
+	$(PYTHON) test/test_sasl_transport.py
+	$(PYTHON) test/test_tornado_frame_size.py
 
 
 clean-local:
@@ -79,6 +111,7 @@ EXTRA_DIST = \
 	compat \
 	setup.py \
 	setup.cfg \
+	pyproject.toml \
 	src \
 	test \
 	README.md

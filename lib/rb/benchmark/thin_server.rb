@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,11 +18,12 @@
 # under the License.
 #
 
-$:.unshift File.dirname(__FILE__) + '/../lib'
-require 'thrift'
+$:.unshift File.dirname(__FILE__) + "/../lib"
+$:.unshift File.dirname(__FILE__) + "/../ext"
+require "thrift"
 $:.unshift File.dirname(__FILE__) + "/gen-rb"
-require 'benchmark_service'
-HOST = 'localhost'
+require "benchmark_service"
+HOST = "localhost"
 PORT = 42587
 
 class BenchmarkHandler
@@ -29,9 +31,9 @@ class BenchmarkHandler
   def fibonacci(n)
     seq = [1, 1]
     3.upto(n) do
-      seq << seq[-1] + seq[-2]
+      seq << (seq[-1] + seq[-2])
     end
-    seq[n-1] # n is 1-based
+    seq[n - 1] # n is 1-based
   end
 end
 

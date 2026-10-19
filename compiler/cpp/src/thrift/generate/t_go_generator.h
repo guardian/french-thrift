@@ -65,6 +65,7 @@ public:
     read_write_private_ = false;
     ignore_initialisms_ = false;
     skip_remote_ = false;
+    struct_key_entries_ = false;
     for (iter = parsed_options.begin(); iter != parsed_options.end(); ++iter) {
       if (iter->first.compare("package_prefix") == 0) {
         gen_package_prefix_ = (iter->second);
@@ -78,6 +79,8 @@ public:
         ignore_initialisms_ = true;
       } else if( iter->first.compare("skip_remote") == 0) {
         skip_remote_ =  true;
+      } else if (iter->first.compare("struct_key_entries") == 0) {
+        struct_key_entries_ = true;
       } else {
         throw "unknown option go:" + iter->first;
       }
@@ -223,6 +226,10 @@ public:
   void generate_go_equals_struct(std::ostream& out, t_type* ttype, string tgt, string src);
 
   void generate_go_equals_container(std::ostream& out, t_type* ttype, string tgt, string src);
+  void generate_go_equals_unordered(std::ostream& out,
+                                    const string& go_type,
+                                    const string& tgt,
+                                    const string& src);
 
   void generate_go_docstring(std::ostream& out, t_struct* tstruct);
 
@@ -243,6 +250,7 @@ public:
 
   std::string go_autogen_comment();
   std::string go_package();
+  void generate_go_docstring_comment(std::ostream& out, const std::string& contents);
   std::string go_imports_begin(bool consts);
   std::string go_imports_end();
   std::string render_includes(bool consts);
@@ -264,9 +272,13 @@ public:
   std::string type_to_go_type(t_type* ttype);
   std::string type_to_go_type_with_opt(t_type* ttype, bool optional_field);
   std::string type_to_go_key_type(t_type* ttype);
+  bool is_container_keyed_map(t_type* ttype);
+  std::string map_entry_type(t_map* tmap);
+  std::string map_entry_key_type(t_type* ktype);
+  bool is_comparable_struct_key(t_type* ktype);
   std::string type_to_spec_args(t_type* ttype);
 
-  void generate_deprecation_comment(std::ostream& os, const std::map<std::string, std::vector<std::string>>& annotations);
+  bool generate_deprecation_comment(std::ostream& os, const std::map<std::string, std::vector<std::string>>& annotations);
 
   void indent_up() { t_generator::indent_up(); }
   void indent_down() { t_generator::indent_down(); }
@@ -288,7 +300,7 @@ public:
 
   static bool is_pointer_field(t_field* tfield, bool in_container = false);
 
-  std::string indent_str() const {
+  std::string indent_str() const override {
     return "\t";
   }
 
@@ -298,6 +310,7 @@ private:
   bool read_write_private_;
   bool ignore_initialisms_;
   bool skip_remote_;
+  bool struct_key_entries_;
 
   /**
    * File streams
@@ -313,6 +326,8 @@ private:
   std::string package_dir_;
   std::unordered_map<std::string, std::string> package_identifiers_;
   std::set<std::string> package_identifiers_set_;
+  int last_const_block_;
+  bool types_file_has_declaration_;
   std::string read_method_name_;
   std::string write_method_name_;
   std::string equals_method_name_;
@@ -328,7 +343,9 @@ private:
   std::string privatize(const std::string& value) const;
   std::string new_prefix(const std::string& value) const;
   static std::string variable_name_to_go_name(const std::string& value);
+  static std::string package_name_to_go_name(const std::string& value);
   static bool omit_initialization(t_field* tfield);
+  void begin_types_declaration();
 };
 
 #endif

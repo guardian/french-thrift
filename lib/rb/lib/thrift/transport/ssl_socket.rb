@@ -1,4 +1,5 @@
 # encoding: ascii-8bit
+# frozen_string_literal: true
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
@@ -17,35 +18,93 @@
 # specific language governing permissions and limitations
 # under the License.
 
+require "io/wait"
+require "ipaddr"
+
 module Thrift
   class SSLSocket < Socket
-    def initialize(host='localhost', port=9090, timeout=nil, ssl_context=nil)
+    def initialize(host = "localhost", port = 9090, timeout = nil, ssl_context = nil, server_hostname: host)
       super(host, port, timeout)
       @ssl_context = ssl_context
+      @server_hostname = server_hostname
     end
 
     attr_accessor :ssl_context
+    attr_accessor :server_hostname
 
     def open
-      socket = super
-      @handle = OpenSSL::SSL::SSLSocket.new(socket, @ssl_context)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout unless @timeout.nil? || @timeout == 0
+      socket = connect_socket(deadline)
+
       begin
-        @handle.connect_nonblock
-        @handle.post_connection_check(@host)
+        ssl_context = configured_ssl_context
+        ssl_socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+        ssl_socket.hostname = @server_hostname if send_server_hostname?
+        ssl_socket.sync_close = true
+        @handle = ssl_socket
+
+        if deadline
+          loop do
+            result = @handle.connect_nonblock(exception: false)
+
+            case result
+            when @handle
+              break
+            when :wait_readable
+              remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              if remaining <= 0 || !@handle.to_io.wait_readable(remaining)
+                raise TransportException.new(TransportException::TIMED_OUT, "SSL socket: Timed out establishing session with #{@desc}")
+              end
+            when :wait_writable
+              remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              if remaining <= 0 || !@handle.to_io.wait_writable(remaining)
+                raise TransportException.new(TransportException::TIMED_OUT, "SSL socket: Timed out establishing session with #{@desc}")
+              end
+            else
+              raise TransportException.new(TransportException::NOT_OPEN, "Could not connect to #{@desc}: unexpected SSL connect result #{result.inspect}")
+            end
+          end
+        else
+          @handle.connect
+        end
+
+        @handle.post_connection_check(server_hostname_for_verification)
         @handle
-      rescue IO::WaitReadable
-        IO.select([ @handle ], nil, nil, @timeout)
-        retry
-      rescue IO::WaitWritable
-        IO.select(nil, [ @handle ], nil, @timeout)
-        retry
-      rescue StandardError => e
-        raise TransportException.new(TransportException::NOT_OPEN, "Could not connect to #{@desc}: #{e}")
+      rescue TransportException
+        close_socket(@handle)
+        @handle = nil
+        raise
+      rescue StandardError
+        close_socket(@handle || socket)
+        @handle = nil
+        raise TransportException.new(TransportException::NOT_OPEN, "Could not connect to #{@desc}")
       end
     end
-    
+
     def to_s
-      "ssl(#{super.to_s})"
+      "ssl(#{super})"
+    end
+
+    private
+
+    def configured_ssl_context
+      @ssl_context ||= OpenSSL::SSL::SSLContext.new.tap do |context|
+        context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        context.cert_store = OpenSSL::X509::Store.new.tap(&:set_default_paths)
+      end
+    end
+
+    def send_server_hostname?
+      return false if @server_hostname.nil? || @server_hostname.empty?
+
+      IPAddr.new(@server_hostname)
+      false
+    rescue IPAddr::InvalidAddressError
+      true
+    end
+
+    def server_hostname_for_verification
+      @server_hostname.nil? || @server_hostname.empty? ? @host : @server_hostname
     end
   end
 end

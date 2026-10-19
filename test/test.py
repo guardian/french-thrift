@@ -27,7 +27,6 @@
 # subprocess management that are needed for reliability.
 #
 
-from __future__ import print_function
 from itertools import chain
 import json
 import logging
@@ -37,7 +36,6 @@ import os
 import sys
 
 import crossrunner
-from crossrunner.compat import path_join
 
 # 3.3 introduced subprocess timeouts on waiting for child
 req_version = (3, 3)
@@ -47,15 +45,22 @@ assert (cur_version >= req_version), "Python 3.3 or later is required for proper
 
 ROOT_DIR = os.path.dirname(os.path.realpath(os.path.dirname(__file__)))
 TEST_DIR_RELATIVE = 'test'
-TEST_DIR = path_join(ROOT_DIR, TEST_DIR_RELATIVE)
-FEATURE_DIR_RELATIVE = path_join(TEST_DIR_RELATIVE, 'features')
+TEST_DIR = os.path.join(ROOT_DIR, TEST_DIR_RELATIVE)
+FEATURE_DIR_RELATIVE = os.path.join(TEST_DIR_RELATIVE, 'features')
 CONFIG_FILE = 'tests.json'
 
 
-def run_cross_tests(server_match, client_match, jobs, skip_known_failures, only_known_failures, retry_count, regex):
+def print_test_names(tests):
+    for test in sorted(tests, key=lambda t: crossrunner.test_name(**t)):
+        print(crossrunner.test_name(**test))
+    return True
+
+
+def run_cross_tests(server_match, client_match, jobs, skip_known_failures, only_known_failures, retry_count, regex,
+                    dry_run):
     logger = multiprocessing.get_logger()
     logger.debug('Collecting tests')
-    with open(path_join(TEST_DIR, CONFIG_FILE), 'r') as fp:
+    with open(os.path.join(TEST_DIR, CONFIG_FILE), 'r') as fp:
         j = json.load(fp)
     tests = crossrunner.collect_cross_tests(j, server_match, client_match, regex)
     if not tests:
@@ -71,6 +76,8 @@ def run_cross_tests(server_match, client_match, jobs, skip_known_failures, only_
         logger.debug('Skipping known failures')
         known = crossrunner.load_known_failures(TEST_DIR)
         tests = list(filter(lambda t: crossrunner.test_name(**t) not in known, tests))
+    if dry_run:
+        return print_test_names(tests)
 
     dispatcher = crossrunner.TestDispatcher(TEST_DIR, ROOT_DIR, TEST_DIR_RELATIVE, jobs)
     logger.debug('Executing %d tests' % len(tests))
@@ -85,13 +92,14 @@ def run_cross_tests(server_match, client_match, jobs, skip_known_failures, only_
         return False
 
 
-def run_feature_tests(server_match, feature_match, jobs, skip_known_failures, only_known_failures, retry_count, regex):
-    basedir = path_join(ROOT_DIR, FEATURE_DIR_RELATIVE)
+def run_feature_tests(server_match, feature_match, jobs, skip_known_failures, only_known_failures, retry_count, regex,
+                      dry_run):
+    basedir = os.path.join(ROOT_DIR, FEATURE_DIR_RELATIVE)
     logger = multiprocessing.get_logger()
     logger.debug('Collecting tests')
-    with open(path_join(TEST_DIR, CONFIG_FILE), 'r') as fp:
+    with open(os.path.join(TEST_DIR, CONFIG_FILE), 'r') as fp:
         j = json.load(fp)
-    with open(path_join(basedir, CONFIG_FILE), 'r') as fp:
+    with open(os.path.join(basedir, CONFIG_FILE), 'r') as fp:
         j2 = json.load(fp)
     tests = crossrunner.collect_feature_tests(j, j2, server_match, feature_match, regex)
     if not tests:
@@ -107,6 +115,8 @@ def run_feature_tests(server_match, feature_match, jobs, skip_known_failures, on
         logger.debug('Skipping known failures')
         known = crossrunner.load_known_failures(basedir)
         tests = list(filter(lambda t: crossrunner.test_name(**t) not in known, tests))
+    if dry_run:
+        return print_test_names(tests)
 
     dispatcher = crossrunner.TestDispatcher(TEST_DIR, ROOT_DIR, FEATURE_DIR_RELATIVE, jobs)
     logger.debug('Executing %d tests' % len(tests))
@@ -147,6 +157,8 @@ def main(argv):
     parser.add_argument('-j', '--jobs', type=int,
                         default=default_concurrency(),
                         help='number of concurrent test executions')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='print selected test names without executing them')
 
     g = parser.add_argument_group(title='Advanced')
     g.add_argument('-v', '--verbose', action='store_const',
@@ -172,7 +184,7 @@ def main(argv):
     client_match = list(chain(*[x.split(',') for x in options.client]))
 
     if options.update_failures or options.print_failures:
-        dire = path_join(ROOT_DIR, FEATURE_DIR_RELATIVE) if options.features is not None else TEST_DIR
+        dire = os.path.join(ROOT_DIR, FEATURE_DIR_RELATIVE) if options.features is not None else TEST_DIR
         res = crossrunner.generate_known_failures(
             dire, options.update_failures == 'overwrite',
             options.update_failures, options.print_failures)
@@ -180,11 +192,11 @@ def main(argv):
         features = options.features or ['.*']
         res = run_feature_tests(server_match, features, options.jobs,
                                 options.skip_known_failures, options.only_known_failures,
-                                options.retry_count, options.regex)
+                                options.retry_count, options.regex, options.dry_run)
     else:
         res = run_cross_tests(server_match, client_match, options.jobs,
                               options.skip_known_failures, options.only_known_failures,
-                              options.retry_count, options.regex)
+                              options.retry_count, options.regex, options.dry_run)
     return 0 if res else 1
 
 

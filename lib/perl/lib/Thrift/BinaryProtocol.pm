@@ -41,13 +41,35 @@ use constant VERSION_MASK   => 0xffff0000;
 use constant VERSION_1      => 0x80010000;
 use constant IS_BIG_ENDIAN  => unpack('h*', pack('s', 1)) =~ m/01/;
 
+#
+# The longest string or binary field read by default: the frame size limit the
+# framed transports apply. A string's length is the read size handed to the
+# transport, and an unframed transport has no frame to bound it. Pass a maximum
+# of 0 to read strings of any length.
+#
+use constant DEFAULT_MAX_STRING_SIZE => 16384000;
+
 sub new
 {
-    my $classname = shift;
-    my $trans     = shift;
+    my $classname     = shift;
+    my $trans         = shift;
+    my $maxStringSize = shift;
     my $self      = $classname->SUPER::new($trans);
+    $self->{maxStringSize} = defined $maxStringSize ? $maxStringSize : DEFAULT_MAX_STRING_SIZE;
 
     return bless($self,$classname);
+}
+
+sub checkStringSize
+{
+    my $self = shift;
+    my $len  = shift;
+
+    if ($self->{maxStringSize} && $len > $self->{maxStringSize}) {
+        die Thrift::TProtocolException->new(
+            "String size ($len) larger than the maximum ($self->{maxStringSize})",
+            Thrift::TProtocolException::SIZE_LIMIT);
+    }
 }
 
 sub writeMessageBegin
@@ -321,10 +343,14 @@ sub readMapBegin
     my $self = shift;
     my ($keyType, $valType, $size) = @_;
 
-    return
+    my $result =
         $self->readByte($keyType) +
         $self->readByte($valType) +
         $self->readI32($size);
+    if ($$size < 0) {
+        die Thrift::TProtocolException->new('Negative size', Thrift::TProtocolException::NEGATIVE_SIZE);
+    }
+    return $result;
 }
 
 sub readMapEnd()
@@ -338,9 +364,13 @@ sub readListBegin
     my $self = shift;
     my ($elemType, $size) = @_;
 
-    return
+    my $result =
         $self->readByte($elemType) +
         $self->readI32($size);
+    if ($$size < 0) {
+        die Thrift::TProtocolException->new('Negative size', Thrift::TProtocolException::NEGATIVE_SIZE);
+    }
+    return $result;
 }
 
 sub readListEnd
@@ -354,9 +384,13 @@ sub readSetBegin
     my $self = shift;
     my ($elemType, $size) = @_;
 
-    return
+    my $result =
         $self->readByte($elemType) +
         $self->readI32($size);
+    if ($$size < 0) {
+        die Thrift::TProtocolException->new('Negative size', Thrift::TProtocolException::NEGATIVE_SIZE);
+    }
+    return $result;
 }
 
 sub readSetEnd
@@ -467,6 +501,10 @@ sub readString
     my $len;
     my $result = $self->readI32(\$len);
 
+    if ($len < 0) {
+        die Thrift::TProtocolException->new('Negative size', Thrift::TProtocolException::NEGATIVE_SIZE);
+    }
+    $self->checkStringSize($len);
     if ($len) {
       $$value = $self->{trans}->readAll($len);
     }
@@ -483,6 +521,10 @@ sub readStringBody
     my $value = shift;
     my $len   = shift;
 
+    if ($len < 0) {
+        die Thrift::TProtocolException->new('Negative size', Thrift::TProtocolException::NEGATIVE_SIZE);
+    }
+    $self->checkStringSize($len);
     if ($len) {
       $$value = $self->{trans}->readAll($len);
     }
@@ -502,8 +544,10 @@ use version 0.77; our $VERSION = version->declare("$Thrift::VERSION");
 
 sub new
 {
-    my $classname = shift;
+    my $classname     = shift;
+    my $maxStringSize = shift;
     my $self      = $classname->SUPER::new();
+    $self->{maxStringSize} = $maxStringSize;
 
     return bless($self,$classname);
 }
@@ -512,7 +556,7 @@ sub getProtocol{
     my $self  = shift;
     my $trans = shift;
 
-    return Thrift::BinaryProtocol->new($trans);
+    return Thrift::BinaryProtocol->new($trans, $self->{maxStringSize});
 }
 
 1;

@@ -42,7 +42,7 @@ The Thrift Java source is not build using the GNU tools, but rather uses
 the Gradle build system, which tends to be predominant amongst Java
 developers.
 
-Currently we use gradle 8.0 to build the Thrift Java source. The usual way to setup gradle
+Currently we use gradle 8 to build the Thrift Java source. The usual way to setup gradle
 project is to include the gradle-wrapper.jar in the project and then run the gradle wrapper to
 bootstrap setting up gradle binaries. However to avoid putting binary files into the source tree we
 have ignored the gradle wrapper files. You are expected to install it manually, as described in
@@ -82,10 +82,10 @@ The default build will run the unit tests which expect a usable
 Thrift compiler to exist on the system. You have two choices for
 that.
 
-* Build the Thrift executable from source at the default
+- Build the Thrift executable from source at the default
   location in the source tree. The project is configured
   to look for it there.
-* Install the published binary distribution to have Thrift
+- Install the published binary distribution to have Thrift
   executable in a known location and add the path to the
   ~/.gradle/gradle.properties file using the property name
   "thrift.compiler". For example this would set the path in
@@ -209,6 +209,79 @@ gradle -Pmaven-repository-url=https://my.company.com/service/local/staging/deplo
 ```
 
 
+Using Thrift in Maven Projects
+=============================
+
+To compile Thrift IDL (`.thrift`) files in a Maven application, use `exec-maven-plugin` to execute the `thrift` compiler during the `generate-sources` phase, together with `build-helper-maven-plugin` to register the generated source directory with the Java compiler:
+
+```xml
+<project>
+  <!-- ... -->
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.thrift</groupId>
+      <artifactId>libthrift</artifactId>
+      <version>${thrift.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- 1. Generate Java sources from Thrift IDL files -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>generate-thrift-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>thrift</executable>
+              <arguments>
+                <argument>-r</argument>
+                <argument>--gen</argument>
+                <argument>java</argument>
+                <argument>-out</argument>
+                <argument>${project.build.directory}/generated-sources/thrift</argument>
+                <argument>${project.basedir}/src/main/thrift/service.thrift</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- 2. Add the generated directory to the compile classpath -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <id>add-thrift-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${project.build.directory}/generated-sources/thrift</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+> **Note:** The `thrift` executable must be installed and available in your system `PATH`, or configured with its absolute path in `<executable>`.
+
+
 Dependencies
 ============
 
@@ -217,12 +290,18 @@ http://gradle.org/
 
 # Breaking Changes
 
+## 0.24.0
+
+- `TProtocolUtil.setMaxSkipDepth(int depth)` has been deprecated and 
+made a no-op. Use TConfiguration.setRecursionLimit() instead.
+
+
 ## 0.13.0
 
-* The signature of the 'process' method in TAsyncProcessor and TProcessor has
-changed to remove the boolean return type and instead rely on Exceptions.
+- The signature of the 'process' method in TAsyncProcessor and TProcessor 
+has changed to remove the boolean return type and instead rely on Exceptions.
 
-* Per THRIFT-4805, TSaslTransportException has been removed. The same condition
+- Per THRIFT-4805, TSaslTransportException has been removed. The same condition 
 is now covered by TTansportException, where `TTransportException.getType() == END_OF_FILE`.
 
 ## 0.12.0

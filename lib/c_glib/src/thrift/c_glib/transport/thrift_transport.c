@@ -123,8 +123,6 @@ thrift_transport_real_read_all (ThriftTransport *transport, gpointer buf,
   gint32 ret;
   gint8 *bytes;
 
-  THRIFT_UNUSED_VAR (error);
-
   ttc = THRIFT_TRANSPORT_GET_CLASS (transport);
   have = 0;
   ret = 0;
@@ -135,6 +133,20 @@ thrift_transport_real_read_all (ThriftTransport *transport, gpointer buf,
                           error)) < 0) {
       return ret;
     }
+
+    /* A read that produced no bytes is not a short read to be continued;
+       asking the same source again cannot turn it into one.  Stop, so a peer
+       that closes mid-message ends the call instead of spinning here. */
+    if (ret == 0) {
+      if (error == NULL || *error == NULL) {
+        g_set_error (error, THRIFT_TRANSPORT_ERROR,
+                     THRIFT_TRANSPORT_ERROR_RECEIVE,
+                     "failed to read %u bytes - got %u before the transport "
+                     "stopped delivering", len, have);
+      }
+      return -1;
+    }
+
     have += ret;
   }
 
@@ -160,11 +172,11 @@ thrift_transport_updateKnownMessageSize(ThriftTransport *transport, glong size, 
 }
 
 gboolean
-thrift_transport_checkReadBytesAvailable(ThriftTransport *transport, glong numBytes, GError **error)
+thrift_transport_checkReadBytesAvailable(ThriftTransport *transport, gint64 numBytes, GError **error)
 {
   gboolean boolean = TRUE;
   ThriftTransport *tt = THRIFT_TRANSPORT (transport);
-  if(tt->remainingMessageSize_ < numBytes)
+  if(tt->remainingMessageSize_ < numBytes || numBytes < 0)
   {
     g_set_error(error,
                 THRIFT_TRANSPORT_ERROR,

@@ -214,11 +214,11 @@ BOOST_AUTO_TEST_CASE(ssl_security_matrix) {
         {
     //   server    = SSLTLS   SSLv2    SSLv3    TLSv1_0  TLSv1_1  TLSv1_2
     // client
-    /* SSLTLS  */  { true,    false,   false,   true,    true,    true    },
+    /* SSLTLS  */  { true,    false,   false,   false,   false,   true    },
     /* SSLv2   */  { false,   false,   false,   false,   false,   false   },
     /* SSLv3   */  { false,   false,   true,    false,   false,   false   },
-    /* TLSv1_0 */  { true,    false,   false,   true,    false,   false   },
-    /* TLSv1_1 */  { true,    false,   false,   false,   true,    false   },
+    /* TLSv1_0 */  { false,   false,   false,   true,    false,   false   },
+    /* TLSv1_1 */  { false,   false,   false,   false,   true,    false   },
     /* TLSv1_2 */  { true,    false,   false,   false,   false,   true    }
         };
 
@@ -229,7 +229,7 @@ BOOST_AUTO_TEST_CASE(ssl_security_matrix) {
           continue;
         }
 
-#ifdef OPENSSL_NO_SSL3
+#if defined(OPENSSL_NO_SSL3) || OPENSSL_VERSION_NUMBER >= 0x40000000L
         if (si == 2 || ci == 2) {
           // Skip all SSLv3 cases - protocol not supported
           continue;

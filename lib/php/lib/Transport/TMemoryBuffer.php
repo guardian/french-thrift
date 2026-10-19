@@ -21,10 +21,11 @@
  * @package thrift.transport
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Transport;
 
 use Thrift\Exception\TTransportException;
-use Thrift\Factory\TStringFuncFactory;
 
 /**
  * A memory buffer is a tranpsort that simply reads from and writes to an
@@ -36,38 +37,45 @@ use Thrift\Factory\TStringFuncFactory;
  */
 class TMemoryBuffer extends TTransport
 {
-    protected $buf_ = '';
+    /**
+     * Offset of the first unread byte in $buf.
+     */
+    private int $rPos = 0;
 
     /**
-     * Constructor. Optionally pass an initial value
-     * for the buffer.
+     * Constructor. Optionally pass an initial value for the buffer.
      */
-    public function __construct($buf = '')
+    public function __construct(protected string $buf = '')
     {
-        $this->buf_ = $buf;
     }
 
-    public function isOpen()
+    public function isOpen(): bool
     {
         return true;
     }
 
-    public function open()
+    public function open(): void
     {
     }
 
-    public function close()
+    public function close(): void
     {
     }
 
-    public function write($buf)
+    public function write(string $buf): void
     {
-        $this->buf_ .= $buf;
+        // Drop the bytes already read before the buffer grows, once they are
+        // at least as many as the bytes still unread.
+        if ($this->rPos > 0 && 2 * $this->rPos >= strlen($this->buf)) {
+            $this->buf = substr($this->buf, $this->rPos);
+            $this->rPos = 0;
+        }
+        $this->buf .= $buf;
     }
 
-    public function read($len)
+    public function read(int $len): string
     {
-        $bufLength = TStringFuncFactory::create()->strlen($this->buf_);
+        $bufLength = strlen($this->buf) - $this->rPos;
 
         if ($bufLength === 0) {
             throw new TTransportException(
@@ -77,31 +85,31 @@ class TMemoryBuffer extends TTransport
             );
         }
 
-        if ($bufLength <= $len) {
-            $ret = $this->buf_;
-            $this->buf_ = '';
+        $ret = substr($this->buf, $this->rPos, $len);
+        $this->rPos += strlen($ret);
 
-            return $ret;
+        // Release the buffer once it has been read
+        if ($this->rPos === strlen($this->buf)) {
+            $this->buf = '';
+            $this->rPos = 0;
         }
-
-        $ret = TStringFuncFactory::create()->substr($this->buf_, 0, $len);
-        $this->buf_ = TStringFuncFactory::create()->substr($this->buf_, $len);
 
         return $ret;
     }
 
-    public function getBuffer()
+    public function getBuffer(): string
     {
-        return $this->buf_;
+        return substr($this->buf, $this->rPos);
     }
 
-    public function available()
+    public function available(): int
     {
-        return TStringFuncFactory::create()->strlen($this->buf_);
+        return strlen($this->buf) - $this->rPos;
     }
 
-    public function putBack($data)
+    public function putBack(string $data): void
     {
-        $this->buf_ = $data . $this->buf_;
+        $this->buf = $data . substr($this->buf, $this->rPos);
+        $this->rPos = 0;
     }
 }

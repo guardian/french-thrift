@@ -1,4 +1,5 @@
-# 
+# frozen_string_literal: true
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -6,33 +7,34 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# 
+#
 
-require 'set'
+require "set"
+require "thrift/struct_union"
 
 module Thrift
   module Struct
-    def initialize(d={}, &block)
+    def initialize(d = {}, &block)
       # get a copy of the default values to work on, removing defaults in favor of arguments
       fields_with_defaults = fields_with_default_values.dup
-      
-      # check if the defaults is empty, or if there are no parameters for this 
+
+      # check if the defaults is empty, or if there are no parameters for this
       # instantiation, and if so, don't bother overriding defaults.
       unless fields_with_defaults.empty? || d.empty?
         d.each_key do |name|
           fields_with_defaults.delete(name.to_s)
         end
       end
-      
+
       # assign all the user-specified arguments
       unless d.empty?
         d.each do |name, value|
@@ -43,15 +45,15 @@ module Thrift
           instance_variable_set("@#{name}", value)
         end
       end
-      
+
       # assign all the default values
       unless fields_with_defaults.empty?
         fields_with_defaults.each do |name, default_value|
           instance_variable_set("@#{name}", (default_value.dup rescue default_value))
         end
       end
-      
-      yield self if block_given?
+
+      yield self if block
     end
 
     def fields_with_default_values
@@ -67,7 +69,7 @@ module Thrift
       end
       fields_with_default_values
     end
-    
+
     def inspect(skip_optional_nulls = true)
       fields = []
       each_field do |fid, field_info|
@@ -80,19 +82,31 @@ module Thrift
       "<#{self.class} #{fields.join(", ")}>"
     end
 
-    def read(iprot)
+    def read(iprot, remaining_depth = DEFAULT_RECURSION_DEPTH)
+      raise ProtocolException.new(ProtocolException::DEPTH_LIMIT, "Maximum recursion depth exceeded") if remaining_depth <= 0
+      unless instance_variables.empty?
+        defaults = fields_with_default_values
+        struct_fields.each_value do |field_info|
+          instance_variable_set("@#{field_info[:name]}", nil)
+        end
+        defaults.each do |name, default_value|
+          instance_variable_set("@#{name}", (default_value.dup rescue default_value))
+        end
+      end
+
       iprot.read_struct_begin
       loop do
-        fname, ftype, fid = iprot.read_field_begin
+        _, ftype, fid = iprot.read_field_begin
         break if (ftype == Types::STOP)
-        handle_message(iprot, fid, ftype)
+        handle_message(iprot, fid, ftype, remaining_depth)
         iprot.read_field_end
       end
       iprot.read_struct_end
       validate
     end
 
-    def write(oprot)
+    def write(oprot, remaining_depth = DEFAULT_RECURSION_DEPTH)
+      raise ProtocolException.new(ProtocolException::DEPTH_LIMIT, "Maximum recursion depth exceeded") if remaining_depth <= 0
       validate
       oprot.write_struct_begin(self.class.name)
       each_field do |fid, field_info|
@@ -102,8 +116,10 @@ module Thrift
         unless value.nil?
           if is_container? type
             oprot.write_field_begin(name, type, fid)
-            write_container(oprot, value, field_info)
+            write_container(oprot, value, field_info, remaining_depth)
             oprot.write_field_end
+          elsif type == Types::STRUCT
+            oprot.write_field(field_info, fid, value, remaining_depth)
           else
             oprot.write_field(field_info, fid, value)
           end
@@ -114,10 +130,10 @@ module Thrift
     end
 
     def ==(other)
-      return false if other.nil?
+      return false unless other.instance_of?(self.class)
       each_field do |fid, field_info|
         name = field_info[:name]
-        return false unless other.respond_to?(name) && self.send(name) == other.send(name)
+        return false unless other.respond_to?(name) && send(name) == other.send(name)
       end
       true
     end
@@ -131,8 +147,8 @@ module Thrift
       total = 17
       each_field do |fid, field_info|
         name = field_info[:name]
-        value = self.send(name)
-        total = (total * 37 + value.hash) & 0xffffffff
+        value = send(name)
+        total = ((total * 37) + value.hash) & 0xffffffff
       end
       total
     end
@@ -144,7 +160,7 @@ module Thrift
       else
         each_field do |fid, field_info|
           name = field_info[:name]
-          diffs << "#{name} differs!" unless self.instance_variable_get("@#{name}") == other.instance_variable_get("@#{name}")
+          diffs << "#{name} differs!" unless instance_variable_get("@#{name}") == other.instance_variable_get("@#{name}")
         end
       end
       diffs
@@ -168,14 +184,14 @@ module Thrift
 
     def self.qmark_isset_method(klass, field_info)
       klass.send :define_method, "#{field_info[:name]}?" do
-        !self.send(field_info[:name].to_sym).nil?
+        !send(field_info[:name].to_sym).nil?
       end
     end
 
     def <=>(other)
       if self.class == other.class
         each_field do |fid, field_info|
-          v1 = self.send(field_info[:name])
+          v1 = send(field_info[:name])
           v1_set = !v1.nil?
           v2 = other.send(field_info[:name])
           v2_set = !v2.nil?
@@ -217,17 +233,17 @@ module Thrift
       else
         # call the Struct initializer first with no args
         # this will set our field default values
-        method(:struct_initialize).call()
+        method(:struct_initialize).call
         # now give it to the exception
-        self.class.send(:class_variable_get, :'@@__thrift_struct_real_initialize').bind(self).call(*args, &block) if args.size > 0
+        self.class.send(:class_variable_get, :'@@__thrift_struct_real_initialize').bind_call(self, *args, &block) if args.size > 0
         # self.class.instance_method(:initialize).bind(self).call(*args, &block)
       end
     end
 
-    def handle_message(iprot, fid, ftype)
+    def handle_message(iprot, fid, ftype, remaining_depth)
       field = struct_fields[fid]
       if field and field[:type] == ftype
-        value = read_field(iprot, field)
+        value = read_field(iprot, field, remaining_depth)
         instance_variable_set("@#{field[:name]}", value)
       else
         iprot.skip(ftype)

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,6 +21,8 @@
  * @package thrift.processor
  */
 
+declare(strict_types=1);
+
 namespace Thrift;
 
 use Thrift\Protocol\TProtocol;
@@ -32,22 +35,21 @@ use Thrift\Protocol\TProtocolDecorator;
  */
 class StoredMessageProtocol extends TProtocolDecorator
 {
-    private $fname_;
-    private $mtype_;
-    private $rseqid_;
-
-    public function __construct(TProtocol $protocol, $fname, $mtype, $rseqid)
-    {
+    public function __construct(
+        TProtocol $protocol,
+        private string $fname,
+        private int $mtype,
+        private int $rseqid,
+    ) {
         parent::__construct($protocol);
-        $this->fname_  = $fname;
-        $this->mtype_  = $mtype;
-        $this->rseqid_ = $rseqid;
     }
 
-    public function readMessageBegin(&$name, &$type, &$seqid)
+    public function readMessageBegin(?string &$name, ?int &$type, ?int &$seqid): int
     {
-        $name  = $this->fname_;
-        $type  = $this->mtype_;
-        $seqid = $this->rseqid_;
+        $name  = $this->fname;
+        $type  = $this->mtype;
+        $seqid = $this->rseqid;
+
+        return 0;
     }
 }

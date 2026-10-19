@@ -19,9 +19,13 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Factory;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionProperty;
 use Thrift\Factory\TBinaryProtocolFactory;
 use Thrift\Protocol\TBinaryProtocol;
 use Thrift\Transport\TTransport;
@@ -29,35 +33,27 @@ use Thrift\Transport\TTransport;
 class TBinaryProtocolFactoryTest extends TestCase
 {
     /**
-     * @dataProvider getProtocolDataProvider
      * @param bool $strictRead
      * @param bool $strictWrite
      * @return void
      */
+    #[DataProvider('getProtocolDataProvider')]
     public function testGetProtocol(
         $strictRead,
         $strictWrite
     ) {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $factory = new TBinaryProtocolFactory($strictRead, $strictWrite);
         $protocol = $factory->getProtocol($transport);
 
         $this->assertInstanceOf(TBinaryProtocol::class, $protocol);
 
-        $ref = new \ReflectionClass($protocol);
-        $refStrictRead = $ref->getProperty('strictRead_');
-        $refStrictRead->setAccessible(true);
-        $refStrictWrite = $ref->getProperty('strictWrite_');
-        $refStrictWrite->setAccessible(true);
-        $refTrans = $ref->getProperty('trans_');
-        $refTrans->setAccessible(true);
-
-        $this->assertEquals($strictRead, $refStrictRead->getValue($protocol));
-        $this->assertEquals($strictWrite, $refStrictWrite->getValue($protocol));
-        $this->assertSame($transport, $refTrans->getValue($protocol));
+        $this->assertEquals($strictRead, (new ReflectionProperty($protocol, 'strictRead'))->getValue($protocol));
+        $this->assertEquals($strictWrite, (new ReflectionProperty($protocol, 'strictWrite'))->getValue($protocol));
+        $this->assertSame($transport, (new ReflectionProperty($protocol, 'trans'))->getValue($protocol));
     }
 
-    public function getProtocolDataProvider()
+    public static function getProtocolDataProvider()
     {
         yield 'allTrue' => [
             'strictRead' => true,
@@ -75,5 +71,31 @@ class TBinaryProtocolFactoryTest extends TestCase
             'strictRead' => false,
             'strictWrite' => true,
         ];
+    }
+
+    /**
+     * @return void
+     */
+    public function testGetTransport()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TBinaryProtocolFactory();
+        $protocol = $factory->getProtocol($transport);
+
+        $this->assertSame($transport, $protocol->getTransport());
+    }
+
+    /**
+     * @return void
+     */
+    public function testGetProtocolCreatesNewInstancePerCall()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TBinaryProtocolFactory();
+
+        $protocol1 = $factory->getProtocol($transport);
+        $protocol2 = $factory->getProtocol($transport);
+
+        $this->assertNotSame($protocol1, $protocol2);
     }
 }

@@ -21,7 +21,9 @@ package thrift
 
 import (
 	"bytes"
+	"context"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -52,6 +54,42 @@ vel sem et.
 	safeReadBytesSourceLen = len(safeReadBytesSource)
 )
 
+// The size asked for must decide the allocation exactly: reading n bytes must
+// not leave a buffer with capacity for more. See THRIFT-5828.
+func TestSafeReadBytesDoesNotOverAllocate(t *testing.T) {
+	for _, size := range []int{bytes.MinRead + 1, 4096, 32 * 1024} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			buf, err := safeReadBytes(int32(size), bytes.NewReader(make([]byte, size)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(buf) != size {
+				t.Fatalf("read %d bytes, want %d", len(buf), size)
+			}
+			if cap(buf) != size {
+				t.Errorf("read %d bytes into a buffer of capacity %d, want capacity %d", len(buf), cap(buf), size)
+			}
+		})
+	}
+}
+
+// A size the sender made up must not decide the allocation either: only the
+// data that actually arrives may.
+func TestSafeReadBytesLargeSizeShortData(t *testing.T) {
+	const dataSize = 1024
+
+	buf, err := safeReadBytes(math.MaxInt32, bytes.NewReader(make([]byte, dataSize)))
+	if err == nil {
+		t.Error("expected an error when the data ends early, got nil")
+	}
+	if len(buf) != dataSize {
+		t.Errorf("read %d bytes, want %d", len(buf), dataSize)
+	}
+	if max := 2 * dataSize; cap(buf) > max {
+		t.Errorf("allocated %d bytes for %d bytes of data, want at most %d", cap(buf), dataSize, max)
+	}
+}
+
 func TestSafeReadBytes(t *testing.T) {
 	srcData := []byte(safeReadBytesSource)
 
@@ -60,6 +98,11 @@ func TestSafeReadBytes(t *testing.T) {
 		askedSize int32
 		dataSize  int
 	}{
+		{
+			label:     "tiny",
+			askedSize: 8,
+			dataSize:  8,
+		},
 		{
 			label:     "normal",
 			askedSize: 100,
@@ -80,6 +123,9 @@ func TestSafeReadBytes(t *testing.T) {
 					c.dataSize,
 					len(buf),
 				)
+			}
+			if c.dataSize < bytes.MinRead && cap(buf) != c.dataSize {
+				t.Errorf("Expected to allocate %d bytes for read, allocated %d", c.dataSize, cap(buf))
 			}
 			if !strings.HasPrefix(safeReadBytesSource, string(buf)) {
 				t.Errorf("Unexpected read data: %q", buf)
@@ -111,8 +157,7 @@ func TestSafeReadBytes(t *testing.T) {
 func generateSafeReadBytesBenchmark(askedSize int32, dataSize int) func(b *testing.B) {
 	return func(b *testing.B) {
 		data := make([]byte, dataSize)
-		b.ResetTimer()
-		for range b.N {
+		for b.Loop() {
 			safeReadBytes(askedSize, bytes.NewReader(data))
 		}
 	}
@@ -171,11 +216,80 @@ func BenchmarkSafeReadBytes(b *testing.B) {
 			dataSize:  100,
 		},
 		{
+			label:     "exact-32k",
+			askedSize: 32 * 1024,
+			dataSize:  32 * 1024,
+		},
+		{
 			label:     "max-askedSize",
 			askedSize: math.MaxInt32,
 			dataSize:  4096,
 		},
 	} {
 		b.Run(c.label, generateSafeReadBytesBenchmark(c.askedSize, c.dataSize))
+	}
+}
+
+// readRequestCountingTransport wraps a TTransport and records how many bytes
+// the reads from it ask for, whether or not they are there to be read.
+type readRequestCountingTransport struct {
+	TTransport
+	requested int
+}
+
+func (t *readRequestCountingTransport) Read(buf []byte) (int, error) {
+	t.requested += len(buf)
+	return t.TTransport.Read(buf)
+}
+
+// A message header without a version starts with the name, as a length and
+// the bytes. The length is held to the maximum message size like that of any
+// other string, before any of the name is read.
+func TestBinaryProtocolNonStrictMessageNameSize(t *testing.T) {
+	const maxSize = 1024
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		label string
+		size  int
+	}{
+		{label: "at-limit", size: maxSize},
+		{label: "over-limit", size: 2 * maxSize},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			name := strings.Repeat("n", tc.size)
+			buf := NewTMemoryBuffer()
+			writer := NewTBinaryProtocolConf(buf, &TConfiguration{
+				TBinaryStrictWrite: BoolPtr(false),
+			})
+			if err := writer.WriteMessageBegin(ctx, name, CALL, 1); err != nil {
+				t.Fatal(err)
+			}
+
+			trans := &readRequestCountingTransport{TTransport: buf}
+			reader := NewTBinaryProtocolConf(trans, &TConfiguration{
+				MaxMessageSize: maxSize,
+			})
+			readName, typeID, seqID, err := reader.ReadMessageBegin(ctx)
+			if tc.size <= maxSize {
+				if err != nil {
+					t.Fatalf("ReadMessageBegin with a name of %d bytes failed: %v", tc.size, err)
+				}
+				if readName != name || typeID != CALL || seqID != 1 {
+					t.Fatalf(
+						"ReadMessageBegin returned a name of %d bytes, type %v, sequence id %d, want %d bytes, %v, 1",
+						len(readName), typeID, seqID, tc.size, CALL,
+					)
+				}
+				return
+			}
+			if trans.requested != 4 {
+				t.Errorf(
+					"ReadMessageBegin asked the transport for %d bytes, want 4: the name's length and none of the name",
+					trans.requested,
+				)
+			}
+			requireSizeLimit(t, err, "ReadMessageBegin")
+		})
 	}
 }

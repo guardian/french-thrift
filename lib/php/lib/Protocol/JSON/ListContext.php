@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,35 +21,35 @@
  * @package thrift.protocol
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Protocol\JSON;
 
 use Thrift\Protocol\TJSONProtocol;
 
 class ListContext extends BaseContext
 {
-    private $first_ = true;
-    private $p_;
+    private bool $first = true;
 
-    public function __construct($p)
+    public function __construct(private TJSONProtocol $protocol)
     {
-        $this->p_ = $p;
     }
 
-    public function write()
+    public function write(): void
     {
-        if ($this->first_) {
-            $this->first_ = false;
+        if ($this->first) {
+            $this->first = false;
         } else {
-            $this->p_->getTransport()->write(TJSONProtocol::COMMA);
+            $this->protocol->getTransport()->write(TJSONProtocol::COMMA);
         }
     }
 
-    public function read()
+    public function read(): void
     {
-        if ($this->first_) {
-            $this->first_ = false;
+        if ($this->first) {
+            $this->first = false;
         } else {
-            $this->p_->readJSONSyntaxChar(TJSONProtocol::COMMA);
+            $this->protocol->readJSONSyntaxChar(TJSONProtocol::COMMA);
         }
     }
 }

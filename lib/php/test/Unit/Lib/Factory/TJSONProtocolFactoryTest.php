@@ -19,9 +19,12 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Factory;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionProperty;
 use Thrift\Factory\TJSONProtocolFactory;
 use Thrift\Protocol\TJSONProtocol;
 use Thrift\Transport\TTransport;
@@ -33,16 +36,12 @@ class TJSONProtocolFactoryTest extends TestCase
      */
     public function testGetProtocol()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $factory = new TJSONProtocolFactory();
         $protocol = $factory->getProtocol($transport);
 
         $this->assertInstanceOf(TJSONProtocol::class, $protocol);
 
-        $ref = new \ReflectionClass($protocol);
-        $refTrans = $ref->getProperty('trans_');
-        $refTrans->setAccessible(true);
-
-        $this->assertSame($transport, $refTrans->getValue($protocol));
+        $this->assertSame($transport, (new ReflectionProperty($protocol, 'trans'))->getValue($protocol));
     }
 }

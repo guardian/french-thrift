@@ -67,6 +67,11 @@ public:
     writeBuffer(PyBytes_AS_STRING(value), len);
   }
 
+  void writeString(const char* value, int32_t len) {
+    writeI32(len);
+    writeBuffer(value, len);
+  }
+
   bool writeListBegin(PyObject* value, const SetListTypeArgs& parsedargs, int32_t len) {
     writeByte(parsedargs.element_type);
     writeI32(len);
@@ -86,6 +91,10 @@ public:
     writeByte(static_cast<uint8_t>(parsedspec.type));
     writeI16(parsedspec.tag);
     return encodeValue(value, parsedspec.type, parsedspec.typeargs);
+  }
+
+  void writeUuid(const char* value) {
+    writeBuffer(value, 16);
   }
 
   void writeFieldStop() { writeByte(static_cast<uint8_t>(T_STOP)); }
@@ -159,6 +168,13 @@ public:
     return len;
   }
 
+  int32_t readUuid(char** buf) {
+    if (!readBytes(buf, 16)) {
+      return -1;
+    }
+    return 16;
+  }
+
   int32_t readListBegin(TType& etype) {
     int32_t len;
     uint8_t b = 0;
@@ -206,6 +222,7 @@ public:
     }
     SKIPBYTES(len);
   }
+  bool skipUuid() { SKIPBYTES(16); }
 #undef SKIPBYTES
 
 private:

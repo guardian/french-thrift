@@ -19,9 +19,12 @@
  * under the License.
  */
 
+declare(strict_types=1);
+
 namespace Test\Thrift\Unit\Lib\Factory;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionProperty;
 use Thrift\Factory\TFramedTransportFactory;
 use Thrift\Transport\TFramedTransport;
 use Thrift\Transport\TTransport;
@@ -33,22 +36,44 @@ class TFramedTransportFactoryTest extends TestCase
      */
     public function testGetTransport()
     {
-        $transport = $this->createMock(TTransport::class);
+        $transport = $this->createStub(TTransport::class);
         $factory = new TFramedTransportFactory();
         $framedTransport = $factory->getTransport($transport);
 
         $this->assertInstanceOf(TFramedTransport::class, $framedTransport);
 
-        $ref = new \ReflectionClass($framedTransport);
-        $refRead = $ref->getProperty('read_');
-        $refRead->setAccessible(true);
-        $refWrite = $ref->getProperty('write_');
-        $refWrite->setAccessible(true);
-        $refTrans = $ref->getProperty('transport_');
-        $refTrans->setAccessible(true);
+        $this->assertTrue((new ReflectionProperty($framedTransport, 'read'))->getValue($framedTransport));
+        $this->assertTrue((new ReflectionProperty($framedTransport, 'write'))->getValue($framedTransport));
+        $this->assertSame(
+            $transport,
+            (new ReflectionProperty($framedTransport, 'transport'))->getValue($framedTransport)
+        );
+    }
 
-        $this->assertTrue($refRead->getValue($framedTransport));
-        $this->assertTrue($refWrite->getValue($framedTransport));
-        $this->assertSame($transport, $refTrans->getValue($framedTransport));
+    /**
+     * @return void
+     */
+    public function testGetTransportWrapsInnerTransport()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TFramedTransportFactory();
+        $framedTransport = $factory->getTransport($transport);
+
+        $this->assertNotSame($transport, $framedTransport);
+        $this->assertInstanceOf(TFramedTransport::class, $framedTransport);
+    }
+
+    /**
+     * @return void
+     */
+    public function testGetTransportCreatesNewInstancePerCall()
+    {
+        $transport = $this->createStub(TTransport::class);
+        $factory = new TFramedTransportFactory();
+
+        $result1 = $factory->getTransport($transport);
+        $result2 = $factory->getTransport($transport);
+
+        $this->assertNotSame($result1, $result2);
     }
 }

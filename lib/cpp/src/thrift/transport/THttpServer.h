@@ -34,6 +34,8 @@ public:
 
   void flush() override;
 
+  void onewayComplete() override;
+
 protected:
   virtual std::string getHeader(uint32_t len);
   void readHeaders();
@@ -55,7 +57,7 @@ public:
    * Wraps the transport into a buffered one.
    */
   std::shared_ptr<TTransport> getTransport(std::shared_ptr<TTransport> trans) override {
-    return std::shared_ptr<TTransport>(new THttpServer(trans));
+    return std::shared_ptr<TTransport>(new THttpServer(trans, trans->getConfiguration()));
   }
 };
 }

@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -20,6 +21,8 @@
  * @package thrift
  */
 
+declare(strict_types=1);
+
 namespace Thrift\Type;
 
 /**
@@ -27,8 +30,8 @@ namespace Thrift\Type;
  */
 class TMessageType
 {
-    const CALL  = 1;
-    const REPLY = 2;
-    const EXCEPTION = 3;
-    const ONEWAY = 4;
+    public const CALL  = 1;
+    public const REPLY = 2;
+    public const EXCEPTION = 3;
+    public const ONEWAY = 4;
 }

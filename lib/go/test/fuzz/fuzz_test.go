@@ -1,3 +1,4 @@
+//go:build gofuzz
 // +build gofuzz
 
 /*
@@ -26,5 +27,5 @@ import (
 )
 
 func TestFuzz(t *testing.T) {
-	Fuzz([]byte{1, 2, 3})
+	FuzzTutorial([]byte{1, 2, 3})
 }
