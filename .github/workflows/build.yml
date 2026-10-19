@@ -405,7 +405,7 @@ jobs:
     needs: compiler
     runs-on: ubuntu-22.04
     env:
-      TOOLCHAIN_VERSION: 1.65.0
+      TOOLCHAIN_VERSION: stable
     steps:
       - uses: actions/checkout@v4
 
