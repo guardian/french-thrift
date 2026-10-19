@@ -706,6 +706,7 @@ string t_go_generator::go_imports_begin(bool consts) {
   }
   system_packages.push_back("errors");
   system_packages.push_back("fmt");
+  system_packages.push_back("iter");
   system_packages.push_back("log/slog");
   system_packages.push_back("time");
   // For the thrift import, always do rename import to make sure it's called thrift.
@@ -731,6 +732,7 @@ string t_go_generator::go_imports_end() {
       "var _ = context.Background\n"
       "var _ = errors.New\n"
       "var _ = fmt.Printf\n"
+      "var _ = iter.Pull[int]\n"
       "var _ = slog.Log\n"
       "var _ = time.Now\n"
       "var _ = thrift.ZERO\n"
@@ -784,11 +786,13 @@ void t_go_generator::generate_typedef(t_typedef* ttypedef) {
  * @param tenum The enumeration
  */
 void t_go_generator::generate_enum(t_enum* tenum) {
-  std::ostringstream to_string_mapping, from_string_mapping;
+  std::ostringstream to_string_mapping, from_string_mapping, known_values_mapping;
   std::string tenum_name(publicize(tenum->get_name()));
   generate_go_docstring(f_types_, tenum);
   generate_deprecation_comment(f_types_, tenum->annotations_);
-  f_types_ << "type " << tenum_name << " int64" << '\n' << "const (" << '\n';
+  f_types_ << "type " << tenum_name << " int64" << '\n' << '\n' << "const (" << '\n';
+
+  known_values_mapping << indent() << "var known" << tenum_name << "Values" << " = []" << tenum_name << "{" << '\n';
 
   to_string_mapping << indent() << "func (p " << tenum_name << ") String() string {" << '\n';
   indent_up();
@@ -815,6 +819,7 @@ void t_go_generator::generate_enum(t_enum* tenum) {
     generate_deprecation_comment(f_types_, (*c_iter)->annotations_);
     f_types_ << indent() << tenum_name << "_" << iter_name << ' ' << tenum_name << " = "
              << value << '\n';
+    known_values_mapping << indent() << tenum_name << "_" << iter_name << "," << '\n';
     // Dictionaries to/from string names of enums
     to_string_mapping << indent() << "case " << tenum_name << "_" << iter_name << ": return \""
                       << iter_std_name << "\"" << '\n';
@@ -840,8 +845,29 @@ void t_go_generator::generate_enum(t_enum* tenum) {
   indent_down();
   from_string_mapping << indent() << "}" << '\n';
 
-  f_types_ << ")" << '\n' << '\n' << to_string_mapping.str() << '\n' << from_string_mapping.str()
-           << '\n' << '\n';
+  known_values_mapping << indent() << "}" << '\n' << '\n';
+  known_values_mapping << indent() << "func " << tenum_name << "Values() iter.Seq[" << tenum_name << "] {" << '\n';
+  indent_up();
+  known_values_mapping << indent() << "return func(yield func(" << tenum_name << ") bool) {" << '\n';
+  indent_up();
+  known_values_mapping << indent() << "for _, v := range known" << tenum_name << "Values {" << '\n';
+  indent_up();
+  known_values_mapping << indent() << "if !yield(v) {" << '\n';
+  indent_up();
+  known_values_mapping << indent() << "return" << '\n';
+  indent_down();
+  known_values_mapping << indent() << "}" << '\n';
+  indent_down();
+  known_values_mapping << indent() << "}" << '\n';
+  indent_down();
+  known_values_mapping << indent() << "}" << '\n';
+  indent_down();
+  known_values_mapping << indent() << "}" << '\n';
+
+  f_types_ << ")" << '\n' << '\n'
+           << known_values_mapping.str() << '\n'
+           << to_string_mapping.str() << '\n'
+           << from_string_mapping.str() << '\n' << '\n';
 
   // Generate a convenience function that converts an instance of an enum
   // (which may be a constant) into a pointer to an instance of that enum
@@ -1701,7 +1727,7 @@ void t_go_generator::generate_go_struct_reader(ostream& out,
       out << indent() << "if !isset" << field_name << "{" << '\n';
       indent_up();
       out << indent() << "return thrift.NewTProtocolExceptionWithType(thrift.INVALID_DATA, "
-                         "fmt.Errorf(\"Required field " << field_name << " is not set\"));" << '\n';
+                      << "fmt.Errorf(\"Required field " << field_name << " is not set\"))" << '\n';
       indent_down();
       out << indent() << "}" << '\n';
     }
@@ -1748,7 +1774,8 @@ void t_go_generator::generate_go_struct_writer(ostream& out,
     std::string tstruct_name(publicize(tstruct->get_name()));
     out << indent() << "if c := p.CountSetFields" << tstruct_name << "(); c != 1 {" << '\n';
     indent_up();
-    out << indent() << "return fmt.Errorf(\"%T write union: exactly one field must be set (%d set)\", p, c)" << '\n';
+    out << indent() << "return thrift.NewTProtocolExceptionWithType(thrift.INVALID_DATA, "
+                    << "fmt.Errorf(\"%T write union: exactly one field must be set (%d set)\", p, c))" << '\n';
     indent_down();
     out << indent() << "}" << '\n';
   }
@@ -2988,7 +3015,7 @@ void t_go_generator::generate_process_function(t_service* tservice, t_function* 
   string write_err;
   if (!tfunction->is_oneway()) {
     write_err = tmp("_write_err");
-    f_types_ << indent() << "var " << write_err << " error" << '\n';
+    f_types_ << indent() << "var " << write_err << " thrift.TException" << '\n';
   }
   f_types_ << indent() << "args := " << argsname << "{}" << '\n';
   f_types_ << indent() << "if err2 := args." << read_method_name_ << "(ctx, iprot); err2 != nil {" << '\n';
@@ -3120,14 +3147,24 @@ void t_go_generator::generate_process_function(t_service* tservice, t_function* 
     // Avoid writing the error to the wire if it's ErrAbandonRequest
     f_types_ << indent() << "if errors.Is(err2, thrift.ErrAbandonRequest) {" << '\n';
     indent_up();
-    f_types_ << indent() << "return false, thrift.WrapTException(err2)" << '\n';
+    f_types_ << indent() << "return false, &thrift.ProcessorError{" << '\n';
+    indent_up();
+    f_types_ << indent() << "WriteError:    thrift.WrapTException(err2)," << '\n';
+    f_types_ << indent() << "EndpointError: err," << '\n';
+    indent_down();
+    f_types_ << indent() << "}" << '\n';
     indent_down();
     f_types_ << indent() << "}" << '\n';
     f_types_ << indent() << "if errors.Is(err2, context.Canceled) {" << '\n';
     indent_up();
-    f_types_ << indent() << "if err := context.Cause(ctx); errors.Is(err, thrift.ErrAbandonRequest) {" << '\n';
+    f_types_ << indent() << "if err3 := context.Cause(ctx); errors.Is(err3, thrift.ErrAbandonRequest) {" << '\n';
     indent_up();
-    f_types_ << indent() << "return false, thrift.WrapTException(err)" << '\n';
+    f_types_ << indent() << "return false, &thrift.ProcessorError{" << '\n';
+    indent_up();
+    f_types_ << indent() << "WriteError:    thrift.WrapTException(err3)," << '\n';
+    f_types_ << indent() << "EndpointError: err," << '\n';
+    indent_down();
+    f_types_ << indent() << "}" << '\n';
     indent_down();
     f_types_ << indent() << "}" << '\n';
     indent_down();
@@ -3168,7 +3205,12 @@ void t_go_generator::generate_process_function(t_service* tservice, t_function* 
 
     f_types_ << indent() << "if " << write_err << " != nil {" << '\n';
     indent_up();
-    f_types_ << indent() << "return false, thrift.WrapTException(" << write_err << ")" << '\n';
+    f_types_ << indent() << "return false, &thrift.ProcessorError{" << '\n';
+    indent_up();
+    f_types_ << indent() << "WriteError:    " << write_err << "," << '\n';
+    f_types_ << indent() << "EndpointError: err," << '\n';
+    indent_down();
+    f_types_ << indent() << "}" << '\n';
     indent_down();
     f_types_ << indent() << "}" << '\n';
 
@@ -3230,7 +3272,12 @@ void t_go_generator::generate_process_function(t_service* tservice, t_function* 
 
     f_types_ << indent() << "if " << write_err << " != nil {" << '\n';
     indent_up();
-    f_types_ << indent() << "return false, thrift.WrapTException(" << write_err << ")" << '\n';
+    f_types_ << indent() << "return false, &thrift.ProcessorError{" << '\n';
+    indent_up();
+    f_types_ << indent() << "WriteError:    " << write_err << "," << '\n';
+    f_types_ << indent() << "EndpointError: err," << '\n';
+    indent_down();
+    f_types_ << indent() << "}" << '\n';
     indent_down();
     f_types_ << indent() << "}" << '\n';
 
@@ -3699,10 +3746,9 @@ void t_go_generator::generate_serialize_container(ostream& out,
     indent_down();
     out << indent() << "}(" << wrapped_prefix << "[i], " << wrapped_prefix << "[j]) {" << '\n';
     indent_up();
-    out << indent()
-        << "return thrift.PrependError(\"\", fmt.Errorf(\"%T error writing set field: slice is not "
-           "unique\", "
-        << wrapped_prefix << "))" << '\n';
+    out << indent() << "return thrift.NewTProtocolExceptionWithType(thrift.INVALID_DATA, "
+                    << "fmt.Errorf(\"%T error writing set field: slice is not " "unique\", "
+                    << wrapped_prefix << "))" << '\n';
     indent_down();
     out << indent() << "}" << '\n';
     indent_down();

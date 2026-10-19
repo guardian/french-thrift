@@ -695,24 +695,31 @@
     },
     "client": {
       "timeout": 5,
-      "transports": [
-        "buffered",
-        "framed",
-        "http"
-      ],
-      "sockets": [
-        "ip"
-      ],
-      "protocols": [
-        "binary",
-        "compact",
-        "json"
-      ],
       "command": [
         "lua",
         "test_basic_client.lua"
       ]
     },
+    "server": {
+      "delay": 5,
+      "command": [
+        "lua",
+        "test_basic_server.lua"
+      ]
+    },
+    "transports": [
+      "buffered",
+      "framed",
+      "http"
+    ],
+    "sockets": [
+      "ip"
+    ],
+    "protocols": [
+      "binary",
+      "compact",
+      "json"
+    ],
     "workdir": "lua"
   },
   {
@@ -790,14 +797,14 @@
       "workdir": "swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug",
       "protocols": ["binary", "compact"],
       "transports": ["buffered", "framed"],
-      "sockets": ["ip"]
+      "sockets": ["ip", "domain"]
     },
     "client": {
       "command": ["TestClient"],
       "workdir": "swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug",
       "protocols": ["binary", "compact"],
       "transports": ["buffered", "framed"],
-      "sockets": ["ip"]
+      "sockets": ["ip", "domain"]
     }
   }
 ]
