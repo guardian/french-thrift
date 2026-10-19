@@ -17,30 +17,32 @@
 # under the License.
 #
 
-import sys
+name: Release Rust Packages
 
-if sys.version_info[0] == 2:
+on:
+  push:
+    tags:
+      - "*"
+  pull_request:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/release_rust.yml"
+  workflow_dispatch:
 
-    from cStringIO import StringIO as BufferIO
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dryrun
+        working-directory: lib/rs
+        run: cargo publish --dry-run
 
-    def binary_to_str(bin_val):
-        return bin_val
-
-    def str_to_binary(str_val):
-        return str_val
-
-    def byte_index(bytes_val, i):
-        return ord(bytes_val[i])
-
-else:
-
-    from io import BytesIO as BufferIO  # noqa
-
-    def binary_to_str(bin_val):
-        return bin_val.decode('utf8')
-
-    def str_to_binary(str_val):
-        return bytes(str_val, 'utf8')
-
-    def byte_index(bytes_val, i):
-        return bytes_val[i]
+      - name: Publish
+        working-directory: lib/rs
+        # Only publish if it's a tag and the tag is not a pre-release
+        if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-') }}
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

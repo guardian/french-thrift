@@ -135,11 +135,11 @@ If you do not want to use the same scripts Travis CI does, you can do it manuall
 
 Build the image:
 
-Linux/Mac:
+Linux:
 
     thrift$ docker build --build-arg uid=$(id -u) --build-arg gid=$(id -g) -t thrift build/docker/ubuntu-jammy
 
-Windows:
+Windows/Mac:
 
     thrift$ docker build -t thrift build/docker/ubuntu-jammy
 
@@ -188,7 +188,7 @@ Last updated: March 5, 2024
 | java      | 17            | 17            |       |
 | js        | Node.js 16.20.2, npm 8.19.4 | Node.js 16.20.2, npm 8.19.4 |     |
 | lua       | 5.2.4         | 5.2.4         | Lua 5.3: see THRIFT-4386 |
-| netstd    | 8.0.200       | 8.0.200       |       |
+| netstd    | 9.0           | 9.0           |       |
 | nodejs    | 16.20.2       | 16.20.2       |       |
 | ocaml     | 4.08.1        | 4.13.1        |       |
 | perl      | 5.30.0        | 5.34.0        |       |
@@ -196,6 +196,6 @@ Last updated: March 5, 2024
 | python2   | 2.7.18        |               |       |
 | python3   | 3.8.10        | 3.10.12       |       |
 | ruby      | 2.7.0p0       | 3.0.2p107     |       |
-| rust      | 1.65.0        | 1.65.0        |       |
+| rust      | 1.83.0        | 1.83.0        |       |
 | smalltalk |               |               | Not in CI |
 | swift     | 5.7           | 5.7           |       |
