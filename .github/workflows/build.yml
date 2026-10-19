@@ -384,14 +384,21 @@ jobs:
       - name: Run make precross for swift
         run: make -C test/swift precross
 
+      - name: Stage swift precross binaries
+        run: |
+          bin_dir="$(cd test/swift/CrossTests && swift build --show-bin-path)"
+          echo "Swift binary directory: $bin_dir"
+          mkdir -p swift-precross
+          cp -L "$bin_dir/TestServer" "$bin_dir/TestClient" swift-precross/
+
       - name: Upload swift precross artifacts
         uses: actions/upload-artifact@v4
         with:
           name: swift-precross
           if-no-files-found: error
           path: |
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestServer
-            test/swift/CrossTests/.build/x86_64-unknown-linux-gnu/debug/TestClient
+            swift-precross/TestServer
+            swift-precross/TestClient
           retention-days: 3
 
   lib-rust:
