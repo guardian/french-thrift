@@ -250,7 +250,7 @@ pub trait TInputProtocol {
             }
             u => Err(crate::Error::Protocol(ProtocolError {
                 kind: ProtocolErrorKind::Unknown,
-                message: format!("cannot skip field type {:?}", &u),
+                message: format!("cannot skip field type {:?}", u),
             })),
         }
     }

@@ -339,7 +339,7 @@ where
                 kind: ProtocolErrorKind::Unknown,
                 message: format!(
                     "cannot write identifier {:?} without sequence number",
-                    &identifier
+                    identifier
                 ),
             }));
         }
