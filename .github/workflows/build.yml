@@ -406,6 +406,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TOOLCHAIN_VERSION: stable
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
 
